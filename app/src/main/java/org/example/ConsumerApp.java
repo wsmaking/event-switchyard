@@ -6,6 +6,7 @@ import org.HdrHistogram.Histogram;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.slf4j.Logger;
@@ -22,7 +23,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 public class ConsumerApp {
 
@@ -52,102 +52,157 @@ public class ConsumerApp {
         props.put(ConsumerConfig.CLIENT_ID_CONFIG, "consumer-" + UUID.randomUUID());
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
-        ConsumerRebalanceListener rebalanceListener = new ConsumerRebalanceListener() {
-            private final ObjectMapper mapper = new ObjectMapper();
-
-            @Override
-            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                try {
-                    var list = partitions.stream()
-                            .map(tp -> Map.of("topic", tp.topic(), "partition", tp.partition()))
-                            .collect(Collectors.toList());
-                    String json = mapper.writeValueAsString(list);
-                    logger.info("event=rebalance phase=revoked partitions={}", json);
-                } catch (Exception e) {
-                    logger.error("パーティション情報の変換に失敗: {}", e.getMessage());
-                }
-            }
-
-            @Override
-            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                try {
-                    var list = partitions.stream()
-                            .map(tp -> Map.of("topic", tp.topic(), "partition", tp.partition()))
-                            .collect(Collectors.toList());
-                    String json = mapper.writeValueAsString(list);
-                    logger.info("event=rebalance phase=assigned partitions={}", json);
-                } catch (Exception e) {
-                    logger.warn("JSON 変換失敗", e);
-                }
-            }
-        };
-
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(Collections.singletonList(topic), rebalanceListener);
+            // シャットダウンフック（OK）
+            final var closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                closed.set(true);
+                consumer.wakeup();
+            }));
 
-            // 初期パーティション割り当て待ち
+            // rebalance（OK）
+            ConsumerRebalanceListener listener = new ConsumerRebalanceListener() {
+                @Override public void onPartitionsRevoked(Collection<TopicPartition> parts) {
+                    logger.info("event=rebalance phase=revoked parts={}", parts);
+                    try { consumer.commitSync(); } catch (Exception e) { logger.warn("commitSync on revoke failed", e); }
+                }
+                @Override public void onPartitionsAssigned(Collection<TopicPartition> parts) {
+                    boolean skipBacklog = Boolean.parseBoolean(System.getenv().getOrDefault("SKIP_BACKLOG","true"));
+                    if (skipBacklog) { consumer.pause(parts); consumer.seekToEnd(parts); consumer.resume(parts); }
+                    else { consumer.seekToBeginning(parts); }
+                    logger.info("assigned parts={}", parts);
+                }
+            };
+
+            consumer.subscribe(Collections.singletonList(topic), listener);
+
+            // 初期割り当て待ち（OK）
             consumer.poll(Duration.ofMillis(0));
             while (consumer.assignment().isEmpty()) {
                 Thread.sleep(100);
                 consumer.poll(Duration.ofMillis(0));
             }
-            // 最初から読む
-            consumer.seekToBeginning(consumer.assignment());
 
-            // TPS ロガー（毎秒）
             var tpsTask = scheduler.scheduleAtFixedRate(() -> {
                 long tps = messageCount.getAndSet(0);
                 logger.info("1秒間のメッセージ受信数: {} 件", tps);
             }, 1, 1, TimeUnit.SECONDS);
 
+            // ★ lagログ用のタイムスタンプ
+            long lastLagLogMs = System.currentTimeMillis();
+
+            OffsetCommitCallback onCommit = (offsets, ex) -> {
+                if (ex != null) logger.warn("commitAsync failed: {}", ex.toString());
+            };
+
             long received = 0;
             long firstNs = 0, lastNs = 0;
             long idleDeadline = System.currentTimeMillis() + idleMs;
 
-            // ====== メインループ：件数達成 or アイドルで終了 ======
-            while (true) {
-                var records = consumer.poll(Duration.ofMillis(100));
+            // ★ 追加: 定期コミット用タイマ
+            long lastCommitMs = System.currentTimeMillis();
+            long commitIntervalMs = Long.parseLong(System.getenv().getOrDefault("COMMIT_INTERVAL_MS", "1000"));
 
-                if (records.isEmpty()) {
-                    if (System.currentTimeMillis() >= idleDeadline) break; // アイドル終了
-                    continue;
-                }
-                idleDeadline = System.currentTimeMillis() + idleMs;
+            // ====== メインループ ======
+            try { // ★ WakeupException を吸収して正常クローズへ
+                while (!closed.get()) { // ★ closed を見る
+                    var records = consumer.poll(Duration.ofMillis(100));
 
-                for (var rec : records) {
-                    if (firstNs == 0) firstNs = System.nanoTime();
-                    lastNs = System.nanoTime();
-
-                    received++;
-                    messageCount.incrementAndGet();
-
-                    try {
-                        JsonNode j = MAPPER.readTree(rec.value()); // {"...","ts_ns":<long>}
-                        if (j.has("ts_ns")) {
-                            long tsSendNs = j.get("ts_ns").asLong();
-                            long nowNs = System.currentTimeMillis() * 1_000_000L;
-                            long latencyUs = Math.max(0, (nowNs - tsSendNs) / 1_000L);
-                            if (latencyUs <= HIST_US.getHighestTrackableValue()) {
-                                HIST_US.recordValue(latencyUs);
-                            } else {
-                                logger.debug("skip latency={}us over histogram range", latencyUs);
+                    if (records.isEmpty()) {
+                        long nowMs = System.currentTimeMillis();
+                        if (nowMs - lastLagLogMs >= 1000) {
+                            try {
+                                var asn = consumer.assignment();
+                                if (!asn.isEmpty()) {
+                                    var end = consumer.endOffsets(asn);
+                                    long totalLag = 0;
+                                    for (var tp : asn) {
+                                        long pos = consumer.position(tp);
+                                        totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                                    }
+                                    logger.info("consumer_lag_total={}", totalLag);
+                                }
+                            } catch (Exception e) {
+                                logger.debug("lag calc skipped: {}", e.toString());
                             }
-                        } else {
-                            logger.debug("ts_ns not found in payload");
+                            lastLagLogMs = nowMs;
                         }
-                    } catch (Exception e) {
-                        logger.warn("payload parse failed: {}", e.toString());
+
+                        if (nowMs - lastCommitMs >= commitIntervalMs) {
+                            consumer.commitAsync(onCommit);
+                            lastCommitMs = nowMs;
+                        }
+                        if (nowMs >= idleDeadline) break;
+                        continue;
+                    }
+                    idleDeadline = System.currentTimeMillis() + idleMs;
+
+                    for (var rec : records) {
+                        if (firstNs == 0) firstNs = System.nanoTime();
+                        lastNs = System.nanoTime();
+
+                        received++;
+                        messageCount.incrementAndGet();
+
+                        try {
+                            JsonNode j = MAPPER.readTree(rec.value());
+                            if (j.has("ts_ns")) {
+                                long tsSendNs = j.get("ts_ns").asLong();
+                                long nowNs = System.currentTimeMillis() * 1_000_000L;
+                                long latencyUs = Math.max(0, (nowNs - tsSendNs) / 1_000L);
+                                if (latencyUs <= HIST_US.getHighestTrackableValue()) {
+                                    HIST_US.recordValue(latencyUs);
+                                } else {
+                                    logger.debug("skip latency={}us over histogram range", latencyUs);
+                                }
+                            } else {
+                                logger.debug("ts_ns not found in payload");
+                            }
+                        } catch (Exception e) {
+                            logger.warn("payload parse failed: {}", e.toString());
+                        }
+                    }
+
+                    // ★ 定期コミット（軽量）
+                    if (System.currentTimeMillis() - lastCommitMs >= commitIntervalMs) {
+                        consumer.commitAsync();
+                        lastCommitMs = System.currentTimeMillis();
+                    }
+
+                    if (expected > 0 && received >= expected) break;
+
+                    // ★ 1秒おきにラグを計算（同一スレッドで安全に）
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastLagLogMs >= 1000) {
+                        try {
+                            var asn = consumer.assignment();
+                            if (!asn.isEmpty()) {
+                                var end = consumer.endOffsets(asn);
+                                long totalLag = 0;
+                                for (var tp : asn) {
+                                    long pos = consumer.position(tp);
+                                    totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                                }
+                                logger.info("consumer_lag_total={}", totalLag);
+                            }
+                        } catch (Exception e) {
+                            logger.debug("lag calc skipped: {}", e.toString());
+                        }
+                        lastLagLogMs = nowMs;
                     }
                 }
-
-                if (expected > 0 && received >= expected) {
-                    break; // 目標件数に達したら終了
-                }
+            } catch (org.apache.kafka.common.errors.WakeupException we) {
+                // ★ shutdown 用なので握りつぶし
+                logger.info("Wakeup received -> graceful shutdown");
+            } finally {
+                // ★ 最終コミット（同期）
+                try { consumer.commitSync(); } catch (Exception e) { logger.warn("final commit failed", e); }
             }
 
+            // ====== 集計 & 永続化 ======
             tpsTask.cancel(false);
 
             double elapsedSec = (lastNs > firstNs) ? (lastNs - firstNs) / 1e9 : 0.0;
@@ -162,7 +217,6 @@ public class ConsumerApp {
             long p99 = HIST_US.getValueAtPercentile(99.0);
             logger.info("latency_us p50={}, p95={}, p99={}", p50, p95, p99);
 
-            // ====== 結果永続化 ======
             String runId     = System.getenv().getOrDefault("RUN_ID", String.valueOf(System.currentTimeMillis()));
             String acks      = System.getenv().getOrDefault("ACKS", "all");
             String lingerMs  = System.getenv().getOrDefault("LINGER_MS", "0");
@@ -186,6 +240,7 @@ public class ConsumerApp {
             result.put("received", received);
             result.put("elapsed_sec", elapsedSec);
             result.put("throughput_mps", mps);
+            result.put("commit_interval_ms", commitIntervalMs);
 
             persistJsonLine(result, runId);
 
@@ -196,8 +251,6 @@ public class ConsumerApp {
             );
         }
 
-        // 最後のTPSログをキャッチしてから終了
-        Thread.sleep(1100);
         scheduler.shutdown();
     }
 

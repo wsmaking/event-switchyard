@@ -16,7 +16,7 @@ ARCHIVE_DIR="$RESULTS_DIR/archive"
 
 # ★ ランごと固有トピックにするためのプレフィックス
 TOPIC_PREFIX="${TOPIC_PREFIX:-events}"
-PARTITIONS="${PARTITIONS:-1}"
+PARTITIONS="${PARTITIONS:-3}"
 REPLICATION="${REPLICATION:-1}"
 BOOTSTRAP="${BOOTSTRAP_SERVERS:-}"   # 例: "kafka:9092,kafka2:9093,kafka3:9094"
 
@@ -33,6 +33,8 @@ Usage: ./bench.sh [--acks all|1] [--linger N] [--batch N] [--repeat N]
 USAGE
   exit 1
 }
+
+docker compose down --remove-orphans >/dev/null 2>&1 || true
 
 # ========= 引数パース =========
 while [[ $# -gt 0 ]]; do
@@ -52,6 +54,20 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1"; usage ;;
   esac
 done
+
+# ========= REPLICATION の安全ガード（ここに追加） =========
+# ブローカ数を推定（BOOTSTRAPが "host1,host2,host3" なら 3）
+if [[ -n "$BOOTSTRAP" ]]; then
+  IFS=',' read -r -a __bs <<< "$BOOTSTRAP"
+  BROKERS="${BROKERS:-${#__bs[@]}}"
+else
+  BROKERS="${BROKERS:-1}"   # composeでkafkaが1台なら1
+fi
+
+if (( REPLICATION > BROKERS )); then
+  echo "WARN: replication=$REPLICATION > brokers=$BROKERS -> ${BROKERS} に下げます"
+  REPLICATION="$BROKERS"
+fi
 
 # ========= 事前チェック =========
 command -v jq      >/dev/null 2>&1 || { echo "ERROR: jq が必要です。brew install jq 等で導入してください"; exit 1; }
@@ -106,17 +122,28 @@ run_one() {
   local topic="${TOPIC_PREFIX}-${run_id}"
   echo "=== RUN $run_id (topic=${topic}) ==="
 
+  # REPLICATION ガード（関数内）
+  local repl="$REPLICATION"
+  local brokers="$BROKERS"
+  if [[ -n "$BOOTSTRAP" ]]; then
+    IFS=',' read -r -a __bs <<< "$BOOTSTRAP"
+    brokers="${BROKERS:-${#__bs[@]}}"
+  fi
+  if (( repl > brokers )); then repl="$brokers"; fi
+
   # ラン専用トピックを明示作成（冪等）
   docker compose run --rm -T \
     -e TOPIC_NAME="${topic}" \
     -e PARTITIONS="${PARTITIONS}" \
-    -e REPLICATION="${REPLICATION}" \
+    -e REPLICATION="${repl}" \
     ${BOOTSTRAP:+-e BOOTSTRAP_SERVERS="$BOOTSTRAP"} \
     topic-init >/dev/null
 
   # Producer（デタッチ）
   local pn="esy-prod-$run_id"
   docker compose run -d --name "$pn" -T \
+    -e PAYLOAD_BYTES="${PAYLOAD_BYTES:-200}" \
+    -e WARMUP_MSGS="${WARMUP_MSGS:-0}" \
     -e RUN_ID="$run_id" \
     -e TOPIC_NAME="$topic" \
     -e ACKS="$a" -e LINGER_MS="$l" -e BATCH_SIZE="$b" \
@@ -133,6 +160,8 @@ run_one() {
     -e ACKS="$a" -e LINGER_MS="$l" -e BATCH_SIZE="$b" \
     -e EXPECTED_MSG="$NUM_MSG" \
     -e IDLE_MS="1500" \
+    -e COMMIT_INTERVAL_MS="${COMMIT_INTERVAL_MS:-1000}" \
+    -e SKIP_BACKLOG="${SKIP_BACKLOG:-false}" \
     ${BOOTSTRAP:+-e BOOTSTRAP_SERVERS="$BOOTSTRAP"} \
     consumer
 
@@ -140,6 +169,9 @@ run_one() {
   docker wait "$pn" >/dev/null 2>&1 || true
   docker rm -f "$pn"   >/dev/null 2>&1 || true
   sleep 1
+
+  docker compose exec -T kafka kafka-topics --bootstrap-server "${BOOTSTRAP:-kafka:9092}" \
+  --delete --topic "$topic" >/dev/null 2>&1 || true
 }
 
 # ========= 全組み合わせ実行 =========
@@ -163,8 +195,8 @@ if (( ${#jsons[@]} == 0 )); then
 fi
 
 {
-  echo "run_id,acks,linger_ms,batch_size,p50_us,p95_us,p99_us,received"
-  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.p50_us,.p95_us,.p99_us,.received] | @csv' "${jsons[@]}" | sort
+  echo "run_id,acks,linger_ms,batch_size,p50_us,p95_us,p99_us,received,throughput_mps"
+  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.p50_us,.p95_us,.p99_us,.received,.throughput_mps]|@csv' "${jsons[@]}" | sort
 } > "$RESULTS_DIR/summary.csv"
 
 # p99 降順 TOP10（ヘッダを除いて sort）
