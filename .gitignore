@@ -1,0 +1,35 @@
+cat > .gitignore <<'EOF'
+# --- Java / Gradle
+.gradle/
+build/
+**/build/
+out/
+*.class
+*.log
+
+# --- IDE
+.idea/
+*.iml
+.vscode/
+
+# --- Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- OS
+.DS_Store
+
+# --- Bench artifacts
+results/
+logs/
+*.jsonl
+summary*.csv
+
+# md
+*.md
+
+# --- Docker
+*.local.yaml
+EOF

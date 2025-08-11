@@ -1,0 +1,115 @@
+# 名前を固定（ログやネットワーク名が安定）
+name: event-switchyard
+
+# 共有ビルド定義（全 Java アプリがこれを継承）
+x-app: &app
+  image: event-switchyard-app:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  pull_policy: never    # ローカルを使い、勝手に pull しない
+
+services:
+  # ===== etcd（必要なら起動。ベンチだけなら省略可） =====
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.0
+    command: >
+      etcd --name etcd1
+           --initial-advertise-peer-urls http://etcd1:2380
+           --listen-peer-urls          http://0.0.0.0:2380
+           --listen-client-urls        http://0.0.0.0:2379
+           --advertise-client-urls     http://etcd1:2379
+           --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+           --initial-cluster-state new
+           --initial-cluster-token etcd-cluster-1
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.0
+    command: >
+      etcd --name etcd2
+           --initial-advertise-peer-urls http://etcd2:2380
+           --listen-peer-urls          http://0.0.0.0:2380
+           --listen-client-urls        http://0.0.0.0:2379
+           --advertise-client-urls     http://etcd2:2379
+           --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+           --initial-cluster-state new
+           --initial-cluster-token etcd-cluster-1
+
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.0
+    command: >
+      etcd --name etcd3
+           --initial-advertise-peer-urls http://etcd3:2380
+           --listen-peer-urls          http://0.0.0.0:2380
+           --listen-client-urls        http://0.0.0.0:2379
+           --advertise-client-urls     http://etcd3:2379
+           --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+           --initial-cluster-state new
+           --initial-cluster-token etcd-cluster-1
+
+  # ===== Kafka（ホストへポート公開しない：衝突回避） =====
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.1
+    restart: unless-stopped
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # topic-init が作る
+
+  # ===== topic-init（冪等作成＋不足分の partition 増加） =====
+  topic-init:
+    <<: *app
+    depends_on: [kafka]
+    restart: "no"
+    command: ["java","-cp","app-all.jar","org.example.TopicInit"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      TOPIC_NAME: events
+      PARTITIONS: "1"
+      REPLICATION: "1"
+
+  # ===== Producer / Consumer =====
+  producer:
+    <<: *app
+    depends_on: [kafka]
+    command: ["java","-cp","app-all.jar","org.example.ProducerApp"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      TOPIC_NAME: events
+      ACKS: all
+      LINGER_MS: "5"
+      BATCH_SIZE: "32768"
+      NUM_MSG: "10000"
+
+  consumer:
+    <<: *app
+    depends_on: [kafka]
+    command: ["java","-cp","app-all.jar","org.example.ConsumerApp"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      TOPIC_NAME: events
+      GROUP_ID: sample-group
+    # bench.sh が run 時に /var/log/results を上書きマウントするのでここは任意
+    volumes:
+      - ./logs/:/var/log/
+
+  # ===== 可視化（任意） =====
+  plot:
+    image: python:3.11-slim
+    working_dir: /work
+    environment:
+      MPLBACKEND: Agg
+    volumes:
+      - .:/work
+    command: ["python","scripts/plot_summary.py"]
