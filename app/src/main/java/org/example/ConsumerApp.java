@@ -45,6 +45,13 @@ public class ConsumerApp {
         long expected = Long.parseLong(System.getenv().getOrDefault("EXPECTED_MSG", "0")); // 0=無効
         long idleMs   = Long.parseLong(System.getenv().getOrDefault("IDLE_MS", "1500"));
 
+        long totalSeen = 0;              // ウォームアップ含む総受信
+        long measured = 0;               // 計測対象のみ
+        long firstNsMeasured = 0, lastNsMeasured = 0;
+
+        // ラグ集計（1秒ログを使って集約）
+        long lagSamples = 0, lagSum = 0, lagMax = 0;
+
         // ====== Consumer 設定 ======
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
@@ -98,85 +105,19 @@ public class ConsumerApp {
                 if (ex != null) logger.warn("commitAsync failed: {}", ex.toString());
             };
 
-            long received = 0;
-            long firstNs = 0, lastNs = 0;
             long idleDeadline = System.currentTimeMillis() + idleMs;
 
             // ★ 追加: 定期コミット用タイマ
             long lastCommitMs = System.currentTimeMillis();
             long commitIntervalMs = Long.parseLong(System.getenv().getOrDefault("COMMIT_INTERVAL_MS", "1000"));
+            long lagIntervalMs    = Long.parseLong(System.getenv().getOrDefault("LAG_LOG_INTERVAL_MS", "1000"));  // ←追加
 
             // ====== メインループ ======
             try { // ★ WakeupException を吸収して正常クローズへ
                 while (!closed.get()) { // ★ closed を見る
                     var records = consumer.poll(Duration.ofMillis(100));
-
-                    if (records.isEmpty()) {
-                        long nowMs = System.currentTimeMillis();
-                        if (nowMs - lastLagLogMs >= 1000) {
-                            try {
-                                var asn = consumer.assignment();
-                                if (!asn.isEmpty()) {
-                                    var end = consumer.endOffsets(asn);
-                                    long totalLag = 0;
-                                    for (var tp : asn) {
-                                        long pos = consumer.position(tp);
-                                        totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
-                                    }
-                                    logger.info("consumer_lag_total={}", totalLag);
-                                }
-                            } catch (Exception e) {
-                                logger.debug("lag calc skipped: {}", e.toString());
-                            }
-                            lastLagLogMs = nowMs;
-                        }
-
-                        if (nowMs - lastCommitMs >= commitIntervalMs) {
-                            consumer.commitAsync(onCommit);
-                            lastCommitMs = nowMs;
-                        }
-                        if (nowMs >= idleDeadline) break;
-                        continue;
-                    }
-                    idleDeadline = System.currentTimeMillis() + idleMs;
-
-                    for (var rec : records) {
-                        if (firstNs == 0) firstNs = System.nanoTime();
-                        lastNs = System.nanoTime();
-
-                        received++;
-                        messageCount.incrementAndGet();
-
-                        try {
-                            JsonNode j = MAPPER.readTree(rec.value());
-                            if (j.has("ts_ns")) {
-                                long tsSendNs = j.get("ts_ns").asLong();
-                                long nowNs = System.currentTimeMillis() * 1_000_000L;
-                                long latencyUs = Math.max(0, (nowNs - tsSendNs) / 1_000L);
-                                if (latencyUs <= HIST_US.getHighestTrackableValue()) {
-                                    HIST_US.recordValue(latencyUs);
-                                } else {
-                                    logger.debug("skip latency={}us over histogram range", latencyUs);
-                                }
-                            } else {
-                                logger.debug("ts_ns not found in payload");
-                            }
-                        } catch (Exception e) {
-                            logger.warn("payload parse failed: {}", e.toString());
-                        }
-                    }
-
-                    // ★ 定期コミット（軽量）
-                    if (System.currentTimeMillis() - lastCommitMs >= commitIntervalMs) {
-                        consumer.commitAsync();
-                        lastCommitMs = System.currentTimeMillis();
-                    }
-
-                    if (expected > 0 && received >= expected) break;
-
-                    // ★ 1秒おきにラグを計算（同一スレッドで安全に）
-                    long nowMs = System.currentTimeMillis();
-                    if (nowMs - lastLagLogMs >= 1000) {
+                    long nowMsForLag = System.currentTimeMillis();
+                    if (nowMsForLag - lastLagLogMs >= lagIntervalMs) {
                         try {
                             var asn = consumer.assignment();
                             if (!asn.isEmpty()) {
@@ -186,29 +127,103 @@ public class ConsumerApp {
                                     long pos = consumer.position(tp);
                                     totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
                                 }
+                                lagSamples++;
+                                lagSum += totalLag;
+                                lagMax = Math.max(lagMax, totalLag);
                                 logger.info("consumer_lag_total={}", totalLag);
                             }
                         } catch (Exception e) {
                             logger.debug("lag calc skipped: {}", e.toString());
                         }
-                        lastLagLogMs = nowMs;
+                        lastLagLogMs = nowMsForLag;
                     }
+
+                    if (records.isEmpty()) {
+                        long nowMs = System.currentTimeMillis();
+                        if (nowMs >= idleDeadline) break;
+                        continue;
+                    }
+                    idleDeadline = System.currentTimeMillis() + idleMs;
+
+                    for (var rec : records) {
+                        totalSeen++;
+                        boolean isWarm = false;
+
+                        try {
+                            JsonNode j = MAPPER.readTree(rec.value());
+                            isWarm = j.has("is_warmup") && j.get("is_warmup").asBoolean(false);
+
+                            if (!isWarm && j.has("ts_ns")) {
+                                long tsSendNs = j.get("ts_ns").asLong();
+                                long nowNs = System.currentTimeMillis() * 1_000_000L;
+                                long latencyUs = Math.max(0, (nowNs - tsSendNs) / 1_000L);
+                                if (latencyUs <= HIST_US.getHighestTrackableValue()) {
+                                    HIST_US.recordValue(latencyUs);
+                                }
+                            } else if (!isWarm) {
+                                // is_warmup=true の時は黙る
+                                logger.debug("ts_ns not found in payload");
+                            }
+                        } catch (Exception e) {
+                            logger.warn("payload parse failed: {}", e.toString());
+                        }
+
+                        if (isWarm) {
+                            // ウォームアップは計測にカウントしない
+                            continue;
+                        }
+
+                        // ここから“計測対象”のみカウント
+                        if (firstNsMeasured == 0) firstNsMeasured = System.nanoTime();
+                        lastNsMeasured = System.nanoTime();
+
+                        measured++;
+                        messageCount.incrementAndGet(); // TPSも計測対象のみ
+                    }
+
+                    // ★ 定期コミット（軽量）
+                    if (System.currentTimeMillis() - lastCommitMs >= commitIntervalMs) {
+                        consumer.commitAsync(onCommit);
+                        lastCommitMs = System.currentTimeMillis();
+                    }
+
+                    if (expected > 0 && totalSeen >= expected) break;
+
                 }
             } catch (org.apache.kafka.common.errors.WakeupException we) {
                 // ★ shutdown 用なので握りつぶし
                 logger.info("Wakeup received -> graceful shutdown");
             } finally {
-                // ★ 最終コミット（同期）
+                try {
+                    var asn = consumer.assignment();
+                    if (!asn.isEmpty()) {
+                        var end = consumer.endOffsets(asn);
+                        long totalLag = 0;
+                        for (var tp : asn) {
+                            long pos = consumer.position(tp);
+                            totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                        }
+                        lagSamples++;
+                        lagSum += totalLag;
+                        lagMax = Math.max(lagMax, totalLag);
+                        logger.info("final_consumer_lag_total={}", totalLag);
+                    }
+                } catch (Exception e) {
+                    logger.debug("final lag calc skipped: {}", e.toString());
+                }
+
+                // 最終コミット
                 try { consumer.commitSync(); } catch (Exception e) { logger.warn("final commit failed", e); }
             }
 
             // ====== 集計 & 永続化 ======
             tpsTask.cancel(false);
 
-            double elapsedSec = (lastNs > firstNs) ? (lastNs - firstNs) / 1e9 : 0.0;
-            double mps = (elapsedSec > 0) ? received / elapsedSec : 0.0;
-            logger.info("実行終了: 受信件数={} 経過秒~{} 平均MPS~{}",
-                    received,
+            double elapsedSec = (lastNsMeasured > firstNsMeasured) ? (lastNsMeasured - firstNsMeasured) / 1e9 : 0.0;
+            double mps = (elapsedSec > 0) ? (double) measured / elapsedSec : 0.0;
+
+            logger.info("実行終了: total_seen={} measured={} warmup_ignored={} 経過秒(測定)~{} 平均MPS(測定)~{}",
+                    totalSeen, measured, (totalSeen - measured),
                     String.format("%.3f", elapsedSec),
                     String.format("%.0f", mps));
 
@@ -237,17 +252,24 @@ public class ConsumerApp {
             result.put("p50_us", p50);
             result.put("p95_us", p95);
             result.put("p99_us", p99);
-            result.put("received", received);
+            result.put("received", totalSeen);
+            result.put("measured", measured);
             result.put("elapsed_sec", elapsedSec);
             result.put("throughput_mps", mps);
             result.put("commit_interval_ms", commitIntervalMs);
+            result.put("warmup_ignored", totalSeen - measured);
+            result.put("lag_samples", lagSamples);
+
+            double lagAvg = (lagSamples > 0) ? (double) lagSum / (double) lagSamples : 0.0;
+            result.put("lag_avg", lagAvg);
+            result.put("lag_max", lagMax);
+            result.put("lag_interval_ms", lagIntervalMs);
 
             persistJsonLine(result, runId);
 
-            // bench.sh が読む旧フォーマット（CSV風ログ）は維持
             System.out.printf(
-                    "RESULT,acks=%s,linger=%s,batch=%s,p50=%d,p95=%d,p99=%d,received=%d%n",
-                    acks, lingerMs, batchSize, p50, p95, p99, received
+                "RESULT,acks=%s,linger=%s,batch=%s,p50=%d,p95=%d,p99=%d,received=%d%n",
+                acks, lingerMs, batchSize, p50, p95, p99, totalSeen
             );
         }
 

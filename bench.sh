@@ -161,6 +161,7 @@ run_one() {
     -e EXPECTED_MSG="$NUM_MSG" \
     -e IDLE_MS="1500" \
     -e COMMIT_INTERVAL_MS="${COMMIT_INTERVAL_MS:-1000}" \
+    -e LAG_LOG_INTERVAL_MS="${LAG_LOG_INTERVAL_MS:-1000}" \
     -e SKIP_BACKLOG="${SKIP_BACKLOG:-false}" \
     ${BOOTSTRAP:+-e BOOTSTRAP_SERVERS="$BOOTSTRAP"} \
     consumer
@@ -195,12 +196,99 @@ if (( ${#jsons[@]} == 0 )); then
 fi
 
 {
-  echo "run_id,acks,linger_ms,batch_size,p50_us,p95_us,p99_us,received,throughput_mps"
-  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.p50_us,.p95_us,.p99_us,.received,.throughput_mps]|@csv' "${jsons[@]}" | sort
+  echo "run_id,acks,linger_ms,batch_size,commit_interval_ms,received,measured,throughput_mps,p50_us,p95_us,p99_us,lag_avg,lag_max"
+  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.commit_interval_ms,.received,.measured,.throughput_mps,.p50_us,.p95_us,.p99_us,.lag_avg,.lag_max] | @csv' "${jsons[@]}" | sort
 } > "$RESULTS_DIR/summary.csv"
 
 # p99 降順 TOP10（ヘッダを除いて sort）
-awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k7,7nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
+awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k11,11nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
+
+# ========= 可視化（dashboard.html を生成） =========
+python3 - "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/dashboard.html" <<'PY'
+import csv, json, sys, html
+from pathlib import Path
+
+inp = Path(sys.argv[1]); out = Path(sys.argv[2])
+rows = list(csv.DictReader(inp.open()))
+# 数値キャスト
+for r in rows:
+    for k in ("linger_ms","batch_size","commit_interval_ms","received","measured",
+              "p50_us","p95_us","p99_us","lag_max"):
+        r[k] = int(float(r[k]))
+    # floatにしたい列
+    r["lag_avg"] = float(r.get("lag_avg", 0) or 0)
+    r["throughput_mps"] = float(r["throughput_mps"])
+    
+    r["p50_ms"] = r["p50_us"]/1000.0
+    r["p95_ms"] = r["p95_us"]/1000.0
+    r["p99_ms"] = r["p99_us"]/1000.0
+    r["label"]  = f"acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms"
+
+
+data_json = json.dumps(rows)
+src = html.escape(str(inp))
+
+html_doc = """<!doctype html><meta charset="utf-8">
+<title>Event Switchyard — W1 Summary</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+ body{font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:20px}
+ .grid{display:grid;grid-template-columns:1fr;gap:24px}
+ @media(min-width:1200px){.grid{grid-template-columns:1fr 1fr}}
+ .card{padding:16px;border:1px solid #eee;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.06)}
+ h1{margin:0 0 8px} .tag{font-size:12px;color:#666}
+ table{border-collapse:collapse;width:100%}
+ th,td{border-bottom:1px solid #eee;padding:8px 6px;text-align:left}
+ tr:hover td{background:#fafafa}
+</style>
+<h1>W1 Summary</h1>
+<div class="tag">Source: __SRC__</div>
+<div class="grid">
+  <div class="card"><div id="scatter" style="height:420px"></div></div>
+  <div class="card"><div id="bar_mps" style="height:420px"></div></div>
+  <div class="card"><div id="bar_p99" style="height:420px"></div></div>
+  <div class="card"><div id="table"></div></div>
+</div>
+<script>
+const rows = __DATA__;
+
+Plotly.newPlot('scatter', [{
+  x: rows.map(r=>r.p99_ms),
+  y: rows.map(r=>r.throughput_mps),
+  text: rows.map(r=>r.label),
+  mode:'markers+text',
+  textposition:'top center'
+}], {title:'Throughput (MPS) vs p99 latency (ms)', xaxis:{title:'p99 (ms)'}, yaxis:{title:'MPS'}});
+
+const byMps=[...rows].sort((a,b)=>b.throughput_mps-a.throughput_mps);
+Plotly.newPlot('bar_mps', [{
+  x: byMps.map(r=>r.label),
+  y: byMps.map(r=>r.throughput_mps),
+  type:'bar'
+}], {title:'Throughput by configuration', xaxis:{tickangle:-40}});
+
+const byP99=[...rows].sort((a,b)=>a.p99_ms-b.p99_ms);
+Plotly.newPlot('bar_p99', [{
+  x: byP99.map(r=>r.label),
+  y: byP99.map(r=>r.p99_ms),
+  type:'bar'
+}], {title:'p99 latency by configuration (ms)', xaxis:{tickangle:-40}});
+
+const tbl = document.getElementById('table');
+tbl.innerHTML = `<table><thead><tr>
+<th>run_id</th><th>acks</th><th>linger</th><th>batch</th>
+<th>p50(ms)</th><th>p95(ms)</th><th>p99(ms)</th><th>MPS</th></tr></thead><tbody>` +
+rows.map(r=>`<tr><td>${r.run_id}</td><td>${r.acks}</td><td>${r.linger_ms}</td><td>${r.batch_size}</td>
+<td>${r.p50_ms.toFixed(1)}</td><td>${r.p95_ms.toFixed(1)}</td><td>${r.p99_ms.toFixed(1)}</td><td>${r.throughput_mps.toFixed(0)}</td></tr>`).join('') + `</tbody></table>`;
+</script>"""
+
+# 置換で埋め込む（f-string禁止）
+html_doc = html_doc.replace("__DATA__", data_json).replace("__SRC__", src)
+out.write_text(html_doc, encoding="utf-8")
+print("Wrote", out)
+PY
+
+echo "   - $RESULTS_DIR/dashboard.html  # ブラウザで開いてください"
 
 echo ">> done."
 echo "   - $RESULTS_DIR/summary.csv"
