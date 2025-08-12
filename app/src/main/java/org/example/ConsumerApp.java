@@ -98,8 +98,6 @@ public class ConsumerApp {
                 logger.info("1秒間のメッセージ受信数: {} 件", tps);
             }, 1, 1, TimeUnit.SECONDS);
 
-            // ★ lagログ用のタイムスタンプ
-            long lastLagLogMs = System.currentTimeMillis();
 
             OffsetCommitCallback onCommit = (offsets, ex) -> {
                 if (ex != null) logger.warn("commitAsync failed: {}", ex.toString());
@@ -110,33 +108,15 @@ public class ConsumerApp {
             // ★ 追加: 定期コミット用タイマ
             long lastCommitMs = System.currentTimeMillis();
             long commitIntervalMs = Long.parseLong(System.getenv().getOrDefault("COMMIT_INTERVAL_MS", "1000"));
-            long lagIntervalMs    = Long.parseLong(System.getenv().getOrDefault("LAG_LOG_INTERVAL_MS", "1000"));  // ←追加
+            long lagSampleEveryMsgs = Long.parseLong(System.getenv().getOrDefault("LAG_SAMPLE_EVERY_MSGS", "20000"));
+            long sinceLagSample = 0;
+            long lastLagObserved = -1;
+
 
             // ====== メインループ ======
             try { // ★ WakeupException を吸収して正常クローズへ
                 while (!closed.get()) { // ★ closed を見る
                     var records = consumer.poll(Duration.ofMillis(100));
-                    long nowMsForLag = System.currentTimeMillis();
-                    if (nowMsForLag - lastLagLogMs >= lagIntervalMs) {
-                        try {
-                            var asn = consumer.assignment();
-                            if (!asn.isEmpty()) {
-                                var end = consumer.endOffsets(asn);
-                                long totalLag = 0;
-                                for (var tp : asn) {
-                                    long pos = consumer.position(tp);
-                                    totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
-                                }
-                                lagSamples++;
-                                lagSum += totalLag;
-                                lagMax = Math.max(lagMax, totalLag);
-                                logger.info("consumer_lag_total={}", totalLag);
-                            }
-                        } catch (Exception e) {
-                            logger.debug("lag calc skipped: {}", e.toString());
-                        }
-                        lastLagLogMs = nowMsForLag;
-                    }
 
                     if (records.isEmpty()) {
                         long nowMs = System.currentTimeMillis();
@@ -179,6 +159,28 @@ public class ConsumerApp {
 
                         measured++;
                         messageCount.incrementAndGet(); // TPSも計測対象のみ
+                        sinceLagSample++;
+                        if (sinceLagSample >= lagSampleEveryMsgs) {
+                            try {
+                                var asn = consumer.assignment();
+                                if (!asn.isEmpty()) {
+                                    var end = consumer.endOffsets(asn);
+                                    long totalLag = 0;
+                                    for (var tp : asn) {
+                                        long pos = consumer.position(tp);
+                                        totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                                    }
+                                    lagSamples++;
+                                    lagSum += totalLag;
+                                    lagMax = Math.max(lagMax, totalLag);
+                                    lastLagObserved = totalLag;
+                                    logger.info("consumer_lag_total(sample-by-msgs)={}", totalLag);
+                                }
+                            } catch (Exception e) {
+                                logger.debug("lag calc (by msgs) skipped: {}", e.toString());
+                            }
+                            sinceLagSample = 0;
+                        }
                     }
 
                     // ★ 定期コミット（軽量）
@@ -206,6 +208,7 @@ public class ConsumerApp {
                         lagSamples++;
                         lagSum += totalLag;
                         lagMax = Math.max(lagMax, totalLag);
+                        lastLagObserved = totalLag;
                         logger.info("final_consumer_lag_total={}", totalLag);
                     }
                 } catch (Exception e) {
@@ -259,11 +262,12 @@ public class ConsumerApp {
             result.put("commit_interval_ms", commitIntervalMs);
             result.put("warmup_ignored", totalSeen - measured);
             result.put("lag_samples", lagSamples);
+            result.put("lag_final", Math.max(0, lastLagObserved));
 
             double lagAvg = (lagSamples > 0) ? (double) lagSum / (double) lagSamples : 0.0;
             result.put("lag_avg", lagAvg);
             result.put("lag_max", lagMax);
-            result.put("lag_interval_ms", lagIntervalMs);
+            result.put("lag_sample_every_msgs", lagSampleEveryMsgs);
 
             persistJsonLine(result, runId);
 
