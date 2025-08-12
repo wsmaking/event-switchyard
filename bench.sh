@@ -196,12 +196,12 @@ if (( ${#jsons[@]} == 0 )); then
 fi
 
 {
-  echo "run_id,acks,linger_ms,batch_size,commit_interval_ms,received,measured,throughput_mps,p50_us,p95_us,p99_us,lag_avg,lag_max"
-  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.commit_interval_ms,.received,.measured,.throughput_mps,.p50_us,.p95_us,.p99_us,.lag_avg,.lag_max] | @csv' "${jsons[@]}" | sort
+  echo "run_id,acks,linger_ms,batch_size,commit_interval_ms,lag_sample_every_msgs,received,measured,throughput_mps,p50_us,p95_us,p99_us,lag_avg,lag_max,lag_samples,lag_final"
+  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.commit_interval_ms,.lag_sample_every_msgs,.received,.measured,.throughput_mps,.p50_us,.p95_us,.p99_us,.lag_avg,.lag_max,.lag_samples,.lag_final] | @csv' "${jsons[@]}" | sort
 } > "$RESULTS_DIR/summary.csv"
 
-# p99 降順 TOP10（ヘッダを除いて sort）
-awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k11,11nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
+## p99 降順 TOP10（ヘッダを除いて sort）
+awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k12,12nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
 
 # ========= 可視化（dashboard.html を生成） =========
 python3 - "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/dashboard.html" <<'PY'
@@ -212,17 +212,18 @@ inp = Path(sys.argv[1]); out = Path(sys.argv[2])
 rows = list(csv.DictReader(inp.open()))
 # 数値キャスト
 for r in rows:
-    for k in ("linger_ms","batch_size","commit_interval_ms","received","measured",
-              "p50_us","p95_us","p99_us","lag_max"):
+    for k in ("linger_ms","batch_size","commit_interval_ms","lag_sample_every_msgs","received","measured",
+              "p50_us","p95_us","p99_us","lag_max","lag_samples","lag_final"):
         r[k] = int(float(r[k]))
-    # floatにしたい列
     r["lag_avg"] = float(r.get("lag_avg", 0) or 0)
     r["throughput_mps"] = float(r["throughput_mps"])
-    
+
     r["p50_ms"] = r["p50_us"]/1000.0
     r["p95_ms"] = r["p95_us"]/1000.0
     r["p99_ms"] = r["p99_us"]/1000.0
-    r["label"]  = f"acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms"
+    r["label"] = f"acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms, sample={r['lag_sample_every_msgs']}"
+
+
 
 
 data_json = json.dumps(rows)
@@ -247,6 +248,8 @@ html_doc = """<!doctype html><meta charset="utf-8">
   <div class="card"><div id="scatter" style="height:420px"></div></div>
   <div class="card"><div id="bar_mps" style="height:420px"></div></div>
   <div class="card"><div id="bar_p99" style="height:420px"></div></div>
+  <div class="card"><div id="bar_lag" style="height:420px"></div></div>
+  <div class="card"><div id="bar_lag_final" style="height:420px"></div></div>
   <div class="card"><div id="table"></div></div>
 </div>
 <script>
@@ -273,6 +276,20 @@ Plotly.newPlot('bar_p99', [{
   y: byP99.map(r=>r.p99_ms),
   type:'bar'
 }], {title:'p99 latency by configuration (ms)', xaxis:{tickangle:-40}});
+
+const byLag=[...rows].sort((a,b)=>b.lag_avg-a.lag_avg);
+Plotly.newPlot('bar_lag', [{
+  x: byLag.map(r=>r.label),
+  y: byLag.map(r=>r.lag_avg),
+  type:'bar'
+}], {title:'Average consumer lag (messages)', xaxis:{tickangle:-40}, yaxis:{title:'avg lag'}});
+
+const byLagFinal=[...rows].sort((a,b)=>b.lag_final-a.lag_final);
+Plotly.newPlot('bar_lag_final', [{
+  x: byLagFinal.map(r=>r.label),
+  y: byLagFinal.map(r=>r.lag_final),
+  type:'bar'
+}], {title:'Final consumer lag at end (messages)', xaxis:{tickangle:-40}, yaxis:{title:'final lag'}});
 
 const tbl = document.getElementById('table');
 tbl.innerHTML = `<table><thead><tr>
