@@ -7,9 +7,9 @@ ACKS=("all" "1")
 LINGER=("0" "5" "50")
 BATCH=("16384" "65536")
 REPEAT=1
-
 ARCHIVE=1                 # 実行前に既存結果をアーカイブ退避
 KEEP_ARCHIVES=5           # results/archive の保持世代
+KEY_STRATEGY=("none" "symbol" "order_id")
 
 RESULTS_DIR="$PWD/results"
 ARCHIVE_DIR="$RESULTS_DIR/archive"
@@ -19,6 +19,17 @@ TOPIC_PREFIX="${TOPIC_PREFIX:-events}"
 PARTITIONS="${PARTITIONS:-3}"
 REPLICATION="${REPLICATION:-1}"
 BOOTSTRAP="${BOOTSTRAP_SERVERS:-}"   # 例: "kafka:9092,kafka2:9093,kafka3:9094"
+
+PROFILE=${PROFILE:-rt}  # rt | drain
+
+if [[ "$PROFILE" == "rt" ]]; then
+  export SKIP_BACKLOG=true
+  export EXPECTED_MSG=0        # 件数で待たず、idle で終了
+  export WARMUP_MSGS=${WARMUP_MSGS:-0}  # 使うならここで調整
+else # drain
+  export SKIP_BACKLOG=false
+  export EXPECTED_MSG="$NUM_MSG"  # 全件読み切る
+fi
 
 usage() {
   cat <<'USAGE'
@@ -112,24 +123,31 @@ else
 fi
 
 # ========= 実行回数の表示 =========
-total=$(( ${#ACKS[@]} * ${#LINGER[@]} * ${#BATCH[@]} * REPEAT ))
-echo ">> total runs: $total (ACKS=${ACKS[*]}  LINGER=${LINGER[*]}  BATCH=${BATCH[*]}  REPEAT=${REPEAT}  NUM_MSG=${NUM_MSG})"
+total=$(( ${#ACKS[@]} * ${#LINGER[@]} * ${#BATCH[@]} * ${#KEY_STRATEGY[@]} * REPEAT ))
+echo ">> total runs: $total (ACKS=${ACKS[*]}  LINGER=${LINGER[*]}  BATCH=${BATCH[*]}  KEY=${KEY_STRATEGY[*]}  REPEAT=${REPEAT}  NUM_MSG=${NUM_MSG})"
 
 # ========= 1コンビネーション実行関数 =========
 run_one() {
-  local a="$1" l="$2" b="$3" r="$4"
-  local run_id; run_id="$(date +%Y%m%d-%H%M%S)-a${a}-l${l}-b${b}-r${r}"
+  local a="$1" l="$2" b="$3" r="$4" ks="$5"
+  local run_id; run_id="$(date +%Y%m%d-%H%M%S)-k${ks}-a${a}-l${l}-b${b}-r${r}"
   local topic="${TOPIC_PREFIX}-${run_id}"
-  echo "=== RUN $run_id (topic=${topic}) ==="
+  echo "=== RUN $run_id (topic=${topic}, key=${ks}) ==="
 
   # REPLICATION ガード（関数内）
   local repl="$REPLICATION"
+
   local brokers="$BROKERS"
   if [[ -n "$BOOTSTRAP" ]]; then
     IFS=',' read -r -a __bs <<< "$BOOTSTRAP"
     brokers="${BROKERS:-${#__bs[@]}}"
   fi
   if (( repl > brokers )); then repl="$brokers"; fi
+
+  local num_for_prod="$NUM_MSG"
+  if [[ "$PROFILE" == "rt" ]]; then
+    num_for_prod=0
+  fi
+
 
   # ラン専用トピックを明示作成（冪等）
   docker compose run --rm -T \
@@ -147,7 +165,8 @@ run_one() {
     -e RUN_ID="$run_id" \
     -e TOPIC_NAME="$topic" \
     -e ACKS="$a" -e LINGER_MS="$l" -e BATCH_SIZE="$b" \
-    -e NUM_MSG="$NUM_MSG" \
+    -e KEY_STRATEGY="$ks" \
+    -e NUM_MSG="$num_for_prod" \
     ${BOOTSTRAP:+-e BOOTSTRAP_SERVERS="$BOOTSTRAP"} \
     producer >/dev/null
 
@@ -158,11 +177,12 @@ run_one() {
     -e RUN_ID="$run_id" -e GROUP_ID="esy-$run_id" \
     -e TOPIC_NAME="$topic" \
     -e ACKS="$a" -e LINGER_MS="$l" -e BATCH_SIZE="$b" \
-    -e EXPECTED_MSG="$NUM_MSG" \
+    -e KEY_STRATEGY="$ks" \
+    -e EXPECTED_MSG="${EXPECTED_MSG:-0}" \
     -e IDLE_MS="1500" \
     -e COMMIT_INTERVAL_MS="${COMMIT_INTERVAL_MS:-1000}" \
     -e LAG_LOG_INTERVAL_MS="${LAG_LOG_INTERVAL_MS:-1000}" \
-    -e SKIP_BACKLOG="${SKIP_BACKLOG:-false}" \
+    -e SKIP_BACKLOG="${SKIP_BACKLOG:-true}" \
     ${BOOTSTRAP:+-e BOOTSTRAP_SERVERS="$BOOTSTRAP"} \
     consumer
 
@@ -179,8 +199,10 @@ run_one() {
 for a in "${ACKS[@]}"; do
   for l in "${LINGER[@]}"; do
     for b in "${BATCH[@]}"; do
-      for ((r=1; r<=REPEAT; r++)); do
-        run_one "$a" "$l" "$b" "$r"
+      for ks in "${KEY_STRATEGY[@]}"; do
+        for ((r=1; r<=REPEAT; r++)); do
+          run_one "$a" "$l" "$b" "$r" "$ks"
+        done
       done
     done
   done
@@ -196,12 +218,45 @@ if (( ${#jsons[@]} == 0 )); then
 fi
 
 {
-  echo "run_id,acks,linger_ms,batch_size,commit_interval_ms,lag_sample_every_msgs,received,measured,throughput_mps,p50_us,p95_us,p99_us,lag_avg,lag_max,lag_samples,lag_final"
-  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.commit_interval_ms,.lag_sample_every_msgs,.received,.measured,.throughput_mps,.p50_us,.p95_us,.p99_us,.lag_avg,.lag_max,.lag_samples,.lag_final] | @csv' "${jsons[@]}" | sort
+  echo "run_id,acks,linger_ms,batch_size,key_strategy,commit_interval_ms,lag_sample_every_msgs,received,measured,throughput_mps,p50_us,p95_us,p99_us,p999_us,tail_ratio,tail_step_999,hdr_count,lag_avg,lag_max,lag_samples,lag_final"
+  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.key_strategy,
+          .commit_interval_ms,.lag_sample_every_msgs,
+          .received,.measured,.throughput_mps,
+          .p50_us,.p95_us,.p99_us,
+          (.p999_us // 0), (.tail_ratio // 0), (.tail_step_999 // 0), (.hdr_count // 0),
+          .lag_avg,.lag_max,.lag_samples,.lag_final] | @csv' \
+      "${jsons[@]}" | sort
 } > "$RESULTS_DIR/summary.csv"
 
 ## p99 降順 TOP10（ヘッダを除いて sort）
-awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k12,12nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
+awk -F, 'NR>1' "$RESULTS_DIR/summary.csv" | sort -t, -k13,13nr | head -n 10 > "$RESULTS_DIR/summary_top_p99.txt"
+
+echo ">> build summary_median.csv"
+python3 - <<'PY'
+import csv,statistics
+inp="results/summary.csv"; out="results/summary_median.csv"
+grp={}
+with open(inp) as f:
+  r=csv.DictReader(f)
+  for x in r:
+    key=(x["acks"],x["linger_ms"],x["batch_size"],x.get("key_strategy","-"))
+    grp.setdefault(key,[]).append((float(x["p99_us"]), float(x["throughput_mps"])))
+with open(out,"w",newline="") as w:
+  w.write("acks,linger_ms,batch_size,key_strategy,p99_us_median,mps_median,count\n")
+  for (a,l,b,k),vals in grp.items():
+    p99s=[v[0] for v in vals]; mps=[v[1] for v in vals]
+    w.write(f"{a},{l},{b},{k},{statistics.median(p99s):.0f},{statistics.median(mps):.0f},{len(vals)}\n")
+print("wrote", out)
+PY
+
+echo ">> sanity checks"
+# lag_samples ≈ measured / lag_sample_every_msgs のズレ検知（±2まで許容）
+jq -r '[.run_id,.measured,.lag_sample_every_msgs,.lag_samples] | @tsv' results/bench-*.jsonl \
+| awk '{exp=int($2/$3); diff=$4-exp; if (diff<-2 || diff>2) print "WARN lag_samples", $1, "diff=",diff}' || true
+
+# p99の信頼度：hdr_count < 1000 を警告（CSVの17列目が hdr_count）
+awk -F, 'NR>1 && $17 < 1000 {print "WARN: low hdr_count ->", $0}' results/summary.csv || true
+
 
 # ========= 可視化（dashboard.html を生成） =========
 python3 - "$RESULTS_DIR/summary.csv" "$RESULTS_DIR/dashboard.html" <<'PY'
@@ -212,17 +267,20 @@ inp = Path(sys.argv[1]); out = Path(sys.argv[2])
 rows = list(csv.DictReader(inp.open()))
 # 数値キャスト
 for r in rows:
-    for k in ("linger_ms","batch_size","commit_interval_ms","lag_sample_every_msgs","received","measured",
-              "p50_us","p95_us","p99_us","lag_max","lag_samples","lag_final"):
-        r[k] = int(float(r[k]))
-    r["lag_avg"] = float(r.get("lag_avg", 0) or 0)
-    r["throughput_mps"] = float(r["throughput_mps"])
+    for k in ("linger_ms","batch_size","commit_interval_ms","lag_sample_every_msgs",
+              "received","measured","p50_us","p95_us","p99_us","p999_us",
+              "lag_max","lag_samples","lag_final","hdr_count"):
+        r[k] = int(float(r.get(k, 0) or 0))
+    for k in ("lag_avg","throughput_mps","tail_ratio","tail_step_999"):
+        r[k] = float(r.get(k, 0) or 0)
 
-    r["p50_ms"] = r["p50_us"]/1000.0
-    r["p95_ms"] = r["p95_us"]/1000.0
-    r["p99_ms"] = r["p99_us"]/1000.0
-    r["label"] = f"acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms, sample={r['lag_sample_every_msgs']}"
+    r["p50_ms"]  = r["p50_us"]/1000.0
+    r["p95_ms"]  = r["p95_us"]/1000.0
+    r["p99_ms"]  = r["p99_us"]/1000.0
+    r["p999_ms"] = r["p999_us"]/1000.0
 
+    # ラベルに key を含める
+    r["label"] = f"key={r.get('key_strategy','-')}, acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms, sample={r['lag_sample_every_msgs']}"
 
 
 
@@ -250,6 +308,7 @@ html_doc = """<!doctype html><meta charset="utf-8">
   <div class="card"><div id="bar_p99" style="height:420px"></div></div>
   <div class="card"><div id="bar_lag" style="height:420px"></div></div>
   <div class="card"><div id="bar_lag_final" style="height:420px"></div></div>
+  <div class="card"><div id="bar_tail" style="height:420px"></div></div>  <!-- 追加 -->
   <div class="card"><div id="table"></div></div>
 </div>
 <script>
@@ -290,6 +349,13 @@ Plotly.newPlot('bar_lag_final', [{
   y: byLagFinal.map(r=>r.lag_final),
   type:'bar'
 }], {title:'Final consumer lag at end (messages)', xaxis:{tickangle:-40}, yaxis:{title:'final lag'}});
+
+const byTail=[...rows].sort((a,b)=>b.tail_ratio-a.tail_ratio);
+Plotly.newPlot('bar_tail', [{
+  x: byTail.map(r=>r.label),
+  y: byTail.map(r=>r.tail_ratio),
+  type:'bar'
+}], {title:'Tail ratio (p99/p50)', xaxis:{tickangle:-40}, yaxis:{title:'p99 / p50'}});
 
 const tbl = document.getElementById('table');
 tbl.innerHTML = `<table><thead><tr>
