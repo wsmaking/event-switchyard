@@ -6,7 +6,7 @@ NUM_MSG="${NUM_MSG:-10000}"
 ACKS=("all" "1")
 LINGER=("0" "5" "50")
 BATCH=("16384" "65536")
-REPEAT=1
+REPEAT="${REPEAT:-1}"
 ARCHIVE=1                 # 実行前に既存結果をアーカイブ退避
 KEEP_ARCHIVES=5           # results/archive の保持世代
 KEY_STRATEGY=("none" "symbol" "order_id")
@@ -19,6 +19,7 @@ TOPIC_PREFIX="${TOPIC_PREFIX:-events}"
 PARTITIONS="${PARTITIONS:-3}"
 REPLICATION="${REPLICATION:-1}"
 BOOTSTRAP="${BOOTSTRAP_SERVERS:-}"   # 例: "kafka:9092,kafka2:9093,kafka3:9094"
+KEEP_TOPIC="${KEEP_TOPIC:-0}"
 
 PROFILE=${PROFILE:-rt}  # rt | drain
 
@@ -30,6 +31,8 @@ else # drain
   export SKIP_BACKLOG=false
   export EXPECTED_MSG="$NUM_MSG"  # 全件読み切る
 fi
+
+echo ">> running $(/usr/bin/env realpath "$0" 2>/dev/null || echo "$0")"
 
 usage() {
   cat <<'USAGE'
@@ -85,36 +88,61 @@ command -v jq      >/dev/null 2>&1 || { echo "ERROR: jq が必要です。brew i
 command -v docker  >/dev/null 2>&1 || { echo "ERROR: Docker が必要です"; exit 1; }
 mkdir -p "$RESULTS_DIR"
 
-echo ">> build images if needed"
-docker compose build topic-init producer consumer >/dev/null
+# ★ 外部クラスタ利用時はローカルKafkaを起動しない
+if [[ -z "$BOOTSTRAP" ]]; then
+  echo ">> build images if needed"
+  docker compose build topic-init producer consumer >/dev/null
 
-echo ">> ensure zookeeper + kafka up"
-docker compose up -d zookeeper kafka >/dev/null
+  echo ">> ensure zookeeper + kafka up"
+  docker compose up -d zookeeper kafka >/dev/null
+else
+  echo ">> external cluster mode (skip local kafka up)"
+  # 外部クラスタの場合、topic-init は run 時に自動ビルドされるので省略可
+  docker compose build producer consumer >/dev/null
+fi
 
-# ========= 既存結果のアーカイブ退避 =========
 archive_results() {
+  # 収集したいパターンを列挙
+  local patterns=(
+    "$RESULTS_DIR/bench-*.jsonl"
+    "$RESULTS_DIR/summary*.csv"
+    "$RESULTS_DIR/ack-*.hgrm"
+    "$RESULTS_DIR/lag-*.csv"
+    "$RESULTS_DIR/group-describe-*.txt"
+    "$RESULTS_DIR/topic-describe-*.txt"
+    "$RESULTS_DIR/ack-summary.jsonl"
+    "$RESULTS_DIR/dashboard.html"
+  )
+
+  # 実在ファイルだけ配列に積む
   shopt -s nullglob
-  local files=( "$RESULTS_DIR"/*.jsonl "$RESULTS_DIR"/summary*.csv )
-  if (( ${#files[@]} > 0 )); then
-    local ts; ts="$(date +%Y%m%d-%H%M%S)"
-    local dst="$ARCHIVE_DIR/$ts"
-    mkdir -p "$dst"
-    echo ">> archive old results -> $dst"
-    mv "${files[@]}" "$dst"/
-  fi
+  local to_move=()
+  for pat in "${patterns[@]}"; do
+    for f in $pat; do
+      [[ -e "$f" ]] && to_move+=( "$f" )
+    done
+  done
   shopt -u nullglob
 
-  # 新しい順に KEEP_ARCHIVES を残す
-  if [ -d "$ARCHIVE_DIR" ]; then
+  if (( ${#to_move[@]} > 0 )); then
+    local ts dst
+    ts="$(date +%Y%m%d-%H%M%S)"
+    dst="$ARCHIVE_DIR/$ts"
+    mkdir -p "$dst"
+    echo ">> archive old results -> $dst"
+    # mv 失敗で止まらないように保険も入れておく
+    mv "${to_move[@]}" "$dst"/ || true
+    # 古いアーカイブの世代管理
     local i=0
     for d in $(ls -1dt "$ARCHIVE_DIR"/* 2>/dev/null); do
       i=$((i+1))
-      if (( i > KEEP_ARCHIVES )); then
-        rm -rf -- "$d"
-      fi
+      (( i > KEEP_ARCHIVES )) && rm -rf -- "$d"
     done
+  else
+    echo ">> no previous result files to archive"
   fi
 }
+
 
 if (( ARCHIVE == 1 )); then
   archive_results
@@ -160,6 +188,14 @@ run_one() {
   # Producer（デタッチ）
   local pn="esy-prod-$run_id"
   docker compose run -d --name "$pn" -T \
+    -v "$RESULTS_DIR:/var/log/results" \
+    -e COMPRESSION_TYPE="${COMPRESSION_TYPE:-none}" \
+    -e RUN_SECS="${RUN_SECS:-30}" \
+    -e HOT_KEY_EVERY="${HOT_KEY_EVERY:-0}" \
+    -e RESULTS_DIR=/var/log/results \
+    -e PROFILE="$PROFILE" \
+    -e ACK_RECORDER="${ACK_RECORDER:-1}" \
+    -e ACK_HIST_PATH="/var/log/results/ack-$run_id.hgrm" \
     -e PAYLOAD_BYTES="${PAYLOAD_BYTES:-200}" \
     -e WARMUP_MSGS="${WARMUP_MSGS:-0}" \
     -e RUN_ID="$run_id" \
@@ -174,6 +210,7 @@ run_one() {
   docker compose run --rm -T \
     -v "$RESULTS_DIR:/var/log/results" \
     -e RESULTS_DIR=/var/log/results \
+    -e PROFILE="$PROFILE" \
     -e RUN_ID="$run_id" -e GROUP_ID="esy-$run_id" \
     -e TOPIC_NAME="$topic" \
     -e ACKS="$a" -e LINGER_MS="$l" -e BATCH_SIZE="$b" \
@@ -187,12 +224,52 @@ run_one() {
     consumer
 
   # 後片付け
-  docker wait "$pn" >/dev/null 2>&1 || true
+  docker wait "$pn"    >/dev/null 2>&1 || true
   docker rm -f "$pn"   >/dev/null 2>&1 || true
   sleep 1
 
-  docker compose exec -T kafka kafka-topics --bootstrap-server "${BOOTSTRAP:-kafka:9092}" \
-  --delete --topic "$topic" >/dev/null 2>&1 || true
+  # lag.csv を1秒粒度で生成（ConsumerのJSONLから抽出）
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg RUN "$run_id" '
+      select(.run_id==$RUN and .type=="lag" and .ts_sec!=null and .lag!=null)
+      | [.ts_sec,.lag] | @csv' "$RESULTS_DIR"/bench-*.jsonl \
+      > "$RESULTS_DIR/lag-$run_id.csv" || true
+  fi
+
+  # --- グループ/トピックの describe を残す（トピック削除前に！）
+  if [[ -z "$BOOTSTRAP" ]]; then
+    echo ">> capture consumer group/topic describe before topic delete"
+    local bs="kafka:9092"
+
+    # coordinator 反映待ち（Empty -> Stable 遷移の猶予）
+    sleep 1
+    for i in {1..6}; do
+      if docker compose exec -T kafka \
+        kafka-consumer-groups --bootstrap-server "$bs" \
+        --describe --group "esy-$run_id" \
+        > "$RESULTS_DIR/group-describe-$run_id.txt" 2>/dev/null; then
+        break
+      fi
+      sleep 0.5
+    done
+
+    docker compose exec -T kafka \
+      kafka-topics --bootstrap-server "$bs" \
+      --describe --topic "$topic" \
+      > "$RESULTS_DIR/topic-describe-$run_id.txt" 2>/dev/null || true
+  fi
+
+  # 削除ロジック
+  if [[ -z "$BOOTSTRAP" ]]; then
+    local bs="kafka:9092"
+    if (( KEEP_TOPIC == 1 )); then
+      echo ">> KEEP_TOPIC=1 -> skip topic delete ($topic)"
+    else
+      docker compose exec -T kafka \
+        kafka-topics --bootstrap-server "$bs" \
+        --delete --topic "$topic" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 # ========= 全組み合わせ実行 =========
@@ -211,21 +288,26 @@ done
 # ========= 集計（summary.csv を作成） =========
 echo ">> build summary.csv"
 shopt -s nullglob
-jsons=( "$RESULTS_DIR"/*.jsonl )
+jsons=( "$RESULTS_DIR"/bench-*.jsonl )
 if (( ${#jsons[@]} == 0 )); then
   echo "WARN: 新しい結果ファイルがありません（*.jsonl）"
   exit 0
 fi
 
 {
-  echo "run_id,acks,linger_ms,batch_size,key_strategy,commit_interval_ms,lag_sample_every_msgs,received,measured,throughput_mps,p50_us,p95_us,p99_us,p999_us,tail_ratio,tail_step_999,hdr_count,lag_avg,lag_max,lag_samples,lag_final"
-  jq -r '[.run_id,.acks,.linger_ms,.batch_size,.key_strategy,
-          .commit_interval_ms,.lag_sample_every_msgs,
-          .received,.measured,.throughput_mps,
-          .p50_us,.p95_us,.p99_us,
-          (.p999_us // 0), (.tail_ratio // 0), (.tail_step_999 // 0), (.hdr_count // 0),
-          .lag_avg,.lag_max,.lag_samples,.lag_final] | @csv' \
-      "${jsons[@]}" | sort
+  echo "run_id,acks,linger_ms,batch_size,key_strategy,profile,commit_interval_ms,lag_sample_every_msgs,received,measured,throughput_mps,p50_us,p95_us,p99_us,p999_us,tail_ratio,tail_step_999,hdr_count,lag_avg,lag_max,lag_samples,lag_final,compression"
+  jq -r --arg PROFILE "$PROFILE" --arg COMP "${COMPRESSION_TYPE:-none}" '
+    select(.throughput_mps != null) |
+    [
+      .run_id,.acks,.linger_ms,.batch_size,.key_strategy, (.profile // $PROFILE),
+      .commit_interval_ms,.lag_sample_every_msgs,
+      .received,.measured,.throughput_mps,
+      .p50_us,.p95_us,.p99_us,
+      (.p999_us // 0), (.tail_ratio // 0), (.tail_step_999 // 0), (.hdr_count // 0),
+      .lag_avg,.lag_max,.lag_samples,.lag_final,
+      $COMP
+    ] | @csv' \
+    "${jsons[@]}" | sort
 } > "$RESULTS_DIR/summary.csv"
 
 ## p99 降順 TOP10（ヘッダを除いて sort）
@@ -239,23 +321,23 @@ grp={}
 with open(inp) as f:
   r=csv.DictReader(f)
   for x in r:
-    key=(x["acks"],x["linger_ms"],x["batch_size"],x.get("key_strategy","-"))
+    key=(x["acks"],x["linger_ms"],x["batch_size"],x.get("key_strategy","-"),x.get("profile","-"),x.get("compression","-"))
     grp.setdefault(key,[]).append((float(x["p99_us"]), float(x["throughput_mps"])))
 with open(out,"w",newline="") as w:
-  w.write("acks,linger_ms,batch_size,key_strategy,p99_us_median,mps_median,count\n")
-  for (a,l,b,k),vals in grp.items():
+  w.write("acks,linger_ms,batch_size,key_strategy,profile,compression,p99_us_median,mps_median,count\n")
+  for (a,l,b,k,p,c),vals in grp.items():
     p99s=[v[0] for v in vals]; mps=[v[1] for v in vals]
-    w.write(f"{a},{l},{b},{k},{statistics.median(p99s):.0f},{statistics.median(mps):.0f},{len(vals)}\n")
+    w.write(f"{a},{l},{b},{k},{p},{c},{statistics.median(p99s):.0f},{statistics.median(mps):.0f},{len(vals)}\n")
 print("wrote", out)
 PY
 
 echo ">> sanity checks"
 # lag_samples ≈ measured / lag_sample_every_msgs のズレ検知（±2まで許容）
-jq -r '[.run_id,.measured,.lag_sample_every_msgs,.lag_samples] | @tsv' results/bench-*.jsonl \
+jq -r '[.run_id,.measured,.lag_sample_every_msgs,.lag_samples] | @tsv' "$RESULTS_DIR"/bench-*.jsonl \
 | awk '{exp=int($2/$3); diff=$4-exp; if (diff<-2 || diff>2) print "WARN lag_samples", $1, "diff=",diff}' || true
 
-# p99の信頼度：hdr_count < 1000 を警告（CSVの17列目が hdr_count）
-awk -F, 'NR>1 && $17 < 1000 {print "WARN: low hdr_count ->", $0}' results/summary.csv || true
+# p99の信頼度：hdr_count < 1000 を警告（CSVの18列目が hdr_count）
+awk -F, 'NR>1 && $18 < 1000 {print "WARN: low hdr_count ->", $0}' "$RESULTS_DIR"/summary.csv || true
 
 
 # ========= 可視化（dashboard.html を生成） =========
@@ -280,7 +362,7 @@ for r in rows:
     r["p999_ms"] = r["p999_us"]/1000.0
 
     # ラベルに key を含める
-    r["label"] = f"key={r.get('key_strategy','-')}, acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms, sample={r['lag_sample_every_msgs']}"
+    r["label"] = f"comp={r.get('compression','-')}, key={r.get('key_strategy','-')}, acks={r['acks']}, linger={r['linger_ms']}, batch={r['batch_size']}, commit={r['commit_interval_ms']}ms, sample={r['lag_sample_every_msgs']}"
 
 
 

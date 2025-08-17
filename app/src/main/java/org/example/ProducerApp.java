@@ -1,9 +1,17 @@
 // ProducerApp.java（主要部）
 package org.example;
 
+import java.io.BufferedOutputStream;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.time.Duration;
 import java.util.Properties;
 import java.util.UUID;
+
+import org.HdrHistogram.Recorder;
+import org.HdrHistogram.Histogram;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.serialization.StringSerializer;
 
@@ -55,11 +63,27 @@ public class ProducerApp {
         props.put(ProducerConfig.LINGER_MS_CONFIG, lingerMs);
         props.put(ProducerConfig.BATCH_SIZE_CONFIG, batchSize);
         props.put(ProducerConfig.CLIENT_ID_CONFIG, "producer-" + UUID.randomUUID());
-        props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "zstd");   // or lz4
+        props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG,
+                  System.getenv().getOrDefault("COMPRESSION_TYPE","none")); // none|lz4|zstd
+
+        // ACK往復レイテンシ記録（μs）
+        final boolean ackRecorderOn =
+            "1".equals(System.getenv().getOrDefault("ACK_RECORDER","1"));
+        final String resultsDir =
+            System.getenv().getOrDefault("RESULTS_DIR",".");
+        final String ackHgrmPath =
+            System.getenv().getOrDefault("ACK_HIST_PATH",
+                resultsDir + "/ack-" + runId + ".hgrm");
+        final Recorder ackRec = ackRecorderOn ? new Recorder(1, 60_000_000L, 3) : null; // up to 60s
+
+        // RTプロファイル時の“時間で回す”長さ（秒）
+        final long runSecs = Long.parseLong(System.getenv().getOrDefault("RUN_SECS","30"));
+
+
 
         try (KafkaProducer<String,String> producer = new KafkaProducer<>(props)) {
             long i = 0;
-            long runNs = Duration.ofSeconds(30).toNanos();
+            long runNs = Duration.ofSeconds(runSecs).toNanos();
             long endNs = System.nanoTime() + runNs;
 
             while ((numMsg == 0 && System.nanoTime() < endNs) || (numMsg > 0 && i < numMsg)) {
@@ -94,13 +118,41 @@ public class ProducerApp {
 
                 String payload = node.toString();
 
+                final boolean warm = i >= warmupMsgs; // trueなら計測対象
+                final long t0 = System.nanoTime();
                 producer.send(new ProducerRecord<>(topic, key, payload), (md, ex) -> {
-                    if (ex != null) sendErrors.incrementAndGet();
+                    if (ex != null) { sendErrors.incrementAndGet(); return; }
+                    if (ackRecorderOn && warm) {
+                        long t1 = System.nanoTime();
+                        long us = Math.max(0, (t1 - t0) / 1000);
+                        ackRec.recordValue(us);
+                    }
                 });
                 i++;
             }
             producer.flush();
             System.out.println("送信完了: 件数=" + i + " send_errors=" + sendErrors.get());
+
+            // ACKヒストを .hgrm + 要約JSONLに出力
+            if (ackRecorderOn) {
+                Histogram h = ackRec.getIntervalHistogram();
+                Files.createDirectories(Paths.get(resultsDir));
+                try (PrintStream ps = new PrintStream(
+                        new BufferedOutputStream(new FileOutputStream(ackHgrmPath)),
+                        false, StandardCharsets.UTF_8.name())) {
+                    // μsで出力（値はμsでrecordしている前提）
+                    h.outputPercentileDistribution(ps, 1.0);
+                }
+                String summary = String.format(
+                  "{\"run_id\":\"%s\",\"acks\":\"%s\",\"linger_ms\":%d,\"batch_size\":%d," +
+                  "\"ack_p50_us\":%d,\"ack_p95_us\":%d,\"ack_p99_us\":%d,\"ack_count\":%d}\n",
+                  runId, acks, lingerMs, batchSize,
+                  (long)h.getValueAtPercentile(50), (long)h.getValueAtPercentile(95),
+                  (long)h.getValueAtPercentile(99), h.getTotalCount());
+                Files.writeString(Paths.get(resultsDir, "ack-summary.jsonl"), summary,
+                                  StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            }
+
         }
     }
 }

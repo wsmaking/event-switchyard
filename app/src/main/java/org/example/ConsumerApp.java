@@ -45,12 +45,14 @@ public class ConsumerApp {
         String topic = System.getenv().getOrDefault("TOPIC",
                     System.getenv().getOrDefault("TOPIC_NAME", "events"));
         String brokers = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka:9092");
-
         String groupId = System.getenv().getOrDefault("GROUP_ID", "bench-" + UUID.randomUUID());
+        String runId  = System.getenv().getOrDefault("RUN_ID", String.valueOf(System.currentTimeMillis()));
+        String profile = System.getenv().getOrDefault("PROFILE", "-");
+
+
 
         long expected = Long.parseLong(System.getenv().getOrDefault("EXPECTED_MSG", "0")); // 0=無効
         long idleMs   = Long.parseLong(System.getenv().getOrDefault("IDLE_MS", "1500"));
-
         long totalSeen = 0;              // ウォームアップ含む総受信
         long measured = 0;               // 計測対象のみ
         long firstNsMeasured = 0, lastNsMeasured = 0;
@@ -126,6 +128,8 @@ public class ConsumerApp {
             long lagSampleEveryMsgs = Long.parseLong(System.getenv().getOrDefault("LAG_SAMPLE_EVERY_MSGS", "20000"));
             long sinceLagSample = 0;
             long lastLagObserved = -1;
+            long lagLogIntervalMs = Long.parseLong(System.getenv().getOrDefault("LAG_LOG_INTERVAL_MS", "1000"));
+            long lastLagLogMs = System.currentTimeMillis();
 
 
             // ====== メインループ ======
@@ -204,6 +208,30 @@ public class ConsumerApp {
                         lastCommitMs = System.currentTimeMillis();
                     }
 
+                    // ★ 時間ベースの lag ログ（1秒粒度、JSONLに type="lag" として書く）
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastLagLogMs >= lagLogIntervalMs) {
+                        try {
+                            var asn = consumer.assignment();
+                            if (!asn.isEmpty()) {
+                                var end = consumer.endOffsets(asn);
+                                long totalLag = 0;
+                                for (var tp : asn) {
+                                    long pos = consumer.position(tp);
+                                    totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                                }
+                                // JSONLへ追記（シェルのjqがここを拾って lag-<run_id>.csv を作る）
+                                Map<String,Object> lagRow = new LinkedHashMap<>();
+                                lagRow.put("run_id", runId);
+                                lagRow.put("type", "lag");
+                                lagRow.put("ts_sec", Instant.now().getEpochSecond());
+                                lagRow.put("lag", totalLag);
+                                persistJsonLine(lagRow, runId);
+                            }
+                        } catch (Exception ignore) {}
+                        lastLagLogMs = nowMs;
+                    }
+
                     if (expected > 0 && totalSeen >= expected) break;
 
                 }
@@ -256,7 +284,6 @@ public class ConsumerApp {
             logger.info("latency_us p50={}, p95={}, p99={}, p99.9={}", p50, p95, p99, p999);
 
 
-            String runId     = System.getenv().getOrDefault("RUN_ID", String.valueOf(System.currentTimeMillis()));
             String acks      = System.getenv().getOrDefault("ACKS", "all");
             String lingerMs  = System.getenv().getOrDefault("LINGER",
                                 System.getenv().getOrDefault("LINGER_MS", "0"));
@@ -268,6 +295,7 @@ public class ConsumerApp {
             result.put("git_rev", System.getenv().getOrDefault("GIT_REV", "unknown"));
             result.put("ts", Instant.now().toString());
             result.put("run_id", runId);
+            result.put("profile", profile);
             result.put("topic", topic);
             result.put("group_id", groupId);
             result.put("acks", acks);
