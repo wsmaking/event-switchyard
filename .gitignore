@@ -33,3 +33,7 @@ summary*.csv
 # --- Docker
 *.local.yaml
 EOF
+W1-*.html
+W1-*.csv
+symbols.txt
+e1

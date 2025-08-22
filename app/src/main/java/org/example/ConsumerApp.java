@@ -36,15 +36,23 @@ public class ConsumerApp {
     private static final Histogram HIST_US =
             new Histogram(1, java.util.concurrent.TimeUnit.MINUTES.toMicros(5), 3);
 
+        private static final Histogram WINDOW_HIST_US =
+            new Histogram(1, java.util.concurrent.TimeUnit.MINUTES.toMicros(5), 3);
+
+
     public static void main(String[] args) throws InterruptedException {
         // ====== 入力（環境変数） ======
-        String topic   = System.getenv().getOrDefault("TOPIC_NAME", "events");
-        String brokers = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "localhost:9092");
+        String topic = System.getenv().getOrDefault("TOPIC",
+                    System.getenv().getOrDefault("TOPIC_NAME", "events"));
+        String brokers = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka:9092");
         String groupId = System.getenv().getOrDefault("GROUP_ID", "bench-" + UUID.randomUUID());
+        String runId  = System.getenv().getOrDefault("RUN_ID", String.valueOf(System.currentTimeMillis()));
+        String profile = System.getenv().getOrDefault("PROFILE", "-");
+
+
 
         long expected = Long.parseLong(System.getenv().getOrDefault("EXPECTED_MSG", "0")); // 0=無効
         long idleMs   = Long.parseLong(System.getenv().getOrDefault("IDLE_MS", "1500"));
-
         long totalSeen = 0;              // ウォームアップ含む総受信
         long measured = 0;               // 計測対象のみ
         long firstNsMeasured = 0, lastNsMeasured = 0;
@@ -98,6 +106,15 @@ public class ConsumerApp {
                 logger.info("1秒間のメッセージ受信数: {} 件", tps);
             }, 1, 1, TimeUnit.SECONDS);
 
+            var winTask = scheduler.scheduleAtFixedRate(() -> {
+                long w99;
+                synchronized (WINDOW_HIST_US) {
+                    w99 = WINDOW_HIST_US.getValueAtPercentile(99.0);
+                    WINDOW_HIST_US.reset();
+                }
+                logger.info("window_p99_us={}", w99);
+            }, 5, 5, TimeUnit.SECONDS);
+
 
             OffsetCommitCallback onCommit = (offsets, ex) -> {
                 if (ex != null) logger.warn("commitAsync failed: {}", ex.toString());
@@ -111,6 +128,8 @@ public class ConsumerApp {
             long lagSampleEveryMsgs = Long.parseLong(System.getenv().getOrDefault("LAG_SAMPLE_EVERY_MSGS", "20000"));
             long sinceLagSample = 0;
             long lastLagObserved = -1;
+            long lagLogIntervalMs = Long.parseLong(System.getenv().getOrDefault("LAG_LOG_INTERVAL_MS", "1000"));
+            long lastLagLogMs = System.currentTimeMillis();
 
 
             // ====== メインループ ======
@@ -133,19 +152,19 @@ public class ConsumerApp {
                             JsonNode j = MAPPER.readTree(rec.value());
                             isWarm = j.has("is_warmup") && j.get("is_warmup").asBoolean(false);
 
-                            if (!isWarm && j.has("ts_ns")) {
-                                long tsSendNs = j.get("ts_ns").asLong();
-                                long nowNs = System.currentTimeMillis() * 1_000_000L;
+                            if (!isWarm && j.has("ts_ns_send")) {
+                                long tsSendNs = j.get("ts_ns_send").asLong();
+                                long nowNs    = System.currentTimeMillis() * 1_000_000L;
                                 long latencyUs = Math.max(0, (nowNs - tsSendNs) / 1_000L);
                                 if (latencyUs <= HIST_US.getHighestTrackableValue()) {
                                     HIST_US.recordValue(latencyUs);
+                                    synchronized (WINDOW_HIST_US) { WINDOW_HIST_US.recordValue(latencyUs); }
                                 }
                             } else if (!isWarm) {
-                                // is_warmup=true の時は黙る
-                                logger.debug("ts_ns not found in payload");
+                                logger.debug("ts_ns_send not found in payload");
                             }
                         } catch (Exception e) {
-                            logger.warn("payload parse failed: {}", e.toString());
+                            logger.debug("payload parse failed: {}", e.toString());
                         }
 
                         if (isWarm) {
@@ -189,6 +208,30 @@ public class ConsumerApp {
                         lastCommitMs = System.currentTimeMillis();
                     }
 
+                    // ★ 時間ベースの lag ログ（1秒粒度、JSONLに type="lag" として書く）
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastLagLogMs >= lagLogIntervalMs) {
+                        try {
+                            var asn = consumer.assignment();
+                            if (!asn.isEmpty()) {
+                                var end = consumer.endOffsets(asn);
+                                long totalLag = 0;
+                                for (var tp : asn) {
+                                    long pos = consumer.position(tp);
+                                    totalLag += Math.max(0, end.getOrDefault(tp, pos) - pos);
+                                }
+                                // JSONLへ追記（シェルのjqがここを拾って lag-<run_id>.csv を作る）
+                                Map<String,Object> lagRow = new LinkedHashMap<>();
+                                lagRow.put("run_id", runId);
+                                lagRow.put("type", "lag");
+                                lagRow.put("ts_sec", Instant.now().getEpochSecond());
+                                lagRow.put("lag", totalLag);
+                                persistJsonLine(lagRow, runId);
+                            }
+                        } catch (Exception ignore) {}
+                        lastLagLogMs = nowMs;
+                    }
+
                     if (expected > 0 && totalSeen >= expected) break;
 
                 }
@@ -221,6 +264,7 @@ public class ConsumerApp {
 
             // ====== 集計 & 永続化 ======
             tpsTask.cancel(false);
+            winTask.cancel(false);
 
             double elapsedSec = (lastNsMeasured > firstNsMeasured) ? (lastNsMeasured - firstNsMeasured) / 1e9 : 0.0;
             double mps = (elapsedSec > 0) ? (double) measured / elapsedSec : 0.0;
@@ -233,18 +277,25 @@ public class ConsumerApp {
             long p50 = HIST_US.getValueAtPercentile(50.0);
             long p95 = HIST_US.getValueAtPercentile(95.0);
             long p99 = HIST_US.getValueAtPercentile(99.0);
-            logger.info("latency_us p50={}, p95={}, p99={}", p50, p95, p99);
+            long p999 = HIST_US.getValueAtPercentile(99.9);
+            long hdrCount = HIST_US.getTotalCount();
+            double tailRatio = (p50 > 0) ? (double)p99 / (double)p50 : 0.0;
+            double tailStep999 = (p99 > 0) ? (double)p999 / (double)p99 : 0.0;
+            logger.info("latency_us p50={}, p95={}, p99={}, p99.9={}", p50, p95, p99, p999);
 
-            String runId     = System.getenv().getOrDefault("RUN_ID", String.valueOf(System.currentTimeMillis()));
+
             String acks      = System.getenv().getOrDefault("ACKS", "all");
-            String lingerMs  = System.getenv().getOrDefault("LINGER_MS", "0");
-            String batchSize = System.getenv().getOrDefault("BATCH_SIZE", "16384");
+            String lingerMs  = System.getenv().getOrDefault("LINGER",
+                                System.getenv().getOrDefault("LINGER_MS", "0"));
+            String batchSize = System.getenv().getOrDefault("BATCH",
+                                System.getenv().getOrDefault("BATCH_SIZE", "16384"));
 
             var result = new LinkedHashMap<String, Object>();
             result.put("project", "event-switchyard");
             result.put("git_rev", System.getenv().getOrDefault("GIT_REV", "unknown"));
             result.put("ts", Instant.now().toString());
             result.put("run_id", runId);
+            result.put("profile", profile);
             result.put("topic", topic);
             result.put("group_id", groupId);
             result.put("acks", acks);
@@ -255,6 +306,10 @@ public class ConsumerApp {
             result.put("p50_us", p50);
             result.put("p95_us", p95);
             result.put("p99_us", p99);
+            result.put("p999_us", p999);
+            result.put("hdr_count", hdrCount);
+            result.put("tail_ratio", tailRatio);
+            result.put("tail_step_999", tailStep999);
             result.put("received", totalSeen);
             result.put("measured", measured);
             result.put("elapsed_sec", elapsedSec);
@@ -268,6 +323,9 @@ public class ConsumerApp {
             result.put("lag_avg", lagAvg);
             result.put("lag_max", lagMax);
             result.put("lag_sample_every_msgs", lagSampleEveryMsgs);
+
+            String keyStrategy = System.getenv().getOrDefault("KEY_STRATEGY", "none");
+            result.put("key_strategy", keyStrategy);
 
             persistJsonLine(result, runId);
 
