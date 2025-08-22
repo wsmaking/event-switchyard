@@ -39,9 +39,20 @@ def main():
     b_lat = pick(bench, ["metrics","latency_us","p99"])
     a_lat = pick(base,  ["metrics","latency_us","p99"])
     b_gc  = pick(bench, ["metrics","gc_pause_ms","p99"])
-    a_gc  = pick(base,  ["metrics","gc_pause_ms","p99"])
 
     errs = []
+
+    case_mismatch = (base.get('case') != bench.get('case') or base.get('env') != bench.get('env'))
+    if case_mismatch:
+        print(f"[gate] WARN: baseline mismatch: base({base.get('case')},{base.get('env')}) "
+            f"vs bench({bench.get('case')},{bench.get('env')})")
+
+    base_ok = True
+    if not case_mismatch and a_lat is not None and b_lat is not None:
+        thr = a_lat * 1.05
+        base_ok = b_lat <= thr
+        if not base_ok:
+            errs.append(f"latency_us.p99={b_lat}us > baseline*1.05={thr:.1f}us (base={a_lat}us)")
 
     lat_ok = (b_lat is not None) and (b_lat <= lat_req_us)
     if not lat_ok: errs.append(f"latency_us.p99={b_lat}us > {lat_req_us}us (REQ-PERF-001)")
@@ -50,21 +61,14 @@ def main():
     if b_gc is not None and gc_req_ms is not None:
         gc_ok = b_gc <= gc_req_ms
         if not gc_ok: errs.append(f"gc_pause_ms.p99={b_gc}ms > {gc_req_ms}ms (REQ-PERF-002)")
-
-    base_ok = True
-    if a_lat is not None and b_lat is not None:
-        thr = a_lat * 1.05
-        base_ok = b_lat <= thr
-        if not base_ok: errs.append(f"latency_us.p99={b_lat}us > baseline*1.05={thr:.1f}us (base={a_lat}us)")
-
-    # —— ここから置き換え後の出力ブロック ——
-    req_gc_str = fmt(gc_req_ms,'ms') if b_gc is not None else 'N/A'  # 追加
+    
+    req_gc_str = fmt(gc_req_ms,'ms') if (b_gc is not None and gc_req_ms is not None) else 'N/A'
     print(textwrap.dedent(f"""
     gate summary:
     case={bench.get('case')} env={bench.get('env')}
-    p99={b_lat}us  (REQ {lat_req_us}us)    -> {ok(lat_ok)}
+    p99={fmt(b_lat,'us')}  (REQ {lat_req_us}us)    -> {ok(lat_ok)}
     gc_p99={fmt(b_gc,'ms')} (REQ {req_gc_str})    -> {ok(gc_ok)}
-    vs baseline: {a_lat}us → {b_lat}us (≤ +5%) -> {ok(base_ok)}
+    vs baseline: {fmt(a_lat,'us')} → {fmt(b_lat,'us')} (≤ +5%) -> {ok(base_ok)}
     """).strip())
     # —— ここまで ——
 
