@@ -1,0 +1,28 @@
+name: review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ① ダミーの bench 結果（results/pr.json）を作成
+      - name: Make dummy bench result
+        run: |
+          mkdir -p results rv/tools docs/specs baseline contracts
+          cat > results/pr.json <<'JSON'
+          {"schema":"bench.v1","run_id":"pr-dummy","commit":"${{ github.sha }}","case":"stub","env":"gha|JDK21|G1","metrics":{"latency_us":{"p99":950},"gc_pause_ms":{"p99":3.0}}}
+          JSON
+
+      # ② gate（stub可）を実行
+      - name: Run gate (stub ok)
+        run: |
+          python rv/tools/gate.py --bench results/pr.json --req docs/specs/perf.md --baseline baseline/seed.json
