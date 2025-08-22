@@ -26,6 +26,17 @@ jobs:
         run: ./bench/bench.sh --mode quick --case match_engine_hot --runs 5 --out results/pr.json
       - uses: actions/upload-artifact@v4
         with: { name: bench-results, path: results/pr.json }
+      - name: Validate schema (bench.v1)
+        run: |
+          python -m pip install --upgrade pip jsonschema
+          python - <<'PY'
+          import json
+          from jsonschema import validate
+          schema=json.load(open('contracts/bench/v1/schema.json'))
+          data=json.load(open('results/pr.json'))
+          validate(instance=data, schema=schema)
+          print("schema=OK")
+          PY
 
   review:  # = gate
     needs: bench
