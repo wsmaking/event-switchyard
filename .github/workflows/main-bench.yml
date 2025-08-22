@@ -1,0 +1,44 @@
+name: main-bench
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'bench/**'
+      - 'scripts/**'
+      - 'contracts/**'
+      - 'docs/specs/perf.md'
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 18 * * *' # 03:00 JST（cronはUTC）
+
+concurrency:
+  group: main-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chmod +x bench/bench.sh
+      - name: Run bench (quick)
+        run: ./bench/bench.sh --mode quick --case match_engine_hot --runs 5 --out results/pr.json
+      - uses: actions/upload-artifact@v4
+        with: { name: bench-results, path: results/pr.json }
+
+  review:  # = gate
+    needs: bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - uses: actions/download-artifact@v4
+        with: { name: bench-results, path: results }
+      - name: Gate
+        run: |
+          python scripts/gate.py \
+            --bench results/pr.json \
+            --req docs/specs/perf.md \
+            --baseline baseline/seed.json
