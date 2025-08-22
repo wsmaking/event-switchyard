@@ -28,7 +28,10 @@ logs/
 summary*.csv
 
 # md
-*.md
+#*.md
+LY*.md
+README.md
+
 
 # --- Docker
 *.local.yaml

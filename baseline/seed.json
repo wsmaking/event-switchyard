@@ -1,0 +1,2 @@
+{"schema":"bench.v1","run_id":"seed-000","commit":"0000000","case":"stub","env":"gha|JDK21|G1","metrics":{"latency_us":{"p99":950},"gc_pause_ms":{"p99":3.0}}}
+

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bench.v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "run_id", "commit", "case", "env", "metrics"],
+  "properties": {
+    "schema": { "const": "bench.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "minLength": 1 },
+    "case":   { "type": "string", "minLength": 1 },
+    "env":    { "type": "string", "minLength": 1 },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["latency_us"],
+      "properties": {
+        "latency_us": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["p99"],
+          "properties": { "p99": { "type": "number", "minimum": 0 } }
+        },
+        "gc_pause_ms": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["p99"],
+          "properties": { "p99": { "type": "number", "minimum": 0 } }
+        }
+      }
+    }
+  }
+}
