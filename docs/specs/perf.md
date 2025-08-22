@@ -1,0 +1,2 @@
+- REQ-PERF-001: latency_us p99 ≤ 1000µs
+- REQ-PERF-002: GC pause p99 ≤ 5ms
