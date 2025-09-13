@@ -1,4 +1,3 @@
-// ProducerApp.java（主要部）
 package org.example;
 
 import java.io.BufferedOutputStream;
@@ -24,19 +23,14 @@ public class ProducerApp {
         String brokers   = System.getenv().getOrDefault("BOOTSTRAP_SERVERS", "kafka:9092");
         String acks      = System.getenv().getOrDefault("ACKS", "all");       
         boolean idem = !"1".equals(acks);
-        String topic   = System.getenv().getOrDefault("TOPIC",
-                        System.getenv().getOrDefault("TOPIC_NAME", "events"));
-        int lingerMs   = Integer.parseInt(
-                        System.getenv().getOrDefault("LINGER",
-                        System.getenv().getOrDefault("LINGER_MS", "0")));
-        int batchSize  = Integer.parseInt(
-                        System.getenv().getOrDefault("BATCH",
-                        System.getenv().getOrDefault("BATCH_SIZE", "16384")));
-        long numMsg      = Long.parseLong(System.getenv().getOrDefault("NUM_MSG", "0")); // 0=無制限（時間で終了）
+        String topic   = System.getenv().getOrDefault("TOPIC_NAME", "events");
+        int lingerMs   = Integer.parseInt(System.getenv().getOrDefault("LINGER_MS", "0"));
+        int batchSize  = Integer.parseInt(System.getenv().getOrDefault("BATCH_SIZE", "16384"));
+        long numMsg      = Long.parseLong(System.getenv().getOrDefault("NUM_MSG", "0")); 
         int  payloadBytes = Integer.parseInt(System.getenv().getOrDefault("PAYLOAD_BYTES", "200"));
         long warmupMsgs   = Long.parseLong(System.getenv().getOrDefault("WARMUP_MSGS", "0"));
         String producerId = System.getenv().getOrDefault("HOSTNAME", UUID.randomUUID().toString());
-        String keyStrategy   = System.getenv().getOrDefault("KEY_STRATEGY", "none"); // none|symbol|order_id
+        String keyStrategy   = System.getenv().getOrDefault("KEY_STRATEGY", "none");
         int    HOT_KEY_EVERY = Integer.parseInt(System.getenv().getOrDefault("HOT_KEY_EVERY", "0"));
         String runId         = System.getenv().getOrDefault("RUN_ID", producerId);
 

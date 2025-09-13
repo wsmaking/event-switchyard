@@ -1,34 +1,33 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
 # ========= デフォルト設定 =========
-NUM_MSG="${NUM_MSG:-10000}"
-ACKS=("all" "1")
-LINGER=("0" "5" "50")
-BATCH=("16384" "65536")
-REPEAT="${REPEAT:-1}"
-ARCHIVE=1                 # 実行前に既存結果をアーカイブ退避
-KEEP_ARCHIVES=5           # results/archive の保持世代
-KEY_STRATEGY=("none" "symbol" "order_id")
+NUM_MSG="${NUM_MSG:-10000}" # デフォルト送信件数10000件
+ACKS=("all" "1") # "0" は除外（信頼性が低すぎるため）
+LINGER=("0" "5" "50") # ms
+BATCH=("16384" "65536") # bytes
+REPEAT="${REPEAT:-1}" # 各組み合わせの繰り返し回数
+ARCHIVE=1 # 古い結果をアーカイブするか
+KEEP_ARCHIVES=5 # アーカイブ世代数
+KEY_STRATEGY=("none" "symbol" "order_id") # key の付け方
 
-RESULTS_DIR="$PWD/results"
-ARCHIVE_DIR="$RESULTS_DIR/archive"
+RESULTS_DIR="$PWD/results" # 結果保存ディレクトリ
+ARCHIVE_DIR="$RESULTS_DIR/archive" # 古い結果のアーカイブ先
 
 # ★ ランごと固有トピックにするためのプレフィックス
-TOPIC_PREFIX="${TOPIC_PREFIX:-events}"
-PARTITIONS="${PARTITIONS:-3}"
-REPLICATION="${REPLICATION:-1}"
+TOPIC_PREFIX="${TOPIC_PREFIX:-events}" # 例: events -> events-20240401-120000-...
+PARTITIONS="${PARTITIONS:-3}" # 並列度の目安。
+REPLICATION="${REPLICATION:-1}" # composeのkafka台数以下にすること（下でガードあり）
 BOOTSTRAP="${BOOTSTRAP_SERVERS:-}"   # 例: "kafka:9092,kafka2:9093,kafka3:9094"
-KEEP_TOPIC="${KEEP_TOPIC:-0}"
+KEEP_TOPIC="${KEEP_TOPIC:-0}" # 1: トピック削除しない
 
 PROFILE=${PROFILE:-rt}  # rt | drain
 
 if [[ "$PROFILE" == "rt" ]]; then
-  export SKIP_BACKLOG=true
+  export SKIP_BACKLOG=true # backlog は読まず、以降のメッセージを待つ
   export EXPECTED_MSG=0        # 件数で待たず、idle で終了
   export WARMUP_MSGS=${WARMUP_MSGS:-0}  # 使うならここで調整
 else # drain
-  export SKIP_BACKLOG=false
+  export SKIP_BACKLOG=false # backlog も読む
   export EXPECTED_MSG="$NUM_MSG"  # 全件読み切る
 fi
 

@@ -8,7 +8,6 @@ plugins {
 repositories { mavenCentral() }
 
 dependencies {
-    // version catalog を使っている前提（libs.*）。使ってないなら適宜固定値に置換してOK
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     implementation libs.guava
@@ -17,7 +16,6 @@ dependencies {
     implementation 'org.hdrhistogram:HdrHistogram:2.1.12'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.1'
 
-    // ★ ログは logback に一本化（slf4j-simpleは入れない、slf4j-apiは明示しない）
     implementation 'ch.qos.logback:logback-classic:1.5.6'
     implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
 
@@ -37,28 +35,16 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 tasks.named('shadowJar') {
     archiveBaseName.set('app')
     archiveClassifier.set('all')
-    // ★ gRPCのServiceLoaderを正しくまとめる
     mergeServiceFiles()
-    // minimize() は入れない
 }
 
 application {
-    // composeで "java -cp app-all.jar engine.EngineKt ..." を使うので、manifestはあってもなくてもOK
     mainClass.set(findProperty('mainClass') ?: "org.example.App")
 }
 
-// ★ 通常jarをfat化しない（下2つのどちらかに）
 jar {
     manifest { attributes('Main-Class': application.mainClass.get()) }
-    // 依存展開しない。デフォルトのままにする
-    // duplicatesStrategy = DuplicatesStrategy.EXCLUDE だけ残しておいてもOK
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
-// もしくは完全に無効化してもOK（どちらか一方で）
-/*
-tasks.named('jar') {
-    enabled = false
-}
-*/
 
 tasks.named('test') { useJUnitPlatform() }
