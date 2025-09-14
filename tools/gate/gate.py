@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse, json, re, sys, textwrap
 from pathlib import Path
 

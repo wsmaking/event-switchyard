@@ -40,3 +40,5 @@ W1-*.html
 W1-*.csv
 symbols.txt
 e1
+var/results/
+var/logs/
