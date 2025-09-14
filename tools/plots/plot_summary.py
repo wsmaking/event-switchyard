@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import csv, os
 from collections import defaultdict
 import matplotlib.pyplot as plt

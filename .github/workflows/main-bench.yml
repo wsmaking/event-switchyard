@@ -5,9 +5,11 @@ on:
     paths:
       - 'app/**'
       - 'bench/**'
+      - 'tools/**'
       - 'scripts/**'
       - 'contracts/**'
       - 'docs/specs/perf.md'
+      - '.github/workflows/**'
   workflow_dispatch: {}
   schedule:
     - cron: '0 18 * * *' # 03:00 JST（cronはUTC）
@@ -29,16 +31,17 @@ jobs:
       # ★ mainは黒箱スモークだけ回す（配線健全性チェック）
       - name: Run bench (blackbox)
         run: |
+          mkdir -p var/results var/logs
           scripts/harness_blackbox.sh \
             --cmd 'echo test | sha256sum >/dev/null' \
             --case blackbox_sha256 \
             --runs 200 \
-            --out results/pr.json
+            --out var/results/pr.json
 
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results
-          path: results/pr.json
+          path: var/results/pr.json
 
       - name: Validate schema (bench.v1)
         run: |
@@ -47,7 +50,7 @@ jobs:
           import json
           from jsonschema import validate
           schema=json.load(open('contracts/bench/v1/schema.json'))
-          data=json.load(open('results/pr.json'))
+          data=json.load(open('var/results/pr.json'))
           validate(instance=data, schema=schema)
           print("schema=OK")
           PY
@@ -63,10 +66,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: bench-results
-          path: results
+          path: var/results
       - name: Gate
-        run: |
-          python scripts/gate.py \
-            --bench results/pr.json \
+      - run: |
+          python tools/gate/gate.py \
+            --bench var/results/pr.json \
             --req docs/specs/perf.md \
             --baseline baseline/seed.json
