@@ -1,4 +1,4 @@
-package assigner
+package app.control
 
 import io.etcd.jetcd.Client
 import io.etcd.jetcd.ByteSequence
@@ -53,7 +53,7 @@ fun main(args: Array<String>) {
   // 3) 登録済みエンジン集合を取得
   //    /registry/engines/ プレフィックス下のキーからエンジンIDを抽出してソート
   val regPrefix = ByteSequence.from("/registry/engines/", UTF_8)
-  val engines = kv.get(regPrefix, GetOption.builder().withPrefix(regPrefix).build()).get()
+  val engines = kv.get(regPrefix, GetOption.builder().isPrefix(true).build()).get()
     .kvs.map { it.key.toString(UTF_8).substringAfterLast("/") }.sorted()
 
   if (engines.isEmpty()) {
