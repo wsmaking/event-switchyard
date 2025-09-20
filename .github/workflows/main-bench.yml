@@ -68,7 +68,7 @@ jobs:
           name: bench-results
           path: var/results
       - name: Gate
-      - run: |
+        run: |
           python tools/gate/gate.py \
             --bench var/results/pr.json \
             --req docs/specs/perf.md \
