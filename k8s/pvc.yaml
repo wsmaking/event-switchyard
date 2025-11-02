@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hft-chronicle-queue
+  namespace: hft-system
+  labels:
+    app: hft-fast-path
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+  # HFT最適化: 高性能ストレージクラスを使用
+  # 注: fast-ssd ストレージクラスは事前に作成が必要
+  # 例: AWS EBS gp3, GCP SSD Persistent Disk, Azure Premium SSD

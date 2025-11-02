@@ -7,3 +7,14 @@ app/build/
 **/*.iml
 *.log
 logs/
+var/
+*.md
+docs/
+dashboards/
+scripts/
+tools/
+docker-compose*.yml
+prometheus.yml
+grafana-*.yml
+.dockerignore
+Dockerfile

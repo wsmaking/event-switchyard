@@ -33,6 +33,10 @@ dependencies {
     implementation 'org.apache.kafka:kafka-clients:3.5.1'
     implementation 'org.hdrhistogram:HdrHistogram:2.1.12'
 
+    // --- Prometheus: メトリクスエクスポート ---
+    implementation 'io.prometheus:simpleclient:0.16.0'
+    implementation 'io.prometheus:simpleclient_common:0.16.0'
+
     // --- HFT: 低レイテンシライブラリ ---
     implementation 'com.lmax:disruptor:3.4.4'        // ロックフリーRing Buffer
     implementation 'org.agrona:agrona:1.21.1'        // Zero-GCコレクション
