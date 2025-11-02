@@ -27,10 +27,19 @@ logs/
 *.jsonl
 summary*.csv
 
+# --- Chronicle Queue データファイル
+data/
+*.cq4
+*.cq4t
+
+# --- 無効化ファイル
+*.broken
+
 # md
 #*.md
 LY*.md
 README.md
+*.md
 
 
 # --- Docker

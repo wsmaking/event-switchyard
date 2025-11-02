@@ -1,6 +1,8 @@
 package app.engine
 
 import app.fast.FastPathEngine
+import app.kafka.ChronicleQueueWriter
+import app.kafka.KafkaBridge
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -10,15 +12,30 @@ import java.util.concurrent.atomic.AtomicLong
  * - FAST_PATH_ENABLE: "1"でFast Pathを有効化 (デフォルト: "0")
  * - FAST_PATH_SYMBOLS: Fast Path対象のシンボルをカンマ区切りで指定 (例: "BTC,ETH")
  * - FAST_PATH_FALLBACK: "1"でFast Path失敗時にSlow Pathへフォールバック (デフォルト: "1")
+ * - KAFKA_BRIDGE_ENABLE: "1"でKafka Bridgeを有効化 (デフォルト: "0")
  */
 class Router(
     private val slowPath: Engine,
     private val fastPathEnabled: Boolean = System.getenv("FAST_PATH_ENABLE") == "1",
     private val fastPathSymbols: Set<String> = parseFastPathSymbols(),
-    private val fallbackEnabled: Boolean = System.getenv("FAST_PATH_FALLBACK") != "0"
+    private val fallbackEnabled: Boolean = System.getenv("FAST_PATH_FALLBACK") != "0",
+    private val kafkaBridgeEnabled: Boolean = System.getenv("KAFKA_BRIDGE_ENABLE") == "1"
 ) : AutoCloseable {
 
-    private val fastPath: FastPathEngine? = if (fastPathEnabled) FastPathEngine() else null
+    // Chronicle Queue (Fast Path → Kafka送信のための永続化)
+    private val chronicleWriter: ChronicleQueueWriter? = if (fastPathEnabled && kafkaBridgeEnabled) {
+        ChronicleQueueWriter()
+    } else null
+
+    // Fast Path Engine (Chronicle Writerを渡す)
+    private val fastPath: FastPathEngine? = if (fastPathEnabled) {
+        FastPathEngine(chronicleWriter = chronicleWriter)
+    } else null
+
+    // Kafka Bridge (Chronicle Queue → Kafka非同期転送)
+    private val kafkaBridge: KafkaBridge? = if (kafkaBridgeEnabled && chronicleWriter != null) {
+        KafkaBridge().apply { start() }
+    } else null
 
     private val fastPathCount = AtomicLong(0)
     private val slowPathCount = AtomicLong(0)
@@ -72,12 +89,17 @@ class Router(
             fastPathCount = fastPathCount.get(),
             slowPathCount = slowPathCount.get(),
             fallbackCount = fallbackCount.get(),
-            fastPathMetrics = fastPath?.getMetrics()?.snapshot()
+            fastPathMetrics = fastPath?.getMetrics()?.snapshot(),
+            chronicleQueueStats = chronicleWriter?.getStats(),
+            kafkaBridgeStats = kafkaBridge?.getStats()
         )
     }
 
     override fun close() {
+        // 順序重要: KafkaBridge → FastPath → ChronicleWriter
+        kafkaBridge?.close()
         fastPath?.close()
+        chronicleWriter?.close()
     }
 
     companion object {
@@ -95,7 +117,9 @@ data class RouterStats(
     val fastPathCount: Long,
     val slowPathCount: Long,
     val fallbackCount: Long,
-    val fastPathMetrics: app.fast.MetricsSnapshot?
+    val fastPathMetrics: app.fast.MetricsSnapshot?,
+    val chronicleQueueStats: app.kafka.ChronicleQueueStats?,
+    val kafkaBridgeStats: app.kafka.KafkaBridgeStats?
 ) {
     fun toMap(): Map<String, Any> {
         val map = mutableMapOf<String, Any>(
@@ -109,6 +133,14 @@ data class RouterStats(
             map["fast_path_avg_publish_us"] = it.avgPublishLatencyUs()
             map["fast_path_avg_process_us"] = it.avgProcessLatencyUs()
             map["fast_path_drop_count"] = it.dropCount
+        }
+
+        chronicleQueueStats?.let {
+            map.putAll(it.toMap())
+        }
+
+        kafkaBridgeStats?.let {
+            map.putAll(it.toMap())
         }
 
         return map

@@ -1,5 +1,6 @@
 package app.fast
 
+import app.kafka.ChronicleQueueWriter
 import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
 import com.lmax.disruptor.dsl.ProducerType
@@ -20,7 +21,8 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class FastPathEngine(
     bufferSize: Int = 65536,  // 2の累乗である必要あり
-    enableMetrics: Boolean = System.getenv("FAST_PATH_METRICS") == "1"
+    enableMetrics: Boolean = System.getenv("FAST_PATH_METRICS") == "1",
+    private val chronicleWriter: ChronicleQueueWriter? = null  // Kafka送信のための永続化
 ) : AutoCloseable {
 
     private val disruptor: Disruptor<TradeEvent>
@@ -47,7 +49,7 @@ class FastPathEngine(
         )
 
         // イベントハンドラーを登録
-        disruptor.handleEventsWith(TradeEventHandler(metrics))
+        disruptor.handleEventsWith(TradeEventHandler(metrics, chronicleWriter, symbolTable))
         disruptor.start()
 
         ringBuffer = disruptor.ringBuffer
@@ -105,7 +107,9 @@ data class TradeEvent(
  * イベントハンドラー (専用スレッドで実行)
  */
 private class TradeEventHandler(
-    private val metrics: FastPathMetrics?
+    private val metrics: FastPathMetrics?,
+    private val chronicleWriter: ChronicleQueueWriter?,
+    private val symbolTable: SymbolTable
 ) : EventHandler<TradeEvent> {
 
     private val processedCount = AtomicLong(0)
@@ -132,6 +136,14 @@ private class TradeEventHandler(
         // - オーダーマッチング
         // - リスクチェック
         // - 約定処理
+
+        // Chronicle Queueへ書き込み (Kafka送信のため)
+        // Fast Path処理とは非同期で、Kafka Bridgeが読み込んで送信する
+        chronicleWriter?.let { writer ->
+            val key = symbolTable.resolve(event.symbolId) ?: "unknown"
+            val payload = event.inlinePayload.copyOf(event.payloadSize.toInt())
+            writer.write(key, payload, event.timestamp)
+        }
     }
 }
 
