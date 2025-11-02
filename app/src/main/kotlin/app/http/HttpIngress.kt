@@ -1,6 +1,7 @@
 package app.http
 
 import app.engine.Engine
+import app.engine.Router
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
@@ -8,33 +9,62 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.concurrent.Executors
 
-class HttpIngress(
-    private val engine: Engine,
-    port: Int
-) : AutoCloseable {
+interface RequestHandler {
+    fun handle(key: String, payload: ByteArray): Boolean
+}
 
-    private val server: HttpServer = HttpServer.create(InetSocketAddress(port), 0).apply {
-        createContext("/events") { ex ->
-            try {
-                if (ex.requestMethod != "POST") {
-                    return@createContext send(ex, 405, "METHOD_NOT_ALLOWED")
+private class EngineHandler(private val engine: Engine) : RequestHandler {
+    override fun handle(key: String, payload: ByteArray) = engine.handle(key, payload)
+}
+
+private class RouterHandler(private val router: Router) : RequestHandler {
+    override fun handle(key: String, payload: ByteArray) = router.handle(key, payload)
+}
+
+class HttpIngress : AutoCloseable {
+    private val handler: RequestHandler
+    private val server: HttpServer
+    private var router: Router? = null
+
+    constructor(engine: Engine, port: Int) {
+        this.handler = EngineHandler(engine)
+        this.server = createServer(port)
+    }
+
+    constructor(router: Router, port: Int) {
+        this.handler = RouterHandler(router)
+        this.router = router
+        this.server = createServer(port)
+    }
+
+    private fun createServer(port: Int): HttpServer {
+        return HttpServer.create(InetSocketAddress(port), 0).apply {
+            createContext("/events") { ex ->
+                try {
+                    if (ex.requestMethod != "POST") {
+                        return@createContext send(ex, 405, "METHOD_NOT_ALLOWED")
+                    }
+                    val params = parseQuery(ex.requestURI.rawQuery ?: "")
+                    val key = params["key"]
+                    if (key.isNullOrEmpty()) {
+                        return@createContext send(ex, 400, "MISSING_KEY")
+                    }
+                    val body = ex.requestBody.readAllBytes()
+                    val ok = handler.handle(key, body)
+                    if (ok) send(ex, 200, "OK") else send(ex, 409, "NOT_OWNER")
+                } catch (_: Throwable) {
+                    send(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
                 }
-                val params = parseQuery(ex.requestURI.rawQuery ?: "")
-                val key = params["key"]
-                if (key.isNullOrEmpty()) {
-                    return@createContext send(ex, 400, "MISSING_KEY")
-                }
-                val body = ex.requestBody.readAllBytes()
-                val ok = engine.handle(key, body)
-                if (ok) send(ex, 200, "OK") else send(ex, 409, "NOT_OWNER")
-            } catch (_: Throwable) {
-                send(ex, 500, "ERROR")
-            } finally {
-                ex.close()
             }
+            // Routerが利用可能な場合、/statsエンドポイントを追加
+            router?.let { r ->
+                createContext("/stats", StatsController(r))
+            }
+            executor = Executors.newCachedThreadPool()
+            start()
         }
-        executor = Executors.newCachedThreadPool()
-        start()
     }
 
     private fun send(ex: HttpExchange, status: Int, text: String) {
@@ -44,7 +74,6 @@ class HttpIngress(
         ex.responseBody.use { it.write(bytes) }
     }
 
-    // "&"区切りを安全にMapへ。空要素や "k" だけのケースにも耐性あり
     private fun parseQuery(q: String): Map<String, String> {
         if (q.isEmpty()) return emptyMap()
         val pairs = mutableListOf<Pair<String, String>>()

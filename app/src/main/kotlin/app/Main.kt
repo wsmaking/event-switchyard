@@ -52,7 +52,9 @@ fun main() {
         intervalMs = (System.getenv("ENGINE_POLL_MS") ?: "300").toLong()
     )
 
-    val ingress = HttpIngress(Engine(ownership, logQ, cdcQ), 8080)
+    val engine = Engine(ownership, logQ, cdcQ)
+    val router = app.engine.Router(engine)
+    val ingress = HttpIngress(router, 8080)
 
-    Runtime.getRuntime().addShutdownHook(Thread { ingress.close(); poller.close(); lease.close(); writer.close(); client.close() })
+    Runtime.getRuntime().addShutdownHook(Thread { ingress.close(); router.close(); poller.close(); lease.close(); writer.close(); client.close() })
 }

@@ -32,6 +32,11 @@ dependencies {
     implementation libs.guava
     implementation 'org.apache.kafka:kafka-clients:3.5.1'
     implementation 'org.hdrhistogram:HdrHistogram:2.1.12'
+
+    // --- HFT: 低レイテンシライブラリ ---
+    implementation 'com.lmax:disruptor:3.4.4'        // ロックフリーRing Buffer
+    implementation 'org.agrona:agrona:1.21.1'        // Zero-GCコレクション
+    implementation 'net.openhft:chronicle-queue:5.25ea5'  // 永続化ジャーナル (Java 21対応)
     implementation 'ch.qos.logback:logback-classic:1.5.6'
     implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
     implementation 'io.etcd:jetcd-core:0.7.7'
@@ -52,6 +57,17 @@ tasks.named('shadowJar') {
 
 application {
     mainClass.set((findProperty('mainClass') ?: "app.MainKt") as String)
+    applicationDefaultJvmArgs = [
+        '--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED',
+        '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED',
+        '--add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED',
+        '--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED',
+        '--add-opens=jdk.compiler/com.sun.tools.javac=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+        '--add-opens=java.base/java.io=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED'
+    ]
 }
 
 jar {
