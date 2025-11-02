@@ -1,12 +1,12 @@
 set -euo pipefail
 
-# defaults
+# デフォルト値
 mode="quick"
 case_name="match_engine_hot"
 runs=5
 out="results/pr.json"
 
-# args
+# コマンドライン引数の解析
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="$2"; shift 2;;
@@ -17,20 +17,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# 出力ディレクトリ作成
 mkdir -p "$(dirname "$out")"
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 run_id="${GITHUB_RUN_ID:-local-$(date +%s)}"
 
 if [[ "$mode" == "quick" ]]; then
-  # 短時間モード（PR/配線確認用）
+  # 固定値モード（CI用の高速チェック）
   p99_us=950
   gc_p99_ms=3.0
 else
-  # TODO: 実ベンチに差し替え（Kafka起動→少量送受信→p99算出）
+  # TODO: 実測モード（実際にKafka起動して性能測定）
   p99_us=950
   gc_p99_ms=3.0
 fi
 
+# 結果JSONファイル出力
 cat > "$out" <<JSON
 {"schema":"bench.v1","run_id":"$run_id","commit":"$commit","case":"$case_name","env":"gha|JDK21|G1","metrics":{"latency_us":{"p99":$p99_us},"gc_pause_ms":{"p99":$gc_p99_ms}}}
 JSON
