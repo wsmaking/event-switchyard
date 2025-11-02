@@ -58,9 +58,10 @@ class HttpIngress : AutoCloseable {
                     ex.close()
                 }
             }
-            // Routerが利用可能な場合、/statsエンドポイントを追加
+            // Routerが利用可能な場合、/stats と /health エンドポイントを追加
             router?.let { r ->
                 createContext("/stats", StatsController(r))
+                createContext("/health", HealthController(r))
             }
             executor = Executors.newCachedThreadPool()
             start()
