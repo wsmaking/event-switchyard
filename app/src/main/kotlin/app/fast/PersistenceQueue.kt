@@ -4,6 +4,7 @@ import app.kafka.ChronicleQueueWriter
 import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
 import com.lmax.disruptor.dsl.ProducerType
+import org.HdrHistogram.Histogram
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicLong
 
@@ -30,6 +31,8 @@ class PersistenceQueueEngine(
     private val publishCount = AtomicLong(0)
     private val dropCount = AtomicLong(0)
     private val processCount = AtomicLong(0)
+    private val errorCount = AtomicLong(0)  // Chronicle Queue書き込みエラー数
+    private val writeLatencyHistogram = Histogram(1_000_000_000L, 3)  // Chronicle Queue書き込みレイテンシ
 
     init {
         val threadFactory = ThreadFactory { r ->
@@ -47,7 +50,7 @@ class PersistenceQueueEngine(
             BlockingWaitStrategy()  // レイテンシよりスループット重視
         )
 
-        disruptor.handleEventsWith(PersistenceEventHandler(chronicleWriter, processCount))
+        disruptor.handleEventsWith(PersistenceEventHandler(chronicleWriter, processCount, errorCount, writeLatencyHistogram))
         disruptor.start()
 
         ringBuffer = disruptor.ringBuffer
@@ -83,7 +86,11 @@ class PersistenceQueueEngine(
             publishCount = publishCount.get(),
             dropCount = dropCount.get(),
             processCount = processCount.get(),
-            lag = publishCount.get() - processCount.get()
+            errorCount = errorCount.get(),
+            lag = publishCount.get() - processCount.get(),
+            writeP50Ns = writeLatencyHistogram.getValueAtPercentile(50.0),
+            writeP99Ns = writeLatencyHistogram.getValueAtPercentile(99.0),
+            writeP999Ns = writeLatencyHistogram.getValueAtPercentile(99.9)
         )
     }
 
@@ -135,18 +142,33 @@ data class PersistenceEvent(
  */
 private class PersistenceEventHandler(
     private val chronicleWriter: ChronicleQueueWriter,
-    private val processCount: AtomicLong
+    private val processCount: AtomicLong,
+    private val errorCount: AtomicLong,
+    private val writeLatencyHistogram: Histogram
 ) : EventHandler<PersistenceEvent> {
 
     override fun onEvent(event: PersistenceEvent, sequence: Long, endOfBatch: Boolean) {
-        // Chronicle Queueへ書き込み
-        chronicleWriter.write(
-            event.key,
-            event.payload.copyOf(event.payloadSize.toInt()),
-            event.timestamp
-        )
+        val startNs = System.nanoTime()
 
-        processCount.incrementAndGet()
+        try {
+            // Chronicle Queueへ書き込み
+            chronicleWriter.write(
+                event.key,
+                event.payload.copyOf(event.payloadSize.toInt()),
+                event.timestamp
+            )
+
+            val latencyNs = System.nanoTime() - startNs
+            writeLatencyHistogram.recordValue(latencyNs)
+            processCount.incrementAndGet()
+        } catch (e: Exception) {
+            errorCount.incrementAndGet()
+            System.err.println("ERROR: Chronicle Queue write failed for key=${event.key}, error=${e.message}")
+            e.printStackTrace()
+            // エラー時もレイテンシは記録 (トラブルシューティング用)
+            val latencyNs = System.nanoTime() - startNs
+            writeLatencyHistogram.recordValue(latencyNs)
+        }
     }
 }
 
@@ -157,12 +179,20 @@ data class PersistenceQueueStats(
     val publishCount: Long,
     val dropCount: Long,
     val processCount: Long,
-    val lag: Long  // 公開数 - 処理数
+    val errorCount: Long,  // Chronicle Queue書き込みエラー数
+    val lag: Long,  // 公開数 - 処理数
+    val writeP50Ns: Long,
+    val writeP99Ns: Long,
+    val writeP999Ns: Long
 ) {
     fun toMap(): Map<String, Any> = mapOf(
         "persistence_queue_publish_count" to publishCount,
         "persistence_queue_drop_count" to dropCount,
         "persistence_queue_process_count" to processCount,
-        "persistence_queue_lag" to lag
+        "persistence_queue_error_count" to errorCount,
+        "persistence_queue_lag" to lag,
+        "persistence_queue_write_p50_us" to (writeP50Ns / 1000.0),
+        "persistence_queue_write_p99_us" to (writeP99Ns / 1000.0),
+        "persistence_queue_write_p999_us" to (writeP999Ns / 1000.0)
     )
 }

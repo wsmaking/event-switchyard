@@ -4,6 +4,7 @@ import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
 import com.lmax.disruptor.dsl.ProducerType
 import org.agrona.collections.Object2ObjectHashMap
+import org.HdrHistogram.Histogram
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicLong
 
@@ -168,7 +169,7 @@ private class SymbolTable {
 }
 
 /**
- * メトリクス収集 (ロックフリー)
+ * メトリクス収集 (ロックフリー + HDR Histogram)
  */
 class FastPathMetrics {
     private val publishLatencyNs = AtomicLong(0)
@@ -176,13 +177,19 @@ class FastPathMetrics {
     private val dropCount = AtomicLong(0)
     private val eventCount = AtomicLong(0)
 
+    // HDR Histogram: 1ns ~ 1秒 (1,000,000,000ns), 3桁精度
+    private val publishHistogram = Histogram(1_000_000_000L, 3)
+    private val processHistogram = Histogram(1_000_000_000L, 3)
+
     fun recordPublish(latencyNs: Long) {
         publishLatencyNs.addAndGet(latencyNs)
         eventCount.incrementAndGet()
+        publishHistogram.recordValue(latencyNs)
     }
 
     fun recordProcess(latencyNs: Long) {
         processLatencyNs.addAndGet(latencyNs)
+        processHistogram.recordValue(latencyNs)
     }
 
     fun recordDrop() {
@@ -195,7 +202,13 @@ class FastPathMetrics {
             avgPublishLatencyNs = if (count > 0) publishLatencyNs.get() / count else 0,
             avgProcessLatencyNs = if (count > 0) processLatencyNs.get() / count else 0,
             dropCount = dropCount.get(),
-            eventCount = count
+            eventCount = count,
+            publishP50Ns = publishHistogram.getValueAtPercentile(50.0),
+            publishP99Ns = publishHistogram.getValueAtPercentile(99.0),
+            publishP999Ns = publishHistogram.getValueAtPercentile(99.9),
+            processP50Ns = processHistogram.getValueAtPercentile(50.0),
+            processP99Ns = processHistogram.getValueAtPercentile(99.0),
+            processP999Ns = processHistogram.getValueAtPercentile(99.9)
         )
     }
 }
@@ -204,8 +217,20 @@ data class MetricsSnapshot(
     val avgPublishLatencyNs: Long,
     val avgProcessLatencyNs: Long,
     val dropCount: Long,
-    val eventCount: Long
+    val eventCount: Long,
+    val publishP50Ns: Long,
+    val publishP99Ns: Long,
+    val publishP999Ns: Long,
+    val processP50Ns: Long,
+    val processP99Ns: Long,
+    val processP999Ns: Long
 ) {
     fun avgPublishLatencyUs() = avgPublishLatencyNs / 1000.0
     fun avgProcessLatencyUs() = avgProcessLatencyNs / 1000.0
+    fun publishP50Us() = publishP50Ns / 1000.0
+    fun publishP99Us() = publishP99Ns / 1000.0
+    fun publishP999Us() = publishP999Ns / 1000.0
+    fun processP50Us() = processP50Ns / 1000.0
+    fun processP99Us() = processP99Ns / 1000.0
+    fun processP999Us() = processP999Ns / 1000.0
 }

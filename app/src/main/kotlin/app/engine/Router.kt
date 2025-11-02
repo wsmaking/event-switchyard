@@ -142,6 +142,12 @@ data class RouterStats(
             map["fast_path_avg_publish_us"] = it.avgPublishLatencyUs()
             map["fast_path_avg_process_us"] = it.avgProcessLatencyUs()
             map["fast_path_drop_count"] = it.dropCount
+            map["fast_path_publish_p50_us"] = it.publishP50Us()
+            map["fast_path_publish_p99_us"] = it.publishP99Us()
+            map["fast_path_publish_p999_us"] = it.publishP999Us()
+            map["fast_path_process_p50_us"] = it.processP50Us()
+            map["fast_path_process_p99_us"] = it.processP99Us()
+            map["fast_path_process_p999_us"] = it.processP999Us()
         }
 
         persistenceQueueStats?.let {
