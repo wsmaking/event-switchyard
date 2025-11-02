@@ -1,0 +1,84 @@
+# Burst Traffic Profile
+# Purpose: Simulate sudden traffic spikes to test Fast Path under burst load
+
+name: burst
+description: "Burst traffic pattern with ramp-up, sustained burst, and ramp-down phases"
+
+# Total benchmark duration
+duration_sec: 60
+
+# Total events to send
+events_total: 10000
+
+# Warmup configuration
+warmup:
+  percent: 5        # Exclude first 5% of events from metrics
+  min_events: 100   # Minimum 100 events for warmup
+
+# Traffic pattern phases
+pattern:
+  - phase: ramp_up
+    description: "Gradual ramp-up from low to high traffic"
+    duration_sec: 10
+    rate_start: 100  # events/sec
+    rate_end: 1000   # events/sec
+    interpolation: linear
+
+  - phase: burst
+    description: "Sustained high traffic burst"
+    duration_sec: 20
+    rate: 1000       # events/sec (constant)
+
+  - phase: ramp_down
+    description: "Gradual ramp-down back to low traffic"
+    duration_sec: 10
+    rate_start: 1000
+    rate_end: 100
+    interpolation: linear
+
+  - phase: recovery
+    description: "Low traffic recovery period"
+    duration_sec: 20
+    rate: 100
+
+# Key distribution (uniform across all keys)
+keys:
+  - BTC
+  - ETH
+  - XRP
+  - SOL
+  - ADA
+
+keys_distribution:
+  type: uniform  # uniform, weighted, or zipf
+  # For uniform: all keys have equal probability
+
+# Payload configuration
+payload:
+  size_bytes: 200
+  schema:
+    type: trade_event
+    fields:
+      - name: price
+        type: double
+        range: [1000, 100000]
+      - name: quantity
+        type: double
+        range: [0.1, 100]
+      - name: timestamp
+        type: long
+        value: current_time_ms
+
+# Expected SLO targets for this profile
+slo_targets:
+  fast_path_p99_us: 100
+  fast_path_p999_us: 3000
+  tail_ratio_max: 12.0
+  drop_count: 0
+  error_rate_percent: 0.01
+
+# Reporting configuration
+reporting:
+  window_sec: [5, 30]  # Report metrics for 5s and 30s windows
+  percentiles: [50, 95, 99, 99.9]
+  include_jvm_metrics: true

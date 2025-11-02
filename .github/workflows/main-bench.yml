@@ -55,8 +55,101 @@ jobs:
           print("schema=OK")
           PY
 
+  # W3: SLO回帰ゲート (カナリアテスト)
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Python依存関係インストール
+      - name: Install Python dependencies
+        run: pip install jsonschema pyyaml
+
+      # アプリケーションビルド
+      - name: Build application
+        run: ./gradlew build -x test
+
+      # アプリケーション起動 (バックグラウンド)
+      - name: Start application
+        run: |
+          FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run &
+          APP_PID=$!
+          echo $APP_PID > var/app.pid
+
+          # ヘルスチェック待機 (最大30秒)
+          for i in {1..30}; do
+            if curl -s -f http://localhost:8080/health >/dev/null 2>&1; then
+              echo "✅ アプリ起動完了"
+              break
+            fi
+            echo "⏳ アプリ起動待機中... ($i/30)"
+            sleep 1
+          done
+
+      # カナリアテスト実行
+      - name: Run canary test
+        run: |
+          chmod +x bench/run_canary.sh
+          mkdir -p var/results
+          bash bench/run_canary.sh \
+            --profiles bench/profiles \
+            --out var/results/canary.json \
+            --env ci
+
+      # アプリケーション停止
+      - name: Stop application
+        if: always()
+        run: |
+          if [ -f var/app.pid ]; then
+            kill $(cat var/app.pid) || true
+          fi
+
+      # SLOゲート実行
+      - name: SLO Gate
+        run: |
+          python scripts/slo_gate.py \
+            --in var/results/canary.json \
+            --schema contracts/bench.v1.schema.json \
+            --github-summary var/results/github_summary.md
+
+      # W4: 背圧オートチューナ実行
+      - name: Backpressure Tuner
+        run: |
+          python scripts/backpressure_tuner.py \
+            --metrics var/results/canary.json \
+            --out var/results/tuner.csv \
+            --pr-comment var/results/tuner_comment.md \
+            --verbose
+
+      # GitHub Step Summary出力
+      - name: Publish GitHub Step Summary
+        if: always()
+        run: |
+          if [ -f var/results/github_summary.md ]; then
+            cat var/results/github_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f var/results/tuner_comment.md ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat var/results/tuner_comment.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # 結果アーティファクトアップロード
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-results
+          path: |
+            var/results/canary.json
+            var/results/github_summary.md
+            var/results/tuner.csv
+            var/results/tuner_comment.md
+
   review:  # = gate
-    needs: bench
+    needs: [bench, canary]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
