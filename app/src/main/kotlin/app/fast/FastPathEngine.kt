@@ -1,6 +1,5 @@
 package app.fast
 
-import app.kafka.ChronicleQueueWriter
 import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
 import com.lmax.disruptor.dsl.ProducerType
@@ -17,12 +16,12 @@ import java.util.concurrent.atomic.AtomicLong
  * - シングルプロデューサー/コンシューマーでロックフリー動作
  * - イベント事前割り当て (ホットパスでのアロケーション無し)
  * - シンボルのインターン化でString生成を回避
- * - 固定小数点演算で価格を扱う (Doubleのboxingを回避)
+ * - Chronicle Queue書き込みはPersistence Queueへ委譲 (非同期)
  */
 class FastPathEngine(
     bufferSize: Int = 65536,  // 2の累乗である必要あり
     enableMetrics: Boolean = System.getenv("FAST_PATH_METRICS") == "1",
-    private val chronicleWriter: ChronicleQueueWriter? = null  // Kafka送信のための永続化
+    private val persistenceQueue: PersistenceQueueEngine? = null  // 永続化キュー (非同期)
 ) : AutoCloseable {
 
     private val disruptor: Disruptor<TradeEvent>
@@ -49,7 +48,7 @@ class FastPathEngine(
         )
 
         // イベントハンドラーを登録
-        disruptor.handleEventsWith(TradeEventHandler(metrics, chronicleWriter, symbolTable))
+        disruptor.handleEventsWith(TradeEventHandler(metrics, persistenceQueue, symbolTable))
         disruptor.start()
 
         ringBuffer = disruptor.ringBuffer
@@ -108,7 +107,7 @@ data class TradeEvent(
  */
 private class TradeEventHandler(
     private val metrics: FastPathMetrics?,
-    private val chronicleWriter: ChronicleQueueWriter?,
+    private val persistenceQueue: PersistenceQueueEngine?,
     private val symbolTable: SymbolTable
 ) : EventHandler<TradeEvent> {
 
@@ -137,12 +136,12 @@ private class TradeEventHandler(
         // - リスクチェック
         // - 約定処理
 
-        // Chronicle Queueへ書き込み (Kafka送信のため)
-        // Fast Path処理とは非同期で、Kafka Bridgeが読み込んで送信する
-        chronicleWriter?.let { writer ->
+        // Persistence Queueへ公開 (非同期、Chronicle Queue書き込み)
+        // Fast Path処理から完全分離され、レイテンシに影響しない
+        persistenceQueue?.let { queue ->
             val key = symbolTable.resolve(event.symbolId) ?: "unknown"
             val payload = event.inlinePayload.copyOf(event.payloadSize.toInt())
-            writer.write(key, payload, event.timestamp)
+            queue.tryPublish(key, payload, event.timestamp)
         }
     }
 }

@@ -1,6 +1,7 @@
 package app.engine
 
 import app.fast.FastPathEngine
+import app.fast.PersistenceQueueEngine
 import app.kafka.ChronicleQueueWriter
 import app.kafka.KafkaBridge
 import java.util.concurrent.atomic.AtomicLong
@@ -27,9 +28,14 @@ class Router(
         ChronicleQueueWriter()
     } else null
 
-    // Fast Path Engine (Chronicle Writerを渡す)
+    // Persistence Queue Engine (Chronicle Queue書き込み専用、別スレッド)
+    private val persistenceQueue: PersistenceQueueEngine? = if (chronicleWriter != null) {
+        PersistenceQueueEngine(chronicleWriter)
+    } else null
+
+    // Fast Path Engine (Persistence Queueを渡す)
     private val fastPath: FastPathEngine? = if (fastPathEnabled) {
-        FastPathEngine(chronicleWriter = chronicleWriter)
+        FastPathEngine(persistenceQueue = persistenceQueue)
     } else null
 
     // Kafka Bridge (Chronicle Queue → Kafka非同期転送)
@@ -90,15 +96,17 @@ class Router(
             slowPathCount = slowPathCount.get(),
             fallbackCount = fallbackCount.get(),
             fastPathMetrics = fastPath?.getMetrics()?.snapshot(),
+            persistenceQueueStats = persistenceQueue?.getStats(),
             chronicleQueueStats = chronicleWriter?.getStats(),
             kafkaBridgeStats = kafkaBridge?.getStats()
         )
     }
 
     override fun close() {
-        // 順序重要: KafkaBridge → FastPath → ChronicleWriter
+        // 順序重要: KafkaBridge → FastPath → PersistenceQueue → ChronicleWriter
         kafkaBridge?.close()
         fastPath?.close()
+        persistenceQueue?.close()
         chronicleWriter?.close()
     }
 
@@ -118,6 +126,7 @@ data class RouterStats(
     val slowPathCount: Long,
     val fallbackCount: Long,
     val fastPathMetrics: app.fast.MetricsSnapshot?,
+    val persistenceQueueStats: app.fast.PersistenceQueueStats?,
     val chronicleQueueStats: app.kafka.ChronicleQueueStats?,
     val kafkaBridgeStats: app.kafka.KafkaBridgeStats?
 ) {
@@ -133,6 +142,10 @@ data class RouterStats(
             map["fast_path_avg_publish_us"] = it.avgPublishLatencyUs()
             map["fast_path_avg_process_us"] = it.avgProcessLatencyUs()
             map["fast_path_drop_count"] = it.dropCount
+        }
+
+        persistenceQueueStats?.let {
+            map.putAll(it.toMap())
         }
 
         chronicleQueueStats?.let {
