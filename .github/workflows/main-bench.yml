@@ -76,6 +76,7 @@ jobs:
       # アプリケーション起動 (バックグラウンド)
       - name: Start application
         run: |
+          mkdir -p var
           FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run &
           APP_PID=$!
           echo $APP_PID > var/app.pid
