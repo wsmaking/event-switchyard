@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 最小再現リプレイ抽出 (Minimal Replay Extractor)
 

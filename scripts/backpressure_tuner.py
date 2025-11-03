@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 背圧オートチューナ (Backpressure Auto-Tuner)
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 SLO Gate - Benchmark results validation against SLO targets
 Reads benchmark results, validates against schema, checks SLO compliance

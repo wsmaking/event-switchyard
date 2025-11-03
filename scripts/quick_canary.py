@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 クイックカナリーテスト: 簡易版SLO検証
 

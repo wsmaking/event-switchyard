@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 変更リスクスコア (Change Risk Score)
 

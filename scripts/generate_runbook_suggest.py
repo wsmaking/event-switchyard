@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 RAGベース初動トリアージ (RAG-based Initial Triage)
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 DLP (Data Loss Prevention) ガード - PII検出
 
