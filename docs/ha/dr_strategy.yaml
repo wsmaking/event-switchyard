@@ -1,0 +1,374 @@
+# DR (Disaster Recovery) / ゲームデイ演習戦略
+
+# RTO/RPO目標
+targets:
+  RTO: "15m"   # Recovery Time Objective: 障害発生から復旧までの目標時間
+  RPO: "60s"   # Recovery Point Objective: データ損失許容時間
+
+# アーキテクチャ構成 (個人開発版: Docker Composeでシミュレーション)
+topologies:
+  # シングルリージョン・マルチAZシミュレーション (ローカル/ステージング)
+  single-region-multi-az-sim:
+    description: "Docker Composeで擬似的にマルチAZ環境を構築"
+    components:
+      # データ層
+      - name: "Kafka Multi-Broker"
+        type: "docker-compose"
+        replicas: 3
+        config: |
+          # docker-compose-ha.yml
+          services:
+            kafka1:
+              image: confluentinc/cp-kafka:7.5.0
+              environment:
+                KAFKA_BROKER_ID: 1
+                KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+                KAFKA_LISTENERS: PLAINTEXT://:9092
+                KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092
+                KAFKA_MIN_INSYNC_REPLICAS: 2  # 最低2ブローカーに書き込み
+                KAFKA_REPLICATION_FACTOR: 3
+            kafka2:
+              image: confluentinc/cp-kafka:7.5.0
+              environment:
+                KAFKA_BROKER_ID: 2
+                KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+                KAFKA_LISTENERS: PLAINTEXT://:9093
+                KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9093
+                KAFKA_MIN_INSYNC_REPLICAS: 2
+                KAFKA_REPLICATION_FACTOR: 3
+            kafka3:
+              image: confluentinc/cp-kafka:7.5.0
+              environment:
+                KAFKA_BROKER_ID: 3
+                KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+                KAFKA_LISTENERS: PLAINTEXT://:9094
+                KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9094
+                KAFKA_MIN_INSYNC_REPLICAS: 2
+                KAFKA_REPLICATION_FACTOR: 3
+
+      # アプリケーション層
+      - name: "HFT Fast Path (Active/Standby)"
+        type: "docker-compose"
+        replicas: 2
+        config: |
+          services:
+            hft-app-primary:
+              image: ghcr.io/YOUR_ORG/hft-fast-path:latest
+              environment:
+                ENGINE_ID: "primary"
+                FAST_PATH_ENABLE: "1"
+                FAST_PATH_METRICS: "1"
+                KAFKA_BROKERS: "kafka1:9092,kafka2:9093,kafka3:9094"
+            hft-app-standby:
+              image: ghcr.io/YOUR_ORG/hft-fast-path:latest
+              environment:
+                ENGINE_ID: "standby"
+                FAST_PATH_ENABLE: "1"
+                FAST_PATH_METRICS: "1"
+                KAFKA_BROKERS: "kafka1:9092,kafka2:9093,kafka3:9094"
+
+      # Chronicle Queue永続化 (共有ボリューム)
+      - name: "Chronicle Queue (Persistent Volume)"
+        type: "docker-volume"
+        config: |
+          volumes:
+            chronicle-queue-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /var/lib/chronicle-queue
+
+    # フェイルオーバー戦略
+    failover:
+      method: "flag-based-cutover"
+      description: "環境変数フラグでActive/Standbyを切り替え"
+      steps:
+        - "Primary障害検知 (ヘルスチェック失敗 or p99 > 1秒)"
+        - "Standbyを即座にActiveに昇格 (ENGINE_ID=primary に変更)"
+        - "トラフィックをStandbyにルーティング (LoadBalancer設定変更)"
+        - "Primaryを復旧 (ログ確認 → 修復 → 再起動)"
+
+# ゲームデイ演習 (定期的な障害訓練)
+drills:
+  # ドリル1: Kafkaブローカー1台停止
+  - name: "kill-kafka-broker-1"
+    frequency: "monthly"
+    duration: "30m"
+    description: "Kafkaブローカー1台を停止し、min.insync.replicas=2で書き込み継続を確認"
+    steps:
+      - step: 1
+        action: "Kafkaブローカー1台停止"
+        command: "docker-compose -f docker-compose-ha.yml stop kafka1"
+      - step: 2
+        action: "書き込み継続確認"
+        command: "curl -X POST http://localhost:8080/events?key=BTC -d '{\"price\": 50000}'"
+        expected: "HTTP 200 OK (min.insync.replicas=2なので残り2ブローカーで書き込み継続)"
+      - step: 3
+        action: "メトリクス確認"
+        command: "curl http://localhost:8080/metrics | grep fast_path_drops_total"
+        expected: "fast_path_drops_total = 0 (ドロップなし)"
+      - step: 4
+        action: "ブローカー復旧"
+        command: "docker-compose -f docker-compose-ha.yml start kafka1"
+      - step: 5
+        action: "レプリケーション同期確認"
+        command: "kafka-topics --describe --topic hft-events --bootstrap-server localhost:9092"
+        expected: "ISR (In-Sync Replicas) = 3"
+    success_criteria:
+      - "RTO <= 5m (ブローカー停止から復旧まで)"
+      - "RPO = 0 (データ損失なし)"
+      - "fast_path_drops_total = 0"
+
+  # ドリル2: Consumer GCポーズ (2秒)
+  - name: "consumer-gc-pause-2s"
+    frequency: "monthly"
+    duration: "15m"
+    description: "ConsumerアプリケーションでGCポーズを発生させ、tail_ratio監視とバックプレッシャーチューナー推奨を確認"
+    steps:
+      - step: 1
+        action: "GCポーズ発生 (JVM堆サイズ削減)"
+        command: |
+          # JVM堆サイズを256MBに削減してGCポーズを誘発
+          docker-compose -f docker-compose-ha.yml exec hft-app-primary \
+            java -Xmx256m -jar app.jar
+      - step: 2
+        action: "負荷テスト実行"
+        command: "python3 scripts/quick_canary.py --url http://localhost:8080 --events 10000 --out var/results/gc_pause.json"
+      - step: 3
+        action: "tail_ratio確認"
+        command: "cat var/results/gc_pause.json | jq '.metrics.summary.tail_ratio'"
+        expected: "tail_ratio > 12.0 (GCポーズでテールレイテンシ悪化)"
+      - step: 4
+        action: "バックプレッシャーチューナー推奨確認"
+        command: "python3 scripts/backpressure_tuner.py --in var/results/gc_pause.json"
+        expected: "推奨: JVM heap size増加、GC tuning"
+      - step: 5
+        action: "JVM設定復元"
+        command: "docker-compose -f docker-compose-ha.yml restart hft-app-primary"
+    success_criteria:
+      - "tail_ratio < 12 (GCチューニング後)"
+      - "backpressure_tuner.pyが正しい推奨を提示"
+
+  # ドリル3: Chronicle Queue破損シミュレーション
+  - name: "chronicle-queue-corruption"
+    frequency: "quarterly"
+    duration: "1h"
+    description: "Chronicle Queueファイルを破損させ、15分最小リプレイで復旧"
+    steps:
+      - step: 1
+        action: "Chronicle Queueファイル破損"
+        command: |
+          # 最新のChronicle Queueファイルの一部を削除
+          truncate -s 50% /var/lib/chronicle-queue/hft-events/20251102.cq4
+      - step: 2
+        action: "アプリケーション再起動 (破損検知)"
+        command: "docker-compose -f docker-compose-ha.yml restart hft-app-primary"
+        expected: "起動失敗 or 読み取りエラー"
+      - step: 3
+        action: "15分最小リプレイ実行"
+        command: |
+          python3 scripts/replay_minset.py \
+            --incident-time "2025-11-02T10:00:00Z" \
+            --window-minutes 15 \
+            --out var/results/replay_events.json
+      - step: 4
+        action: "リプレイイベント再投入"
+        command: |
+          python3 scripts/replay_events.py \
+            --in var/results/replay_events.json \
+            --url http://localhost:8080
+      - step: 5
+        action: "復旧確認"
+        command: "curl http://localhost:8080/stats | jq '.fast_path_count'"
+        expected: "fast_path_count が増加 (リプレイ成功)"
+    success_criteria:
+      - "RTO <= 15m (破損検知からリプレイ完了まで)"
+      - "RPO <= 15m (最大15分のデータ損失)"
+
+  # ドリル4: ネットワーク分断 (Split Brain)
+  - name: "network-partition"
+    frequency: "quarterly"
+    duration: "45m"
+    description: "ネットワーク分断でPrimaryとStandbyが分離、Split Brain防止を確認"
+    steps:
+      - step: 1
+        action: "ネットワーク分断 (docker networkを分離)"
+        command: |
+          docker network disconnect bridge hft-app-primary
+      - step: 2
+        action: "Standby自動昇格確認"
+        command: "curl http://localhost:8081/health"
+        expected: "HTTP 200 OK (Standbyが自動昇格)"
+      - step: 3
+        action: "Primary分断確認"
+        command: "curl http://localhost:8080/health"
+        expected: "タイムアウト or HTTP 503"
+      - step: 4
+        action: "ネットワーク復旧"
+        command: "docker network connect bridge hft-app-primary"
+      - step: 5
+        action: "Split Brain防止確認"
+        command: "curl http://localhost:8080/health && curl http://localhost:8081/health"
+        expected: "どちらか一方のみActive (両方Activeは NG)"
+    success_criteria:
+      - "RTO <= 5m (分断検知からStandby昇格まで)"
+      - "Split Brainが発生しない (etcd leaseで排他制御)"
+
+  # ドリル5: 本番環境全停止 (Full Outage)
+  - name: "full-outage"
+    frequency: "annually"
+    duration: "2h"
+    description: "本番環境全停止からの完全復旧演習 (DR手順検証)"
+    steps:
+      - step: 1
+        action: "全サービス停止"
+        command: "docker-compose -f docker-compose-ha.yml down"
+      - step: 2
+        action: "データバックアップ確認"
+        command: "ls -lh /var/lib/chronicle-queue/backup/"
+        expected: "直近のバックアップが存在"
+      - step: 3
+        action: "全サービス再起動"
+        command: "docker-compose -f docker-compose-ha.yml up -d"
+      - step: 4
+        action: "ヘルスチェック確認"
+        command: |
+          for i in {1..30}; do
+            if curl -s http://localhost:8080/health > /dev/null; then
+              echo "OK"
+              break
+            fi
+            sleep 2
+          done
+      - step: 5
+        action: "スモークテスト実行"
+        command: "python3 scripts/quick_canary.py --url http://localhost:8080 --events 100 --out var/results/smoke.json"
+      - step: 6
+        action: "SLOゲート検証"
+        command: "python3 scripts/slo_gate.py --in var/results/smoke.json"
+        expected: "PASS (すべてのSLO条件を満たす)"
+    success_criteria:
+      - "RTO <= 15m (全停止から復旧まで)"
+      - "RPO <= 60s (Chronicle Queueバックアップから復元)"
+      - "SLOゲート PASS"
+
+# スケジュール (cron)
+schedule:
+  - drill: "kill-kafka-broker-1"
+    cron: "0 10 1 * *"  # 毎月1日 10:00
+  - drill: "consumer-gc-pause-2s"
+    cron: "0 10 15 * *"  # 毎月15日 10:00
+  - drill: "chronicle-queue-corruption"
+    cron: "0 10 1 */3 *"  # 3ヶ月ごと (1/4/7/10月)
+  - drill: "network-partition"
+    cron: "0 10 1 */3 *"  # 3ヶ月ごと (1/4/7/10月)
+  - drill: "full-outage"
+    cron: "0 10 1 1 *"  # 年1回 (1月1日)
+
+# ポストモーテムテンプレート
+postmortem_template: |
+  # ゲームデイ演習ポストモーテム
+
+  ## 基本情報
+  - 演習名: {{drill_name}}
+  - 実施日: {{date}}
+  - 実施者: {{executor}}
+  - 所要時間: {{duration}}
+
+  ## 目標
+  - RTO: {{target_rto}}
+  - RPO: {{target_rpo}}
+  - 成功基準: {{success_criteria}}
+
+  ## 実績
+  - 実測RTO: {{actual_rto}}
+  - 実測RPO: {{actual_rpo}}
+  - 判定: {{pass_or_fail}}
+
+  ## タイムライン
+  {{timeline}}
+
+  ## 学び
+  ### うまくいったこと
+  {{what_went_well}}
+
+  ### 改善点
+  {{what_to_improve}}
+
+  ## アクションアイテム
+  {{action_items}}
+
+  ## 関連メトリクス
+  - fast_path_drops_total: {{drops}}
+  - tail_ratio: {{tail_ratio}}
+  - error_rate: {{error_rate}}
+
+# バックアップ戦略
+backup:
+  # Chronicle Queue自動バックアップ
+  chronicle_queue:
+    frequency: "hourly"
+    retention: "7d"
+    destination: "/var/lib/chronicle-queue/backup/"
+    command: |
+      # 1時間ごとにChronicle Queueをバックアップ
+      rsync -a /var/lib/chronicle-queue/hft-events/ /var/lib/chronicle-queue/backup/$(date +%Y%m%d%H)/
+
+  # Prometheusメトリクス
+  prometheus:
+    frequency: "daily"
+    retention: "30d"
+    destination: "s3://hft-backups/prometheus/"
+
+# 関連ドキュメント
+references:
+  - url: "docs/runbook.md"
+    description: "インシデント対応手順"
+  - url: "docs/policies/error_budget_policy.yaml"
+    description: "エラーバジェット運用ポリシー"
+  - url: "https://sre.google/sre-book/disaster-recovery/"
+    description: "Google SRE Book - Disaster Recovery"
+
+---
+
+# 使い方
+
+## 1. ゲームデイ演習実行
+
+```bash
+# ドリル1: Kafkaブローカー1台停止
+cd /Users/fujii/Desktop/dev/event-switchyard
+bash docs/ha/drills/kill_kafka_broker_1.sh
+
+# 結果確認
+cat var/results/drill_kill_kafka_broker_1_$(date +%Y%m%d).json
+```
+
+## 2. 週次スケジュール設定 (cron)
+
+```bash
+# crontab編集
+crontab -e
+
+# 追加
+0 10 1 * * cd /Users/fujii/Desktop/dev/event-switchyard && bash docs/ha/drills/kill_kafka_broker_1.sh
+0 10 15 * * cd /Users/fujii/Desktop/dev/event-switchyard && bash docs/ha/drills/consumer_gc_pause_2s.sh
+```
+
+## 3. ポストモーテム作成
+
+```bash
+# ポストモーテム自動生成
+python3 scripts/generate_postmortem.py \
+  --drill kill-kafka-broker-1 \
+  --date 2025-11-02 \
+  --results var/results/drill_kill_kafka_broker_1_20251102.json \
+  --out docs/postmortems/drill_20251102_kafka_broker.md
+```
+
+---
+
+**更新日**: 2025-11-02
+**バージョン**: v1.0.0
+**承認者**: Tech Lead

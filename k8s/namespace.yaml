@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hft-system
+  labels:
+    name: hft-system
+    env: production

@@ -11,6 +11,7 @@ out/
 .idea/
 *.iml
 .vscode/
+.kotlin/
 
 # --- Python
 __pycache__/

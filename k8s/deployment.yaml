@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hft-fast-path
+  namespace: hft-system
+  labels:
+    app: hft-fast-path
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hft-fast-path
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: hft-fast-path
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # HFT最適化: ノードアフィニティで専用ノードを使用
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/hft
+                operator: In
+                values:
+                - "true"
+        # Pod間のアンチアフィニティ: 異なるノードに配置
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - hft-fast-path
+              topologyKey: kubernetes.io/hostname
+
+      # HFT最適化: 高優先度
+      priorityClassName: high-priority
+
+      containers:
+      - name: hft-fast-path
+        image: hft-fast-path:latest
+        imagePullPolicy: Always
+
+        # HFT最適化: リソース制限
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+
+        # HFT最適化: 環境変数
+        env:
+        - name: FAST_PATH_ENABLE
+          value: "1"
+        - name: FAST_PATH_METRICS
+          value: "1"
+        - name: ENGINE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ETCD_ENDPOINTS
+          valueFrom:
+            configMapKeyRef:
+              name: hft-config
+              key: etcd.endpoints
+        - name: OWNED_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: hft-config
+              key: owned.keys
+              optional: true
+        - name: ENGINE_POLL_MS
+          valueFrom:
+            configMapKeyRef:
+              name: hft-config
+              key: engine.poll.ms
+              optional: true
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: hft-config
+              key: kafka.bootstrap.servers
+
+        # ポート公開
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+
+        # ヘルスチェック
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        # 永続ボリューム: Chronicle Queue用
+        volumeMounts:
+        - name: chronicle-queue
+          mountPath: /app/var/chronicle-queue
+        - name: logs
+          mountPath: /app/var/logs
+
+      volumes:
+      - name: chronicle-queue
+        persistentVolumeClaim:
+          claimName: hft-chronicle-queue
+      - name: logs
+        emptyDir: {}
+
+      # HFT最適化: 終了猶予期間
+      terminationGracePeriodSeconds: 60

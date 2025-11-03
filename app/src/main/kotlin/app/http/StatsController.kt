@@ -20,7 +20,12 @@ class StatsController(private val router: Router) : HttpHandler {
             }
 
             val stats = router.getStats()
-            val json = objectMapper.writeValueAsString(stats.toMap())
+            val statsMap = stats.toMap()
+
+            // Prometheusメトリクスも更新 (パーセンタイル値)
+            MetricsController.updatePercentileGauges(statsMap)
+
+            val json = objectMapper.writeValueAsString(statsMap)
 
             exchange.responseHeaders.set("Content-Type", "application/json")
             sendResponse(exchange, 200, json)

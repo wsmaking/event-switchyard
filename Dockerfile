@@ -6,7 +6,7 @@ WORKDIR /workspace
 COPY settings.gradle* ./
 COPY build.gradle* ./
 
-# ★ ここで version catalog 等を入れる（今回の肝）
+# Version catalog & Gradle wrapper
 COPY gradle gradle
 COPY gradle.properties gradle.properties
 
@@ -17,27 +17,36 @@ COPY app/build.gradle app/build.gradle
 RUN --mount=type=cache,target=/home/gradle/.gradle \
     gradle --no-daemon :app:dependencies || true
 
-# ★ ソースをコピー（Engine.kt含む）
+# ソースをコピー
 COPY app/src /workspace/app/src
-
-# ★ 中身ガード（polling版が入っているか確認）
-RUN set -eux; \
-    test -f app/src/main/kotlin/engine/Engine.kt; \
-    grep -n "polling mode" app/src/main/kotlin/engine/Engine.kt; \
-    ! grep -R "watch(" app/src/main/kotlin || true
-
-# 失敗行の周辺を番号付きで出す（80行まで必要なら数字を伸ばす）
-RUN set -eux; sed -n '1,120p' app/src/main/kotlin/engine/Engine.kt | nl -ba
-
-#  verbose ビルド
-RUN --mount=type=cache,target=/home/gradle/.gradle \
-    gradle --no-daemon --info --stacktrace :app:shadowJar
 
 # fat-jar を作る
 RUN --mount=type=cache,target=/home/gradle/.gradle \
     gradle --no-daemon :app:shadowJar
 
-# ===== Runtime stage (JREのみ) =====
+# ===== Runtime stage (JRE + HFT最適化) =====
 FROM eclipse-temurin:21-jre
 WORKDIR /app
+
+# Chronicle Queue用データディレクトリ作成
+RUN mkdir -p /app/var/logs /app/var/chronicle-queue
+
+# fat-jarをコピー
 COPY --from=builder /workspace/app/build/libs/app-all.jar /app/app-all.jar
+
+# HFT最適化JVMフラグ
+# - ZGC: 低レイテンシGC
+# - 固定ヒープ2GB (Xms=Xmx): GC頻度削減
+# - MaxGCPauseMillis: GC停止時間目標1ms
+# - AlwaysPreTouch: 起動時にヒープを物理メモリに確保
+ENV JAVA_OPTS="-Xms2g -Xmx2g -XX:+UseZGC -XX:MaxGCPauseMillis=1 -XX:+AlwaysPreTouch -XX:+DisableExplicitGC"
+
+# ポート公開
+EXPOSE 8080
+
+# ヘルスチェック
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# 実行
+CMD ["sh", "-c", "java $JAVA_OPTS -jar /app/app-all.jar"]

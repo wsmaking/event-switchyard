@@ -1,0 +1,186 @@
+name: HFT Fast Path CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - refactor_consumer_app
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/hft-fast-path
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew build --no-daemon
+
+      - name: Run tests
+        run: ./gradlew test --no-daemon
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: app/build/test-results/
+
+      - name: Upload build artifact (fat jar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: app/build/libs/app-all.jar
+
+  docker-build-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor_consumer_app')
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    if: github.ref == 'refs/heads/refactor_consumer_app'
+    environment:
+      name: staging
+      url: https://staging.hft.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+
+      - name: Update image tag in deployment
+        run: |
+          kubectl set image deployment/hft-fast-path \
+            hft-fast-path=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:refactor_consumer_app-${{ github.sha }} \
+            -n hft-system
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/hft-fast-path -n hft-system --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n hft-system -l app=hft-fast-path
+          kubectl logs -n hft-system -l app=hft-fast-path --tail=50
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://hft.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+
+      - name: Update image tag in deployment
+        run: |
+          kubectl set image deployment/hft-fast-path \
+            hft-fast-path=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }} \
+            -n hft-system
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/hft-fast-path -n hft-system --timeout=10m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n hft-system -l app=hft-fast-path
+          kubectl logs -n hft-system -l app=hft-fast-path --tail=100
+
+      - name: Run smoke tests
+        run: |
+          # Get the service endpoint
+          SERVICE_IP=$(kubectl get svc hft-fast-path -n hft-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+          # Health check
+          curl -f http://${SERVICE_IP}:8080/health || exit 1
+
+          # Metrics check
+          curl -f http://${SERVICE_IP}:8080/metrics | grep -q "fast_path_events_total" || exit 1
+
+          echo "Smoke tests passed!"
