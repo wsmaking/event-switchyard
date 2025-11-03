@@ -102,7 +102,8 @@ jobs:
     name: Deploy to Staging
     runs-on: ubuntu-latest
     needs: docker-build-push
-    if: github.ref == 'refs/heads/refactor_consumer_app'
+    # Skip deployment if KUBE_CONFIG_STAGING is not set
+    if: github.ref == 'refs/heads/refactor_consumer_app' && vars.ENABLE_K8S_DEPLOY == 'true'
     environment:
       name: staging
       url: https://staging.hft.example.com
@@ -139,7 +140,8 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
     needs: docker-build-push
-    if: github.ref == 'refs/heads/main'
+    # Skip deployment if KUBE_CONFIG_PRODUCTION is not set
+    if: github.ref == 'refs/heads/main' && vars.ENABLE_K8S_DEPLOY == 'true'
     environment:
       name: production
       url: https://hft.example.com
