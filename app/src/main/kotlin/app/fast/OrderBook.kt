@@ -1,36 +1,31 @@
 package app.fast
 
 import org.agrona.collections.Int2ObjectHashMap
-import org.agrona.collections.IntArrayList
 import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 簡易オーダーブックエンジン (HFT性能検証用プロトタイプ)
  *
  * 目的:
- * - Phase 2 (Zero-GC最適化) の対象特定
  * - Phase 4 (ベンチマーク) での現実的な負荷生成
+ * - Fast Path性能測定の業務ロジック
  *
  * 設計方針:
  * - ロックフリー (単一スレッドアクセス前提)
  * - 価格レベルごとにオーダーキュー管理
  * - 価格優先・時間優先のマッチング
- * - Phase 2最適化: Object Poolでallocation削減
+ * - Immutable data class使用（JVM最適化を最大限活用）
  */
 class OrderBook(
-    private val symbolId: Int,
-    private val orderPool: OrderPool = OrderPool(),
-    private val enablePooling: Boolean = System.getenv("ORDER_POOL_ENABLE") == "1"
+    private val symbolId: Int
 ) {
     // 価格レベル -> オーダーリスト
-    // Phase 2最適化: MutableList<Order> -> ArrayList<MutableOrder>
-    private val buyOrders = Int2ObjectHashMap<ArrayList<MutableOrder>>()
-    private val sellOrders = Int2ObjectHashMap<ArrayList<MutableOrder>>()
+    private val buyOrders = Int2ObjectHashMap<MutableList<Order>>()
+    private val sellOrders = Int2ObjectHashMap<MutableList<Order>>()
 
     // メトリクス
     private val orderCount = AtomicLong(0)
     private val matchCount = AtomicLong(0)
-    private val poolMissCount = AtomicLong(0)
 
     /**
      * 買い注文を処理
@@ -43,7 +38,7 @@ class OrderBook(
         val bestSell = findBestSell(price)
         if (bestSell != null) {
             matchCount.incrementAndGet()
-            val execution = Execution(
+            return Execution(
                 symbolId = symbolId,
                 price = bestSell.price,
                 quantity = minOf(quantity, bestSell.quantity),
@@ -51,11 +46,6 @@ class OrderBook(
                 sellTimestamp = bestSell.timestamp,
                 executionTimestamp = System.nanoTime()
             )
-            // マッチしたオーダーをプールに返却
-            if (enablePooling) {
-                orderPool.release(bestSell)
-            }
-            return execution
         }
 
         // マッチしない場合はオーダーブックに追加
@@ -74,7 +64,7 @@ class OrderBook(
         val bestBuy = findBestBuy(price)
         if (bestBuy != null) {
             matchCount.incrementAndGet()
-            val execution = Execution(
+            return Execution(
                 symbolId = symbolId,
                 price = bestBuy.price,
                 quantity = minOf(quantity, bestBuy.quantity),
@@ -82,11 +72,6 @@ class OrderBook(
                 sellTimestamp = timestamp,
                 executionTimestamp = System.nanoTime()
             )
-            // マッチしたオーダーをプールに返却
-            if (enablePooling) {
-                orderPool.release(bestBuy)
-            }
-            return execution
         }
 
         // マッチしない場合はオーダーブックに追加
@@ -94,10 +79,10 @@ class OrderBook(
         return null
     }
 
-    private fun findBestSell(maxPrice: Int): MutableOrder? {
+    private fun findBestSell(maxPrice: Int): Order? {
         // 売り注文から最低価格を探す (価格優先)
         var bestPrice = Int.MAX_VALUE
-        var bestOrder: MutableOrder? = null
+        var bestOrder: Order? = null
 
         val keys = sellOrders.keys
         keys.forEach { priceObj ->
@@ -106,7 +91,7 @@ class OrderBook(
                 val orders = sellOrders[price]
                 if (orders != null && orders.isNotEmpty()) {
                     bestPrice = price
-                    bestOrder = orders.removeAt(0)  // 時間優先 (FIFO)
+                    bestOrder = orders.removeAt(0)  // FIFO (時間優先)
                     if (orders.isEmpty()) {
                         sellOrders.remove(price)
                     }
@@ -117,10 +102,10 @@ class OrderBook(
         return bestOrder
     }
 
-    private fun findBestBuy(minPrice: Int): MutableOrder? {
+    private fun findBestBuy(minPrice: Int): Order? {
         // 買い注文から最高価格を探す (価格優先)
         var bestPrice = Int.MIN_VALUE
-        var bestOrder: MutableOrder? = null
+        var bestOrder: Order? = null
 
         val keys = buyOrders.keys
         keys.forEach { priceObj ->
@@ -129,7 +114,7 @@ class OrderBook(
                 val orders = buyOrders[price]
                 if (orders != null && orders.isNotEmpty()) {
                     bestPrice = price
-                    bestOrder = orders.removeAt(0)  // 時間優先 (FIFO)
+                    bestOrder = orders.removeAt(0)  // FIFO (時間優先)
                     if (orders.isEmpty()) {
                         buyOrders.remove(price)
                     }
@@ -141,29 +126,13 @@ class OrderBook(
     }
 
     private fun addBuyOrder(price: Int, quantity: Int, timestamp: Long) {
-        val order = if (enablePooling) {
-            orderPool.tryAcquire()?.also { it.set(price, quantity, timestamp) }
-                ?: run {
-                    poolMissCount.incrementAndGet()
-                    MutableOrder(price, quantity, timestamp)
-                }
-        } else {
-            MutableOrder(price, quantity, timestamp)
-        }
-        buyOrders.computeIfAbsent(price) { ArrayList() }.add(order)
+        val order = Order(price, quantity, timestamp)
+        buyOrders.computeIfAbsent(price) { mutableListOf() }.add(order)
     }
 
     private fun addSellOrder(price: Int, quantity: Int, timestamp: Long) {
-        val order = if (enablePooling) {
-            orderPool.tryAcquire()?.also { it.set(price, quantity, timestamp) }
-                ?: run {
-                    poolMissCount.incrementAndGet()
-                    MutableOrder(price, quantity, timestamp)
-                }
-        } else {
-            MutableOrder(price, quantity, timestamp)
-        }
-        sellOrders.computeIfAbsent(price) { ArrayList() }.add(order)
+        val order = Order(price, quantity, timestamp)
+        sellOrders.computeIfAbsent(price) { mutableListOf() }.add(order)
     }
 
     fun getStats(): OrderBookStats {
@@ -172,13 +141,19 @@ class OrderBook(
             orderCount = orderCount.get(),
             matchCount = matchCount.get(),
             buyLevels = buyOrders.size,
-            sellLevels = sellOrders.size,
-            poolMissCount = poolMissCount.get(),
-            poolAvailable = if (enablePooling) orderPool.available() else 0,
-            poolUsageRatio = if (enablePooling) orderPool.usageRatio() else 0.0
+            sellLevels = sellOrders.size
         )
     }
 }
+
+/**
+ * 注文 (Immutable data class - JVM最適化を最大限活用)
+ */
+data class Order(
+    val price: Int,
+    val quantity: Int,
+    val timestamp: Long
+)
 
 /**
  * 約定
@@ -202,10 +177,7 @@ data class OrderBookStats(
     val orderCount: Long,
     val matchCount: Long,
     val buyLevels: Int,
-    val sellLevels: Int,
-    val poolMissCount: Long,
-    val poolAvailable: Int,
-    val poolUsageRatio: Double
+    val sellLevels: Int
 ) {
     fun matchRate() = if (orderCount > 0) matchCount.toDouble() / orderCount else 0.0
 }
