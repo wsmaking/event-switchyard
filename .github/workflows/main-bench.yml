@@ -125,6 +125,32 @@ jobs:
             --pr-comment var/results/tuner_comment.md \
             --verbose
 
+      # W7: コストガード
+      - name: Cost Guard
+        run: |
+          python scripts/cost_guard.py \
+            --in var/results/canary.json \
+            --budget-yen-per-1k 12.0 \
+            --report var/results/cost_report.json \
+            --fail-on-exceed
+
+      # W7: PIIガード
+      - name: PII/DLP Guard
+        run: |
+          python scripts/dlp_guard.py \
+            --in var/results/canary.json \
+            --report var/results/dlp_report.json \
+            --fail-on-pii
+
+      # W7: 変更リスク分析 (PR時のみ)
+      - name: Change Risk Analysis
+        if: github.event_name == 'pull_request'
+        run: |
+          python scripts/change_risk.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --out var/results/change_risk.json \
+            --threshold 70
+
       # GitHub Step Summary出力
       - name: Publish GitHub Step Summary
         if: always()
@@ -147,6 +173,9 @@ jobs:
             var/results/github_summary.md
             var/results/tuner.csv
             var/results/tuner_comment.md
+            var/results/cost_report.json
+            var/results/dlp_report.json
+            var/results/change_risk.json
 
   review:  # = gate
     needs: [bench, canary]

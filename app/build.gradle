@@ -61,7 +61,9 @@ tasks.named('shadowJar') {
 
 application {
     mainClass.set((findProperty('mainClass') ?: "app.MainKt") as String)
-    applicationDefaultJvmArgs = [
+
+    def jvmArgs = [
+        // JDK module access (Chronicle Queue, Agrona)
         '--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED',
         '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED',
         '--add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED',
@@ -70,8 +72,43 @@ application {
         '--add-opens=java.base/java.lang=ALL-UNNAMED',
         '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
         '--add-opens=java.base/java.io=ALL-UNNAMED',
-        '--add-opens=java.base/java.util=ALL-UNNAMED'
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+
+        // Heap size
+        '-Xms4g',
+        '-Xmx4g',
+
+        // Agrona optimization
+        '-Dagrona.disable.bounds.checks=true',
+
+        // Chronicle Queue optimization
+        '-Dchronicle.queue.check.interrupts=false'
     ]
+
+    // ZGC: Enable with ZGC_ENABLE=1
+    if (System.getenv('ZGC_ENABLE') == '1') {
+        jvmArgs.addAll([
+            '-XX:+UseZGC',
+            '-XX:+UnlockExperimentalVMOptions',
+            '-XX:MaxGCPauseMillis=1',
+            '-XX:+UseLargePages',
+            '-XX:+AlwaysPreTouch',
+            '-Xlog:gc*:file=gc.log:time,uptime,level,tags'
+        ])
+        println "==> ZGC Enabled (ZGC_ENABLE=1)"
+    } else {
+        // Default: G1GC with tuning
+        jvmArgs.addAll([
+            '-XX:+UseG1GC',
+            '-XX:MaxGCPauseMillis=10',
+            '-XX:G1HeapRegionSize=16m',
+            '-XX:InitiatingHeapOccupancyPercent=45',
+            '-Xlog:gc*:file=gc.log:time,uptime,level,tags'
+        ])
+        println "==> G1GC Enabled (default, set ZGC_ENABLE=1 for ZGC)"
+    }
+
+    applicationDefaultJvmArgs = jvmArgs
 }
 
 jar {

@@ -1,0 +1,221 @@
+# エラーバジェット運用ポリシー (Error Budget Policy)
+
+# SLO期間: 28日間 (4週間ローリング)
+period: 28d
+
+# サービス別エラーバジェット
+budgets:
+  hft-fast-path:
+    # 目標可用性: 99.95% (28日間で約21分のダウンタイムまで許容)
+    target: "99.95%"
+
+    # Burn Rate (消費率) アラート
+    # 2倍速で消費 = 6時間で1日分のバジェット消費 → 即座にアラート
+    burn_alert:
+      threshold: 2.0  # 通常の2倍速
+      window: 6h      # 6時間継続で発火
+
+    # 計算式: (total_events - error_events) / total_events >= 0.9995
+    # エラー率: <= 0.05% (1000イベントあたり0.5エラーまで)
+
+# バジェット消費時のアクション
+actions:
+  # Burn Rate > 2.0 for 6h → 緊急対応
+  - condition: "burn_rate > 2 for 6h"
+    actions:
+      - type: "freeze_releases"
+        description: "すべてのリリースを凍結、ホットフィックスのみ許可"
+      - type: "enable_canary_only"
+        description: "カナリアリリース必須化 (100%デプロイ禁止)"
+      - type: "reduce_feature_flags"
+        percentage: 50
+        description: "新機能フラグを50%に制限、リスク削減"
+      - type: "page_oncall"
+        severity: "SEV1"
+        description: "オンコール担当者に即座に通知"
+
+  # Burn Rate > 1.5 for 12h → 警告
+  - condition: "burn_rate > 1.5 for 12h"
+    actions:
+      - type: "alert_team"
+        severity: "SEV2"
+        description: "チームに警告、リリース前レビュー強化"
+      - type: "increase_monitoring"
+        description: "メトリクス収集頻度を1秒→0.1秒に増加"
+
+  # Burn Rate > 1.0 (通常消費) → 注視
+  - condition: "burn_rate > 1.0 for 24h"
+    actions:
+      - type: "notify_slack"
+        channel: "#hft-alerts"
+        description: "Slackに通知、状況注視"
+
+# レビュープロセス
+review:
+  # 週次エラーバジェットレポート (自動生成)
+  weekly:
+    enabled: true
+    output: "reports/error_budget_weekly.md"
+    recipients:
+      - "tech-lead@example.com"
+    template: |
+      # エラーバジェット週次レポート ({{week}})
+
+      ## サマリー
+      - 期間: {{start_date}} - {{end_date}}
+      - 残バジェット: {{remaining_budget}}% ({{remaining_minutes}}分)
+      - Burn Rate: {{burn_rate}}x (1.0が通常消費)
+      - ステータス: {{status}}
+
+      ## 今週の主要インシデント
+      {{incidents}}
+
+      ## 推奨アクション
+      {{recommendations}}
+
+  # 月次レビュー (SLO見直し)
+  monthly:
+    enabled: true
+    description: "SLO目標値の妥当性レビュー、必要に応じて調整"
+
+# エラー分類 (カウント対象)
+error_classification:
+  # エラーバジェット消費対象
+  counted_as_error:
+    - "fast_path_drop_count > 0"  # Fast Pathドロップ
+    - "persistence_queue_error_count > 0"  # Persistence Queue書き込みエラー
+    - "http_5xx_errors"  # HTTPサーバー5xxエラー
+    - "health_check_failure"  # ヘルスチェック失敗
+
+  # エラーバジェット対象外 (顧客影響なし)
+  excluded:
+    - "http_4xx_errors"  # クライアントエラー (顧客責任)
+    - "planned_maintenance"  # 計画メンテナンス (事前通知済み)
+    - "canary_deployment_errors"  # カナリーリリース中のエラー (本番影響なし)
+
+# Prometheus アラートルール (参考実装)
+prometheus_rules:
+  # Burn Rate > 2.0 for 6h
+  - alert: "ErrorBudgetBurnRateCritical"
+    expr: |
+      (
+        1 - (
+          sum(rate(fast_path_count_total[6h]))
+          - sum(rate(fast_path_drops_total[6h]))
+          - sum(rate(persistence_queue_error_count_total[6h]))
+        ) / sum(rate(fast_path_count_total[6h]))
+      ) > 0.001  # 0.05% * 2 = 0.1% over 6h
+    for: 6h
+    labels:
+      severity: "critical"
+    annotations:
+      summary: "エラーバジェット消費率が2倍、リリース凍結"
+      description: "過去6時間のBurn Rateが2.0倍、即座に対応が必要"
+
+  # Burn Rate > 1.5 for 12h
+  - alert: "ErrorBudgetBurnRateWarning"
+    expr: |
+      (
+        1 - (
+          sum(rate(fast_path_count_total[12h]))
+          - sum(rate(fast_path_drops_total[12h]))
+          - sum(rate(persistence_queue_error_count_total[12h]))
+        ) / sum(rate(fast_path_count_total[12h]))
+      ) > 0.00075  # 0.05% * 1.5 = 0.075% over 12h
+    for: 12h
+    labels:
+      severity: "warning"
+    annotations:
+      summary: "エラーバジェット消費率が1.5倍、注視が必要"
+      description: "過去12時間のBurn Rateが1.5倍"
+
+# バジェット残高確認コマンド (参考)
+commands:
+  # 現在のバジェット残高を確認
+  check_budget: |
+    curl -s http://localhost:9090/api/v1/query \
+      --data-urlencode 'query=1 - ((sum(rate(fast_path_count_total[28d])) - sum(rate(fast_path_drops_total[28d])) - sum(rate(persistence_queue_error_count_total[28d]))) / sum(rate(fast_path_count_total[28d])))' \
+      | jq '.data.result[0].value[1]'
+
+  # Burn Rateを確認 (過去6時間)
+  check_burn_rate: |
+    curl -s http://localhost:9090/api/v1/query \
+      --data-urlencode 'query=(1 - ((sum(rate(fast_path_count_total[6h])) - sum(rate(fast_path_drops_total[6h])) - sum(rate(persistence_queue_error_count_total[6h]))) / sum(rate(fast_path_count_total[6h])))) / 0.0005' \
+      | jq '.data.result[0].value[1]'
+
+# 関連ドキュメント
+references:
+  - url: "docs/specs/slo.md"
+    description: "SLO仕様・目標値"
+  - url: "docs/runbook.md"
+    description: "インシデント対応手順"
+  - url: "https://sre.google/workbook/implementing-slos/"
+    description: "Google SRE Workbook - Implementing SLOs"
+
+---
+
+# 使い方
+
+## 1. 週次レポート自動生成
+
+```bash
+# 週次レポート生成 (cronで毎週月曜 09:00に実行)
+python scripts/generate_error_budget_report.py \
+  --period 7d \
+  --out reports/error_budget_weekly.md
+```
+
+## 2. Prometheusアラート設定
+
+```yaml
+# prometheus/alerts/error_budget.yml
+groups:
+  - name: error_budget
+    interval: 1m
+    rules:
+      - alert: ErrorBudgetBurnRateCritical
+        expr: |
+          (
+            1 - (
+              sum(rate(fast_path_count_total[6h]))
+              - sum(rate(fast_path_drops_total[6h]))
+              - sum(rate(persistence_queue_error_count_total[6h]))
+            ) / sum(rate(fast_path_count_total[6h]))
+          ) > 0.001
+        for: 6h
+        labels:
+          severity: critical
+        annotations:
+          summary: "エラーバジェット消費率が2倍"
+```
+
+## 3. Grafanaダッシュボード
+
+```json
+{
+  "panels": [
+    {
+      "title": "Error Budget Remaining (%)",
+      "targets": [
+        {
+          "expr": "100 - (1 - ((sum(rate(fast_path_count_total[28d])) - sum(rate(fast_path_drops_total[28d])) - sum(rate(persistence_queue_error_count_total[28d]))) / sum(rate(fast_path_count_total[28d])))) * 100"
+        }
+      ]
+    },
+    {
+      "title": "Burn Rate (6h)",
+      "targets": [
+        {
+          "expr": "(1 - ((sum(rate(fast_path_count_total[6h])) - sum(rate(fast_path_drops_total[6h])) - sum(rate(persistence_queue_error_count_total[6h]))) / sum(rate(fast_path_count_total[6h])))) / 0.0005"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+**更新日**: 2025-11-02
+**バージョン**: v1.0.0
+**承認者**: Tech Lead

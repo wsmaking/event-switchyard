@@ -1,5 +1,6 @@
 package app.fast
 
+import app.audit.AuditLogger
 import app.kafka.ChronicleQueueWriter
 import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class PersistenceQueueEngine(
     private val chronicleWriter: ChronicleQueueWriter,
+    private val auditLogger: AuditLogger? = null,  // 監査ログ
     bufferSize: Int = 32768  // Fast Pathより小さめ (2の累乗)
 ) : AutoCloseable {
 
@@ -50,7 +52,7 @@ class PersistenceQueueEngine(
             BlockingWaitStrategy()  // レイテンシよりスループット重視
         )
 
-        disruptor.handleEventsWith(PersistenceEventHandler(chronicleWriter, processCount, errorCount, writeLatencyHistogram))
+        disruptor.handleEventsWith(PersistenceEventHandler(chronicleWriter, auditLogger, processCount, errorCount, writeLatencyHistogram))
         disruptor.start()
 
         ringBuffer = disruptor.ringBuffer
@@ -142,6 +144,7 @@ data class PersistenceEvent(
  */
 private class PersistenceEventHandler(
     private val chronicleWriter: ChronicleQueueWriter,
+    private val auditLogger: AuditLogger?,
     private val processCount: AtomicLong,
     private val errorCount: AtomicLong,
     private val writeLatencyHistogram: Histogram
@@ -152,15 +155,19 @@ private class PersistenceEventHandler(
 
         try {
             // Chronicle Queueへ書き込み
+            val payload = event.payload.copyOf(event.payloadSize.toInt())
             chronicleWriter.write(
                 event.key,
-                event.payload.copyOf(event.payloadSize.toInt()),
+                payload,
                 event.timestamp
             )
 
             val latencyNs = System.nanoTime() - startNs
             writeLatencyHistogram.recordValue(latencyNs)
             processCount.incrementAndGet()
+
+            // 監査ログ: Chronicle Queue書き込み成功
+            auditLogger?.logChronicleWrite(event.key, payload, startNs, success = true)
         } catch (e: Exception) {
             errorCount.incrementAndGet()
             System.err.println("ERROR: Chronicle Queue write failed for key=${event.key}, error=${e.message}")
@@ -168,6 +175,9 @@ private class PersistenceEventHandler(
             // エラー時もレイテンシは記録 (トラブルシューティング用)
             val latencyNs = System.nanoTime() - startNs
             writeLatencyHistogram.recordValue(latencyNs)
+
+            // 監査ログ: Chronicle Queue書き込み失敗
+            auditLogger?.logChronicleWrite(event.key, event.payload.copyOf(event.payloadSize.toInt()), startNs, success = false)
         }
     }
 }

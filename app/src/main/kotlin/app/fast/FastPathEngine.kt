@@ -1,5 +1,6 @@
 package app.fast
 
+import app.audit.AuditLogger
 import com.lmax.disruptor.*
 import com.lmax.disruptor.dsl.Disruptor
 import com.lmax.disruptor.dsl.ProducerType
@@ -22,7 +23,8 @@ import java.util.concurrent.atomic.AtomicLong
 class FastPathEngine(
     bufferSize: Int = 65536,  // 2の累乗である必要あり
     enableMetrics: Boolean = System.getenv("FAST_PATH_METRICS") == "1",
-    private val persistenceQueue: PersistenceQueueEngine? = null  // 永続化キュー (非同期)
+    private val persistenceQueue: PersistenceQueueEngine? = null,  // 永続化キュー (非同期)
+    private val auditLogger: AuditLogger? = null  // 監査ログ (Tick-by-Tick記録)
 ) : AutoCloseable {
 
     private val disruptor: Disruptor<TradeEvent>
@@ -49,7 +51,7 @@ class FastPathEngine(
         )
 
         // イベントハンドラーを登録
-        disruptor.handleEventsWith(TradeEventHandler(metrics, persistenceQueue, symbolTable))
+        disruptor.handleEventsWith(TradeEventHandler(metrics, persistenceQueue, symbolTable, auditLogger))
         disruptor.start()
 
         ringBuffer = disruptor.ringBuffer
@@ -60,6 +62,11 @@ class FastPathEngine(
      * @return 公開成功でtrue、バッファ満杯でfalse
      */
     fun tryPublish(key: String, payload: ByteArray): Boolean {
+        val receiveNs = System.nanoTime()
+
+        // 監査ログ: イベント受信
+        auditLogger?.logEventReceived(key, payload, receiveNs)
+
         val available = ringBuffer.tryPublishEvent { event, _ ->
             val startNs = System.nanoTime()
 
@@ -74,6 +81,8 @@ class FastPathEngine(
 
         if (!available) {
             metrics?.recordDrop()
+            // 監査ログ: イベントドロップ (バッファ満杯)
+            auditLogger?.logEventDropped(key, "disruptor_buffer_full", receiveNs)
         }
 
         return available
@@ -109,19 +118,34 @@ data class TradeEvent(
 private class TradeEventHandler(
     private val metrics: FastPathMetrics?,
     private val persistenceQueue: PersistenceQueueEngine?,
-    private val symbolTable: SymbolTable
+    private val symbolTable: SymbolTable,
+    private val auditLogger: AuditLogger?
 ) : EventHandler<TradeEvent> {
 
     private val processedCount = AtomicLong(0)
+    private val executionCount = AtomicLong(0)
+
+    // シンボルごとのオーダーブック (GC負荷を生成するため意図的に非最適化)
+    private val orderBooks = Object2ObjectHashMap<Int, OrderBook>()
 
     override fun onEvent(event: TradeEvent, sequence: Long, endOfBatch: Boolean) {
         val startNs = System.nanoTime()
 
         // Fast Path処理 (ロックフリー)
-        processEvent(event)
+        val execution = processEvent(event)
 
         val latencyNs = System.nanoTime() - startNs
         metrics?.recordProcess(latencyNs)
+
+        // 監査ログ: イベント処理完了
+        val key = symbolTable.resolve(event.symbolId) ?: "unknown"
+        val payload = event.inlinePayload.copyOf(event.payloadSize.toInt())
+        auditLogger?.logEventProcessed(key, payload, event.timestamp, latencyNs)
+
+        // 約定が発生した場合
+        if (execution != null) {
+            executionCount.incrementAndGet()
+        }
 
         // 遅いイベントを警告
         if (latencyNs > 100_000) {  // > 100μs
@@ -131,11 +155,20 @@ private class TradeEventHandler(
         processedCount.incrementAndGet()
     }
 
-    private fun processEvent(event: TradeEvent) {
-        // TODO: ビジネスロジックを実装
-        // - オーダーマッチング
-        // - リスクチェック
-        // - 約定処理
+    private fun processEvent(event: TradeEvent): Execution? {
+        // ペイロードからオーダー情報をパース (簡易実装)
+        val order = parseOrder(event)
+
+        // シンボルごとのオーダーブックを取得
+        val orderBook = orderBooks.computeIfAbsent(event.symbolId) {
+            OrderBook(event.symbolId)
+        }
+
+        // オーダーマッチング
+        val execution = when (order.side) {
+            OrderSide.BUY -> orderBook.processBuyOrder(order.price, order.quantity, event.timestamp)
+            OrderSide.SELL -> orderBook.processSellOrder(order.price, order.quantity, event.timestamp)
+        }
 
         // Persistence Queueへ公開 (非同期、Chronicle Queue書き込み)
         // Fast Path処理から完全分離され、レイテンシに影響しない
@@ -144,8 +177,38 @@ private class TradeEventHandler(
             val payload = event.inlinePayload.copyOf(event.payloadSize.toInt())
             queue.tryPublish(key, payload, event.timestamp)
         }
+
+        return execution
     }
+
+    private fun parseOrder(event: TradeEvent): SimpleOrder {
+        // ペイロードから簡易パース (8バイト想定: side(1) + price(3) + quantity(4))
+        // 本番環境ではProtobuf/FlatBuffersなどを使用
+        val payload = event.inlinePayload
+        val side = if (payload[0].toInt() == 0) OrderSide.BUY else OrderSide.SELL
+        val price = ((payload[1].toInt() and 0xFF) shl 16) or
+                    ((payload[2].toInt() and 0xFF) shl 8) or
+                    (payload[3].toInt() and 0xFF)
+        val quantity = ((payload[4].toInt() and 0xFF) shl 24) or
+                       ((payload[5].toInt() and 0xFF) shl 16) or
+                       ((payload[6].toInt() and 0xFF) shl 8) or
+                       (payload[7].toInt() and 0xFF)
+
+        return SimpleOrder(side, price, quantity)
+    }
+
+    fun getExecutionCount(): Long = executionCount.get()
 }
+
+enum class OrderSide {
+    BUY, SELL
+}
+
+data class SimpleOrder(
+    val side: OrderSide,
+    val price: Int,
+    val quantity: Int
+)
 
 /**
  * シンボルテーブル: 文字列のインターン化 (スレッドセーフ)

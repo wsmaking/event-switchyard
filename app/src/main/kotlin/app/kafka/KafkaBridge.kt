@@ -1,5 +1,6 @@
 package app.kafka
 
+import app.audit.AuditLogger
 import net.openhft.chronicle.queue.ChronicleQueue
 import net.openhft.chronicle.queue.ExcerptTailer
 import net.openhft.chronicle.queue.RollCycles
@@ -21,20 +22,31 @@ import kotlin.concurrent.thread
  * 専用スレッドでChronicle Queueを読み込み、バッチでKafkaへ送信する。
  * Fast Path処理とは完全に非同期で動作し、Kafka障害時もFast Pathに影響しない。
  *
+ * Exactly-Once Semantics対応:
+ * - Kafka Transactionsを使用してバッチ送信を原子的に実行
+ * - idempotent producerで重複送信を防止
+ * - transactional.idでプロデューサーを一意に識別
+ *
  * 環境変数:
  * - KAFKA_BRIDGE_ENABLE: "1"で有効化 (デフォルト: "0")
  * - KAFKA_BRIDGE_BATCH_SIZE: バッチサイズ (デフォルト: 100)
  * - KAFKA_BRIDGE_BATCH_TIMEOUT_MS: バッチタイムアウト (デフォルト: 50ms)
  * - KAFKA_BRIDGE_TOPIC: Kafkaトピック名 (デフォルト: "fast-path-events")
  * - KAFKA_BOOTSTRAP_SERVERS: Kafkaブローカー (デフォルト: "localhost:9092")
+ * - KAFKA_TRANSACTIONS_ENABLE: "1"でKafka Transactionsを有効化 (デフォルト: "1")
+ * - KAFKA_TRANSACTIONAL_ID: トランザクションID (デフォルト: "hft-bridge-tx-{hostname}")
  */
 class KafkaBridge(
+    private val auditLogger: AuditLogger? = null,  // 監査ログ
     queuePath: String = System.getenv("CHRONICLE_QUEUE_PATH") ?: "./data/chronicle-queue",
     rollCycle: RollCycles = RollCycles.HOURLY,
     private val batchSize: Int = System.getenv("KAFKA_BRIDGE_BATCH_SIZE")?.toIntOrNull() ?: 100,
     private val batchTimeoutMs: Long = System.getenv("KAFKA_BRIDGE_BATCH_TIMEOUT_MS")?.toLongOrNull() ?: 50,
     private val topic: String = System.getenv("KAFKA_BRIDGE_TOPIC") ?: "fast-path-events",
-    bootstrapServers: String = System.getenv("KAFKA_BOOTSTRAP_SERVERS") ?: "localhost:9092"
+    bootstrapServers: String = System.getenv("KAFKA_BOOTSTRAP_SERVERS") ?: "localhost:9092",
+    private val transactionsEnabled: Boolean = System.getenv("KAFKA_TRANSACTIONS_ENABLE") != "0",
+    private val transactionalId: String = System.getenv("KAFKA_TRANSACTIONAL_ID")
+        ?: "hft-bridge-tx-${java.net.InetAddress.getLocalHost().hostName}"
 ) : AutoCloseable {
 
     private val queue: ChronicleQueue
@@ -63,18 +75,33 @@ class KafkaBridge(
             put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
             put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer::class.java.name)
             put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
-            put(ProducerConfig.ACKS_CONFIG, "1")  // リーダーACKのみ（パフォーマンス重視）
             put(ProducerConfig.LINGER_MS_CONFIG, "5")  // 5msバッファリング
             put(ProducerConfig.BATCH_SIZE_CONFIG, "65536")  // 64KB
             put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")  // LZ4圧縮
-            put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "5")
             put(ProducerConfig.RETRIES_CONFIG, "3")
             put(ProducerConfig.RETRY_BACKOFF_MS_CONFIG, "100")
+
+            if (transactionsEnabled) {
+                // Exactly-Once Semantics設定
+                put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")  // べき等性有効化
+                put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)  // トランザクションID
+                put(ProducerConfig.ACKS_CONFIG, "all")  // 全レプリカACK必須
+                put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "5")  // べき等性: 最大5
+            } else {
+                put(ProducerConfig.ACKS_CONFIG, "1")  // リーダーACKのみ（パフォーマンス重視）
+                put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "5")
+            }
         }
 
         kafkaProducer = KafkaProducer(props)
 
-        println("Kafka Bridge initialized: topic=$topic, batchSize=$batchSize, batchTimeoutMs=${batchTimeoutMs}ms")
+        // トランザクション初期化
+        if (transactionsEnabled) {
+            kafkaProducer.initTransactions()
+            println("Kafka Bridge initialized: topic=$topic, batchSize=$batchSize, batchTimeoutMs=${batchTimeoutMs}ms, transactions=ENABLED, transactionalId=$transactionalId")
+        } else {
+            println("Kafka Bridge initialized: topic=$topic, batchSize=$batchSize, batchTimeoutMs=${batchTimeoutMs}ms, transactions=DISABLED")
+        }
     }
 
     /**
@@ -167,7 +194,7 @@ class KafkaBridge(
     }
 
     /**
-     * バッチでKafkaへ送信
+     * バッチでKafkaへ送信 (Exactly-Once Semantics対応)
      */
     private fun sendBatchToKafka(batch: List<QueueEvent>) {
         if (batch.isEmpty()) return
@@ -175,6 +202,11 @@ class KafkaBridge(
         val startMs = System.currentTimeMillis()
 
         try {
+            if (transactionsEnabled) {
+                // トランザクション開始
+                kafkaProducer.beginTransaction()
+            }
+
             for (event in batch) {
                 val record = ProducerRecord(topic, event.key, event.payload)
                 kafkaProducer.send(record) { metadata, exception ->
@@ -183,12 +215,19 @@ class KafkaBridge(
                         println("ERROR: Kafka send failed for key=${event.key}: ${exception.message}")
                     } else {
                         sendCount.incrementAndGet()
+                        // 監査ログ: Kafka送信成功
+                        auditLogger?.logKafkaSend(event.key, metadata.partition(), metadata.offset(), System.nanoTime())
                     }
                 }
             }
 
             // flushして送信完了を待つ
             kafkaProducer.flush()
+
+            if (transactionsEnabled) {
+                // トランザクションコミット (原子的にバッチ全体を送信)
+                kafkaProducer.commitTransaction()
+            }
 
             val sendTimeMs = System.currentTimeMillis() - startMs
             totalSendTimeMs.addAndGet(sendTimeMs)
@@ -201,6 +240,16 @@ class KafkaBridge(
             sendErrorCount.addAndGet(batch.size.toLong())
             println("ERROR: Kafka batch send failed: ${e.message}")
             e.printStackTrace()
+
+            // トランザクションアボート (バッチ全体をロールバック)
+            if (transactionsEnabled) {
+                try {
+                    kafkaProducer.abortTransaction()
+                    println("Transaction aborted for batch of ${batch.size} events")
+                } catch (abortEx: Exception) {
+                    println("ERROR: Failed to abort transaction: ${abortEx.message}")
+                }
+            }
         }
     }
 
