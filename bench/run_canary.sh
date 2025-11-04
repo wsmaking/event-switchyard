@@ -208,24 +208,36 @@ print(
 fi
 
 # tail_ratio計算 (p99/p50) - ゼロ除算回避
-if [[ "$PROCESS_P50" != "0" ]] && [[ -n "$PROCESS_P50" ]]; then
-  TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc || echo "0")
-else
-  TAIL_RATIO="0"
+# bc が空文字を返す可能性があるため、計算後に明示的にデフォルト値を設定
+TAIL_RATIO="0"
+if [[ -n "$PROCESS_P50" ]] && [[ "$PROCESS_P50" != "0" ]] && [[ "$PROCESS_P50" != "0.0" ]]; then
+  TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc 2>/dev/null)
+  # bc が空文字や無効値を返した場合、デフォルト値を使用
+  TAIL_RATIO="${TAIL_RATIO:-0}"
+  # さらに空文字チェック (念のため)
+  if [[ -z "$TAIL_RATIO" ]]; then
+    TAIL_RATIO="0"
+  fi
 fi
 
 # スループット計算 (events/sec) - ゼロ除算回避
+THROUGHPUT="0"
 if [[ $ELAPSED_TIME -gt 0 ]]; then
-  THROUGHPUT=$(echo "scale=2; $FAST_PATH_COUNT / $ELAPSED_TIME" | bc || echo "0")
-else
-  THROUGHPUT="0"
+  THROUGHPUT=$(echo "scale=2; $FAST_PATH_COUNT / $ELAPSED_TIME" | bc 2>/dev/null)
+  THROUGHPUT="${THROUGHPUT:-0}"
+  if [[ -z "$THROUGHPUT" ]]; then
+    THROUGHPUT="0"
+  fi
 fi
 
 # エラー率計算 (%)
+ERROR_RATE="0.0000"
 if [[ $FAST_PATH_COUNT -gt 0 ]]; then
-  ERROR_RATE=$(echo "scale=4; ($PQ_ERROR_COUNT * 100.0) / $FAST_PATH_COUNT" | bc || echo "0.0000")
-else
-  ERROR_RATE="0.0000"
+  ERROR_RATE=$(echo "scale=4; ($PQ_ERROR_COUNT * 100.0) / $FAST_PATH_COUNT" | bc 2>/dev/null)
+  ERROR_RATE="${ERROR_RATE:-0.0000}"
+  if [[ -z "$ERROR_RATE" ]]; then
+    ERROR_RATE="0.0000"
+  fi
 fi
 
 echo "✅ メトリクス収集完了"
