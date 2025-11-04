@@ -64,6 +64,18 @@ if ! curl -s -f "$APP_URL/health" >/dev/null 2>&1; then
 fi
 echo "✅ アプリケーション起動確認完了"
 
+# Fast Path有効状態を確認
+HEALTH_JSON=$(curl -s "$APP_URL/health")
+FAST_PATH_ENABLED=$(echo "$HEALTH_JSON" | jq -r '.fast_path.enabled // false' 2>/dev/null || echo "false")
+
+if [[ "$FAST_PATH_ENABLED" != "true" ]]; then
+  echo "❌ エラー: Fast Pathが無効になっています" >&2
+  echo "   /health レスポンス:" >&2
+  echo "$HEALTH_JSON" | jq '.' 2>/dev/null || echo "$HEALTH_JSON" >&2
+  exit 1
+fi
+echo "✅ Fast Path有効確認完了"
+
 # YAMLプロファイルを読み込み (burstのみ実行、将来的には複数対応)
 PROFILE_NAME="burst"
 PROFILE_FILE="$PROFILES_DIR/burst.yaml"
