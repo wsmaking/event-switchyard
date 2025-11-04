@@ -58,7 +58,6 @@ jobs:
   # W3: SLO回帰ゲート (カナリアテスト)
   canary:
     runs-on: ubuntu-latest
-    if: false  # TODO: Re-enable after fixing JSON output issue
     steps:
       - uses: actions/checkout@v4
 
@@ -180,7 +179,7 @@ jobs:
             var/results/change_risk.json
 
   review:  # = gate
-    needs: [bench]  # TODO: Re-enable canary after fixing JSON output issue
+    needs: [bench, canary]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
