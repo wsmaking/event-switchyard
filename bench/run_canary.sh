@@ -64,6 +64,18 @@ if ! curl -s -f "$APP_URL/health" >/dev/null 2>&1; then
 fi
 echo "✅ アプリケーション起動確認完了"
 
+# Fast Path有効状態を確認
+HEALTH_JSON=$(curl -s "$APP_URL/health")
+FAST_PATH_ENABLED=$(echo "$HEALTH_JSON" | jq -r '.fast_path.enabled // false' 2>/dev/null || echo "false")
+
+if [[ "$FAST_PATH_ENABLED" != "true" ]]; then
+  echo "❌ エラー: Fast Pathが無効になっています" >&2
+  echo "   /health レスポンス:" >&2
+  echo "$HEALTH_JSON" | jq '.' 2>/dev/null || echo "$HEALTH_JSON" >&2
+  exit 1
+fi
+echo "✅ Fast Path有効確認完了"
+
 # YAMLプロファイルを読み込み (burstのみ実行、将来的には複数対応)
 PROFILE_NAME="burst"
 PROFILE_FILE="$PROFILES_DIR/burst.yaml"
@@ -117,6 +129,31 @@ for i in $(seq 1 "$WARMUP_EVENTS"); do
 done
 echo "✅ ウォームアップ完了"
 
+# ウォームアップ後のメトリクス確認 (Fast Pathが起動しているか確認)
+echo "🔍 Fast Pathメトリクス確認中..."
+WARMUP_RETRIES=0
+MAX_WARMUP_RETRIES=10
+while [[ $WARMUP_RETRIES -lt $MAX_WARMUP_RETRIES ]]; do
+  WARMUP_STATS=$(curl -s "$APP_URL/stats")
+  WARMUP_P50=$(echo "$WARMUP_STATS" | jq -r '.fast_path_process_p50_us // 0' 2>/dev/null || echo "0")
+
+  # p50が非ゼロならメトリクス収集成功
+  if [[ -n "$WARMUP_P50" ]] && [[ "$WARMUP_P50" != "0" ]] && [[ "$WARMUP_P50" != "0.0" ]]; then
+    echo "✅ Fast Pathメトリクス確認完了 (p50=${WARMUP_P50}μs)"
+    break
+  fi
+
+  WARMUP_RETRIES=$((WARMUP_RETRIES + 1))
+  echo "   リトライ中... ($WARMUP_RETRIES/$MAX_WARMUP_RETRIES) p50=$WARMUP_P50"
+  sleep 0.5
+done
+
+if [[ $WARMUP_RETRIES -ge $MAX_WARMUP_RETRIES ]]; then
+  echo "⚠️  警告: ウォームアップ後もメトリクスが収集されていません" >&2
+  echo "   Fast Pathが正常に動作していない可能性があります" >&2
+  echo "   テストを続行しますが、メトリクス収集失敗でエラーになる可能性があります" >&2
+fi
+
 # メイン負荷生成 (burst.yamlのpatternに従う)
 echo "⚡ メイン負荷テスト開始 (${EVENTS_TOTAL}イベント, ${DURATION_SEC}秒)..."
 
@@ -169,6 +206,10 @@ if [[ -z "$STATS_JSON" ]] || [[ "$STATS_JSON" == "null" ]]; then
   echo "❌ エラー: メトリクス取得失敗" >&2
   exit 1
 fi
+
+# デバッグ: 実際の/stats出力を表示
+echo "🔍 /stats レスポンス:"
+echo "$STATS_JSON" | jq '.' 2>/dev/null || echo "$STATS_JSON"
 
 # メトリクス抽出 (jqがなければPython fallback)
 if command -v jq >/dev/null 2>&1; then
