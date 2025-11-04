@@ -208,16 +208,22 @@ print(
 fi
 
 # tail_ratio計算 (p99/p50) - ゼロ除算回避
-# bc が空文字を返す可能性があるため、計算後に明示的にデフォルト値を設定
-TAIL_RATIO="0"
-if [[ -n "$PROCESS_P50" ]] && [[ "$PROCESS_P50" != "0" ]] && [[ "$PROCESS_P50" != "0.0" ]]; then
-  TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc 2>/dev/null)
-  # bc が空文字や無効値を返した場合、デフォルト値を使用
-  TAIL_RATIO="${TAIL_RATIO:-0}"
-  # さらに空文字チェック (念のため)
-  if [[ -z "$TAIL_RATIO" ]]; then
-    TAIL_RATIO="0"
-  fi
+# p50が0の場合はメトリクス収集失敗を意味するため、テスト失敗とする
+if [[ -z "$PROCESS_P50" ]] || [[ "$PROCESS_P50" == "0" ]] || [[ "$PROCESS_P50" == "0.0" ]]; then
+  echo "❌ エラー: Fast Pathメトリクスが収集されていません (p50=$PROCESS_P50)" >&2
+  echo "   原因可能性:" >&2
+  echo "   - アプリケーションが正常に起動していない" >&2
+  echo "   - /statsエンドポイントがメトリクスを返していない" >&2
+  echo "   - Fast Pathが無効化されている" >&2
+  echo "   - イベントが処理されていない" >&2
+  exit 1
+fi
+
+TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc 2>/dev/null)
+# bc出力が空の場合のフォールバック (異常時)
+if [[ -z "$TAIL_RATIO" ]]; then
+  echo "❌ エラー: tail_ratio計算失敗 (p99=$PROCESS_P99, p50=$PROCESS_P50)" >&2
+  exit 1
 fi
 
 # スループット計算 (events/sec) - ゼロ除算回避
