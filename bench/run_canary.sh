@@ -173,17 +173,17 @@ fi
 # メトリクス抽出 (jqがなければPython fallback)
 if command -v jq >/dev/null 2>&1; then
   # jq利用可能
-  FAST_PATH_COUNT=$(echo "$STATS_JSON" | jq -r '.fast_path_count // 0')
-  DROP_COUNT=$(echo "$STATS_JSON" | jq -r '.fast_path_drop_count // 0')
-  PROCESS_P50=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p50_us // 0')
-  PROCESS_P99=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p99_us // 0')
-  PROCESS_P999=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p999_us // 0')
-  PUBLISH_P50=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p50_us // 0')
-  PUBLISH_P99=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p99_us // 0')
-  PUBLISH_P999=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p999_us // 0')
-  PQ_WRITE_P99=$(echo "$STATS_JSON" | jq -r '.persistence_queue_write_p99_us // 0')
-  PQ_ERROR_COUNT=$(echo "$STATS_JSON" | jq -r '.persistence_queue_error_count // 0')
-  PQ_LAG=$(echo "$STATS_JSON" | jq -r '.persistence_queue_lag // 0')
+  FAST_PATH_COUNT=$(echo "$STATS_JSON" | jq -r '.fast_path_count // 0' || echo "0")
+  DROP_COUNT=$(echo "$STATS_JSON" | jq -r '.fast_path_drop_count // 0' || echo "0")
+  PROCESS_P50=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p50_us // 0' || echo "0")
+  PROCESS_P99=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p99_us // 0' || echo "0")
+  PROCESS_P999=$(echo "$STATS_JSON" | jq -r '.fast_path_process_p999_us // 0' || echo "0")
+  PUBLISH_P50=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p50_us // 0' || echo "0")
+  PUBLISH_P99=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p99_us // 0' || echo "0")
+  PUBLISH_P999=$(echo "$STATS_JSON" | jq -r '.fast_path_publish_p999_us // 0' || echo "0")
+  PQ_WRITE_P99=$(echo "$STATS_JSON" | jq -r '.persistence_queue_write_p99_us // 0' || echo "0")
+  PQ_ERROR_COUNT=$(echo "$STATS_JSON" | jq -r '.persistence_queue_error_count // 0' || echo "0")
+  PQ_LAG=$(echo "$STATS_JSON" | jq -r '.persistence_queue_lag // 0' || echo "0")
 else
   # Python fallback
   read -r FAST_PATH_COUNT DROP_COUNT PROCESS_P50 PROCESS_P99 PROCESS_P999 \
@@ -207,15 +207,23 @@ print(
 ")
 fi
 
-# tail_ratio計算 (p99/p50)
-TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc)
+# tail_ratio計算 (p99/p50) - ゼロ除算回避
+if [[ "$PROCESS_P50" != "0" ]] && [[ -n "$PROCESS_P50" ]]; then
+  TAIL_RATIO=$(echo "scale=2; $PROCESS_P99 / $PROCESS_P50" | bc || echo "0")
+else
+  TAIL_RATIO="0"
+fi
 
-# スループット計算 (events/sec)
-THROUGHPUT=$(echo "scale=2; $FAST_PATH_COUNT / $ELAPSED_TIME" | bc)
+# スループット計算 (events/sec) - ゼロ除算回避
+if [[ $ELAPSED_TIME -gt 0 ]]; then
+  THROUGHPUT=$(echo "scale=2; $FAST_PATH_COUNT / $ELAPSED_TIME" | bc || echo "0")
+else
+  THROUGHPUT="0"
+fi
 
 # エラー率計算 (%)
 if [[ $FAST_PATH_COUNT -gt 0 ]]; then
-  ERROR_RATE=$(echo "scale=4; ($PQ_ERROR_COUNT * 100.0) / $FAST_PATH_COUNT" | bc)
+  ERROR_RATE=$(echo "scale=4; ($PQ_ERROR_COUNT * 100.0) / $FAST_PATH_COUNT" | bc || echo "0.0000")
 else
   ERROR_RATE="0.0000"
 fi
