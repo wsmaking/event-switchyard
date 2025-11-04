@@ -195,6 +195,10 @@ if [[ -z "$STATS_JSON" ]] || [[ "$STATS_JSON" == "null" ]]; then
   exit 1
 fi
 
+# デバッグ: 実際の/stats出力を表示
+echo "🔍 /stats レスポンス:"
+echo "$STATS_JSON" | jq '.' 2>/dev/null || echo "$STATS_JSON"
+
 # メトリクス抽出 (jqがなければPython fallback)
 if command -v jq >/dev/null 2>&1; then
   # jq利用可能
