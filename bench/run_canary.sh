@@ -78,6 +78,9 @@ EVENTS_TOTAL=$(grep '^events_total:' "$PROFILE_FILE" | awk '{print $2}')
 DURATION_SEC=$(grep '^duration_sec:' "$PROFILE_FILE" | awk '{print $2}')
 KEYS=$(grep -A 10 '^keys:' "$PROFILE_FILE" | grep '  - ' | sed 's/.*- //' | tr '\n' ',' | sed 's/,$//')
 
+# JSON配列用にキーを整形 (カンマ区切り → JSON配列)
+KEYS_JSON=$(echo "$KEYS" | sed 's/,/", "/g' | sed 's/^/"/' | sed 's/$/"/')
+
 # 持続時間上書き
 if [[ -n "$DURATION_OVERRIDE" ]]; then
   DURATION_SEC="$DURATION_OVERRIDE"
@@ -251,7 +254,7 @@ cat > "$OUT_FILE" <<EOF
     "duration_sec": $DURATION_SEC,
     "events_total": $EVENTS_TOTAL,
     "warmup_events": $WARMUP_EVENTS,
-    "keys": ["$KEYS"]
+    "keys": [$KEYS_JSON]
   },
   "metrics": {
     "fast_path": {
