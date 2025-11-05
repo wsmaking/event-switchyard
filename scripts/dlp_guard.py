@@ -57,10 +57,14 @@ class DLPGuard:
             r'noreply@anthropic\.com',  # 例: 公開用メールアドレス
             r'example@example\.com',
             r'test@test\.com',
+            r'.*@example\.com',  # example.comドメイン全体 (テスト用)
         ],
         "api_key": [
             r'YOUR_API_KEY_HERE',
             r'PLACEHOLDER',
+        ],
+        "phone_jp": [
+            r'\d{2}\s+\d{8}',  # ファイル名の日付パターン (例: "08 20251102")
         ]
     }
 
