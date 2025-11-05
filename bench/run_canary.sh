@@ -116,11 +116,10 @@ IFS=',' read -ra KEY_ARRAY <<< "$KEYS"
 # 最初のリクエストで接続性を確認
 FIRST_KEY="${KEY_ARRAY[0]}"
 FIRST_PAYLOAD="{\"symbol\":\"$FIRST_KEY\",\"price\":50000,\"quantity\":10,\"ts\":$(date +%s%3N)}"
-echo "🔍 接続テスト: POST $APP_URL/ingress"
+echo "🔍 接続テスト: POST $APP_URL/events?key=$FIRST_KEY"
 
-FIRST_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$APP_URL/ingress" \
+FIRST_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$APP_URL/events?key=$FIRST_KEY" \
   -H "Content-Type: application/json" \
-  -H "X-Key: $FIRST_KEY" \
   -d "$FIRST_PAYLOAD" 2>&1)
 
 HTTP_CODE=$(echo "$FIRST_RESPONSE" | tail -n1)
@@ -130,7 +129,7 @@ echo "   HTTPステータス: $HTTP_CODE"
 echo "   レスポンス: $RESPONSE_BODY"
 
 if [[ "$HTTP_CODE" != "200" ]] && [[ "$HTTP_CODE" != "201" ]] && [[ "$HTTP_CODE" != "202" ]]; then
-  echo "❌ エラー: /ingressエンドポイントへの接続に失敗しました" >&2
+  echo "❌ エラー: /eventsエンドポイントへの接続に失敗しました" >&2
   echo "   期待: 200/201/202, 実際: $HTTP_CODE" >&2
   exit 1
 fi
@@ -142,10 +141,9 @@ for i in $(seq 1 "$WARMUP_EVENTS"); do
   KEY="${KEY_ARRAY[$((RANDOM % ${#KEY_ARRAY[@]}))]}"
   PAYLOAD="{\"symbol\":\"$KEY\",\"price\":$((RANDOM % 100000 + 1000)),\"quantity\":$((RANDOM % 100)),\"ts\":$(date +%s%3N)}"
 
-  # /ingressエンドポイントにPOST (ヘッダーでkey指定)
-  if ! curl -s -f -X POST "$APP_URL/ingress" \
+  # /eventsエンドポイントにPOST (クエリパラメータでkey指定)
+  if ! curl -s -f -X POST "$APP_URL/events?key=$KEY" \
     -H "Content-Type: application/json" \
-    -H "X-Key: $KEY" \
     -d "$PAYLOAD" >/dev/null 2>&1; then
     WARMUP_FAILED=$((WARMUP_FAILED + 1))
   fi
@@ -208,9 +206,8 @@ while [[ $SENT_COUNT -lt $EVENTS_TOTAL ]]; do
   KEY="${KEY_ARRAY[$((RANDOM % ${#KEY_ARRAY[@]}))]}"
   PAYLOAD="{\"symbol\":\"$KEY\",\"price\":$((RANDOM % 100000 + 1000)),\"quantity\":$((RANDOM % 100)),\"ts\":$(date +%s%3N)}"
 
-  if ! curl -s -f -X POST "$APP_URL/ingress" \
+  if ! curl -s -f -X POST "$APP_URL/events?key=$KEY" \
     -H "Content-Type: application/json" \
-    -H "X-Key: $KEY" \
     -d "$PAYLOAD" >/dev/null 2>&1; then
     FAILED_COUNT=$((FAILED_COUNT + 1))
   fi
