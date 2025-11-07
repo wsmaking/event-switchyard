@@ -141,6 +141,7 @@ jobs:
           python scripts/dlp_guard.py \
             --scan docs/ \
             --report var/results/dlp_report.json \
+            --verbose \
             --fail-on-detect
 
       # W7: 変更リスク分析 (PR時のみ)
