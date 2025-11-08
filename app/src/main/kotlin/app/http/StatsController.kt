@@ -14,6 +14,17 @@ class StatsController(private val router: Router) : HttpHandler {
 
     override fun handle(exchange: HttpExchange) {
         try {
+            // CORS headers
+            exchange.responseHeaders.set("Access-Control-Allow-Origin", "*")
+            exchange.responseHeaders.set("Access-Control-Allow-Methods", "GET, OPTIONS")
+            exchange.responseHeaders.set("Access-Control-Allow-Headers", "Content-Type")
+
+            // Handle preflight requests
+            if (exchange.requestMethod == "OPTIONS") {
+                sendResponse(exchange, 204, "")
+                return
+            }
+
             if (exchange.requestMethod != "GET") {
                 sendResponse(exchange, 405, "Method Not Allowed")
                 return

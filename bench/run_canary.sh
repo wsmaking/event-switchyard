@@ -112,21 +112,52 @@ fi
 
 echo "🔥 ウォームアップ開始 (${WARMUP_EVENTS}イベント)..."
 IFS=',' read -ra KEY_ARRAY <<< "$KEYS"
+
+# 最初のリクエストで接続性を確認
+FIRST_KEY="${KEY_ARRAY[0]}"
+FIRST_PAYLOAD="{\"symbol\":\"$FIRST_KEY\",\"price\":50000,\"quantity\":10,\"ts\":$(date +%s%3N)}"
+echo "🔍 接続テスト: POST $APP_URL/events?key=$FIRST_KEY"
+
+FIRST_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$APP_URL/events?key=$FIRST_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$FIRST_PAYLOAD" 2>&1)
+
+HTTP_CODE=$(echo "$FIRST_RESPONSE" | tail -n1)
+RESPONSE_BODY=$(echo "$FIRST_RESPONSE" | head -n-1)
+
+echo "   HTTPステータス: $HTTP_CODE"
+echo "   レスポンス: $RESPONSE_BODY"
+
+if [[ "$HTTP_CODE" != "200" ]] && [[ "$HTTP_CODE" != "201" ]] && [[ "$HTTP_CODE" != "202" ]]; then
+  echo "❌ エラー: /eventsエンドポイントへの接続に失敗しました" >&2
+  echo "   期待: 200/201/202, 実際: $HTTP_CODE" >&2
+  exit 1
+fi
+echo "✅ 接続テスト成功"
+
+# ウォームアップイベント送信
+WARMUP_FAILED=0
 for i in $(seq 1 "$WARMUP_EVENTS"); do
   KEY="${KEY_ARRAY[$((RANDOM % ${#KEY_ARRAY[@]}))]}"
   PAYLOAD="{\"symbol\":\"$KEY\",\"price\":$((RANDOM % 100000 + 1000)),\"quantity\":$((RANDOM % 100)),\"ts\":$(date +%s%3N)}"
 
-  # /ingressエンドポイントにPOST (ヘッダーでkey指定)
-  curl -s -X POST "$APP_URL/ingress" \
+  # /eventsエンドポイントにPOST (クエリパラメータでkey指定)
+  if ! curl -s -f -X POST "$APP_URL/events?key=$KEY" \
     -H "Content-Type: application/json" \
-    -H "X-Key: $KEY" \
-    -d "$PAYLOAD" >/dev/null 2>&1 || true
+    -d "$PAYLOAD" >/dev/null 2>&1; then
+    WARMUP_FAILED=$((WARMUP_FAILED + 1))
+  fi
 
   # スロットリング (最初は低速)
   if [[ $((i % 10)) -eq 0 ]]; then
     sleep 0.01
   fi
 done
+
+if [[ $WARMUP_FAILED -gt 0 ]]; then
+  WARMUP_FAIL_RATE=$(echo "scale=2; $WARMUP_FAILED * 100.0 / $WARMUP_EVENTS" | bc)
+  echo "⚠️  警告: ウォームアップで${WARMUP_FAILED}/${WARMUP_EVENTS}件失敗 (${WARMUP_FAIL_RATE}%)" >&2
+fi
 echo "✅ ウォームアップ完了"
 
 # ウォームアップ後のメトリクス確認 (Fast Pathが起動しているか確認)
@@ -169,15 +200,17 @@ SLEEP_INTERVAL=$(echo "scale=6; 1.0 / $RATE" | bc)
 
 START_TIME=$(date +%s)
 SENT_COUNT=0
+FAILED_COUNT=0
 
 while [[ $SENT_COUNT -lt $EVENTS_TOTAL ]]; do
   KEY="${KEY_ARRAY[$((RANDOM % ${#KEY_ARRAY[@]}))]}"
   PAYLOAD="{\"symbol\":\"$KEY\",\"price\":$((RANDOM % 100000 + 1000)),\"quantity\":$((RANDOM % 100)),\"ts\":$(date +%s%3N)}"
 
-  curl -s -X POST "$APP_URL/ingress" \
+  if ! curl -s -f -X POST "$APP_URL/events?key=$KEY" \
     -H "Content-Type: application/json" \
-    -H "X-Key: $KEY" \
-    -d "$PAYLOAD" >/dev/null 2>&1 || true
+    -d "$PAYLOAD" >/dev/null 2>&1; then
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+  fi
 
   SENT_COUNT=$((SENT_COUNT + 1))
 
@@ -193,6 +226,11 @@ done
 
 ELAPSED_TIME=$(($(date +%s) - START_TIME))
 echo "✅ 負荷テスト完了 (送信: ${SENT_COUNT}イベント, 経過: ${ELAPSED_TIME}秒)"
+
+if [[ $FAILED_COUNT -gt 0 ]]; then
+  FAIL_RATE=$(echo "scale=2; $FAILED_COUNT * 100.0 / $EVENTS_TOTAL" | bc)
+  echo "⚠️  警告: ${FAILED_COUNT}/${EVENTS_TOTAL}件のリクエストが失敗 (${FAIL_RATE}%)" >&2
+fi
 
 # クールダウン (メトリクス集計待ち)
 echo "⏳ クールダウン (2秒)..."

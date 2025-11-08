@@ -135,13 +135,14 @@ jobs:
             --report var/results/cost_report.json \
             --fail-on-exceed
 
-      # W7: PIIガード
+      # W7: PIIガード (ドキュメントから個人情報・機密情報を検出)
       - name: PII/DLP Guard
         run: |
           python scripts/dlp_guard.py \
-            --in var/results/canary.json \
+            --scan docs/ \
             --report var/results/dlp_report.json \
-            --fail-on-pii
+            --verbose \
+            --fail-on-detect
 
       # W7: 変更リスク分析 (PR時のみ)
       - name: Change Risk Analysis

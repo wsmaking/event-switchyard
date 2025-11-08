@@ -26,6 +26,7 @@ RUN --mount=type=cache,target=/home/gradle/.gradle \
     rm -rf /home/gradle/.gradle/configuration-cache && \
     gradle --no-daemon :app:shadowJar
 
+
 # ===== Runtime stage (JRE + HFT最適化) =====
 FROM eclipse-temurin:21-jre
 WORKDIR /app
