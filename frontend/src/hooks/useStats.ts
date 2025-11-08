@@ -2,7 +2,8 @@ import { useQuery } from '@tanstack/react-query';
 import type { StatsResponse, DashboardMetrics } from '../types/stats';
 import { toDashboardMetrics } from '../types/stats';
 
-const API_BASE_URL = 'http://localhost:8080';
+// 本番環境では同一オリジン、開発時はlocalhost:8080
+const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
 // /stats APIからデータ取得
 async function fetchStats(): Promise<StatsResponse> {

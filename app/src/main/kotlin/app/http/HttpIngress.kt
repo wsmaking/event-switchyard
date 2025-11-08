@@ -64,6 +64,10 @@ class HttpIngress : AutoCloseable {
                 createContext("/health", HealthController(r))
                 createContext("/metrics", MetricsController(r))
             }
+
+            // フロントエンド静的ファイル配信 (最後に登録してAPI優先)
+            createContext("/", StaticFileController())
+
             executor = Executors.newCachedThreadPool()
             start()
         }
