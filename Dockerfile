@@ -2,6 +2,12 @@
 FROM gradle:8.12.0-jdk21 AS builder
 WORKDIR /workspace
 
+# Node.jsインストール（フロントエンドビルド用）
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # 依存キャッシュ用メタ（root側があれば含める）
 COPY settings.gradle* ./
 COPY build.gradle* ./
@@ -17,10 +23,13 @@ COPY app/build.gradle app/build.gradle
 RUN --mount=type=cache,target=/home/gradle/.gradle \
     gradle --no-daemon :app:dependencies || true
 
+# フロントエンドをコピー（ビルドに必要）
+COPY frontend /workspace/frontend
+
 # ソースをコピー
 COPY app/src /workspace/app/src
 
-# fat-jar を作る
+# fat-jar を作る（フロントエンドも自動ビルドされる）
 RUN --mount=type=cache,target=/home/gradle/.gradle \
     gradle --no-daemon :app:shadowJar
 
