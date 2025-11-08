@@ -19,8 +19,9 @@ COPY gradle.properties gradle.properties
 # app 側の build スクリプト
 COPY app/build.gradle app/build.gradle
 
-# 依存だけ先に解決（キャッシュ利用）
+# 依存だけ先に解決（キャッシュ利用、configuration-cache除外）
 RUN --mount=type=cache,target=/home/gradle/.gradle \
+    rm -rf /home/gradle/.gradle/configuration-cache && \
     gradle --no-daemon :app:dependencies || true
 
 # フロントエンドをコピー（ビルドに必要）
@@ -29,8 +30,9 @@ COPY frontend /workspace/frontend
 # ソースをコピー
 COPY app/src /workspace/app/src
 
-# fat-jar を作る（フロントエンドも自動ビルドされる）
+# fat-jar を作る（フロントエンドも自動ビルド、configuration-cache除外）
 RUN --mount=type=cache,target=/home/gradle/.gradle \
+    rm -rf /home/gradle/.gradle/configuration-cache && \
     gradle --no-daemon :app:shadowJar
 
 # ===== Runtime stage (JRE + HFT最適化) =====
