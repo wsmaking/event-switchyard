@@ -22,7 +22,7 @@ COPY app/src /workspace/app/src
 
 # fat-jar を作る
 RUN --mount=type=cache,target=/home/gradle/.gradle \
-    gradle --no-daemon :app:shadowJar
+    gradle --no-daemon --no-configuration-cache :app:shadowJar
 
 # ===== Runtime stage (JRE + HFT最適化) =====
 FROM eclipse-temurin:21-jre
