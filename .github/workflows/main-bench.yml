@@ -77,19 +77,30 @@ jobs:
       - name: Start application
         run: |
           mkdir -p var
-          FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run &
+          # CI環境ではKafka未起動のため無効化、Chronicle Queueは有効
+          OWNED_KEYS="7203,6758" \
+          FAST_PATH_ENABLE=1 \
+          FAST_PATH_METRICS=1 \
+          KAFKA_BRIDGE_ENABLE=0 \
+          ./gradlew run &
           APP_PID=$!
           echo $APP_PID > var/app.pid
 
-          # ヘルスチェック待機 (最大30秒)
-          for i in {1..30}; do
+          # ヘルスチェック待機 (最大60秒)
+          for i in {1..60}; do
             if curl -s -f http://localhost:8080/health >/dev/null 2>&1; then
               echo "✅ アプリ起動完了"
               break
             fi
-            echo "⏳ アプリ起動待機中... ($i/30)"
+            echo "⏳ アプリ起動待機中... ($i/60)"
             sleep 1
           done
+
+          # 起動確認
+          if ! curl -s -f http://localhost:8080/health >/dev/null 2>&1; then
+            echo "❌ アプリケーション起動失敗"
+            exit 1
+          fi
 
       # カナリアテスト実行
       - name: Run canary test
