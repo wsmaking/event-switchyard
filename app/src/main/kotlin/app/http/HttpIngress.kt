@@ -63,6 +63,15 @@ class HttpIngress : AutoCloseable {
                 createContext("/health", HealthController(r))
                 createContext("/metrics", MetricsController(r))
                 createContext("/api/admin", AdminController(r))
+
+                // Trading API endpoints (依存関係に注意)
+                val marketDataController = MarketDataController()
+                val orderController = OrderController(r, marketDataController)
+                val positionController = PositionController(orderController, marketDataController)
+
+                createContext("/api/market-data", marketDataController)
+                createContext("/api/orders", orderController)
+                createContext("/api/positions", positionController)
             }
 
             // フロントエンド静的ファイル配信 (最後に登録してAPI優先)
