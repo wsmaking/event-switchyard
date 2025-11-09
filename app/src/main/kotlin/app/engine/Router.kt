@@ -12,19 +12,19 @@ import java.util.concurrent.atomic.AtomicLong
  * レイテンシ要件に基づいて、リクエストをFast PathまたはSlow Pathにルーティングする
  *
  * 環境変数:
- * - FAST_PATH_ENABLE: "1"でFast Pathを有効化 (デフォルト: "0")
+ * - FAST_PATH_ENABLE: "0"でFast Pathを無効化 (デフォルト: "1" 有効)
  * - FAST_PATH_SYMBOLS: Fast Path対象のシンボルをカンマ区切りで指定 (例: "BTC,ETH")
- * - FAST_PATH_FALLBACK: "1"でFast Path失敗時にSlow Pathへフォールバック (デフォルト: "1")
- * - KAFKA_BRIDGE_ENABLE: "1"でKafka Bridgeを有効化 (デフォルト: "0")
+ * - FAST_PATH_FALLBACK: "0"でフォールバックを無効化 (デフォルト: "1")
+ * - KAFKA_BRIDGE_ENABLE: "0"でKafka Bridgeを無効化 (デフォルト: "1" 有効)
  * - AUDIT_LOG_ENABLE: "1"で監査ログを有効化 (デフォルト: "0")
  * - TRACING_ENABLE: "1"で分散トレースを有効化 (デフォルト: "0")
  */
 class Router(
     private val slowPath: Engine,
-    private val fastPathEnabled: Boolean = System.getenv("FAST_PATH_ENABLE") == "1",
+    private val fastPathEnabled: Boolean = System.getenv("FAST_PATH_ENABLE") != "0",
     private val fastPathSymbols: Set<String> = parseFastPathSymbols(),
     private val fallbackEnabled: Boolean = System.getenv("FAST_PATH_FALLBACK") != "0",
-    private val kafkaBridgeEnabled: Boolean = System.getenv("KAFKA_BRIDGE_ENABLE") == "1",
+    private val kafkaBridgeEnabled: Boolean = System.getenv("KAFKA_BRIDGE_ENABLE") != "0",
     private val auditLogEnabled: Boolean = System.getenv("AUDIT_LOG_ENABLE") == "1"
 ) : AutoCloseable {
 

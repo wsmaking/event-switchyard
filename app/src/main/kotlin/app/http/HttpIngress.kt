@@ -69,7 +69,6 @@ class HttpIngress : AutoCloseable {
                 this@HttpIngress.marketDataController = mdc
                 val orderController = OrderController(r, mdc)
                 createContext("/api/orders", orderController)
-                createContext("/api/positions", PositionController(orderController, mdc))
                 createContext("/api/market/", mdc)
             }
 
