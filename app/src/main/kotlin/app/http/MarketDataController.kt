@@ -1,5 +1,6 @@
 package app.http
 
+import app.fast.OrderBook
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
@@ -20,6 +21,19 @@ data class StockInfo(
     val high: Double,
     val low: Double,
     val volume: Long
+)
+
+data class PriceLevel(
+    val price: Int,
+    val quantity: Int,
+    val orders: Int = 1
+)
+
+data class OrderBookDepth(
+    val symbol: String,
+    val timestamp: Long,
+    val bids: List<PriceLevel>,  // 買い板（価格降順）
+    val asks: List<PriceLevel>   // 売り板（価格昇順）
 )
 
 /**
@@ -51,6 +65,9 @@ class MarketDataController : HttpHandler, AutoCloseable {
     private val priceCache = ConcurrentHashMap<String, StockInfo>()
     private val lastUpdateTime = AtomicLong(0)
 
+    // OrderBook管理（銘柄ごと）
+    private val orderBooks = ConcurrentHashMap<String, OrderBook>()
+
     // 定期更新用スケジューラ
     private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "MarketDataUpdater").apply { isDaemon = true }
@@ -61,14 +78,29 @@ class MarketDataController : HttpHandler, AutoCloseable {
     }
 
     init {
+        // 各銘柄のOrderBookを初期化
+        stockMaster.keys.forEach { symbol ->
+            val symbolId = symbol.toIntOrNull() ?: 0
+            orderBooks[symbol] = OrderBook(symbolId)
+        }
+
         // 初回更新
         updateAllPrices()
+        populateInitialOrders()
 
         // 定期更新開始
         scheduler.scheduleAtFixedRate(
             ::updateAllPrices,
             UPDATE_INTERVAL_MS,
             UPDATE_INTERVAL_MS,
+            TimeUnit.MILLISECONDS
+        )
+
+        // 模擬的な注文生成（板を活性化）
+        scheduler.scheduleAtFixedRate(
+            ::generateRandomOrders,
+            500L,
+            500L,
             TimeUnit.MILLISECONDS
         )
     }
@@ -90,21 +122,32 @@ class MarketDataController : HttpHandler, AutoCloseable {
                 return
             }
 
-            // パスから銘柄コードを取得 (/api/market/7203 -> 7203)
+            // パスから銘柄コードとエンドポイントを取得
             val path = exchange.requestURI.path
-            val symbol = path.substringAfterLast("/")
 
-            if (symbol.isEmpty() || !stockMaster.containsKey(symbol)) {
-                sendResponse(exchange, 404, "Symbol not found")
-                return
+            // /api/market-data/7203/orderbook の場合
+            when {
+                path.endsWith("/orderbook") -> {
+                    val symbol = path.split("/").getOrNull(3) ?: ""
+                    if (symbol.isEmpty() || !stockMaster.containsKey(symbol)) {
+                        sendResponse(exchange, 404, "Symbol not found")
+                        return
+                    }
+                    handleOrderBook(exchange, symbol)
+                }
+                else -> {
+                    // /api/market-data/7203 の場合（価格情報）
+                    val symbol = path.substringAfterLast("/")
+                    if (symbol.isEmpty() || !stockMaster.containsKey(symbol)) {
+                        sendResponse(exchange, 404, "Symbol not found")
+                        return
+                    }
+                    val stockInfo = priceCache[symbol] ?: generateStockInfo(symbol)
+                    val json = objectMapper.writeValueAsString(stockInfo)
+                    exchange.responseHeaders.set("Content-Type", "application/json")
+                    sendResponse(exchange, 200, json)
+                }
             }
-
-            // キャッシュから取得（キャッシュがなければ生成）
-            val stockInfo = priceCache[symbol] ?: generateStockInfo(symbol)
-            val json = objectMapper.writeValueAsString(stockInfo)
-
-            exchange.responseHeaders.set("Content-Type", "application/json")
-            sendResponse(exchange, 200, json)
         } catch (e: Exception) {
             sendResponse(exchange, 500, "Internal Server Error: ${e.message}")
         } finally {
@@ -166,6 +209,103 @@ class MarketDataController : HttpHandler, AutoCloseable {
             val info = generateStockInfo(symbol)
             priceCache[symbol] = info
             info.currentPrice
+        }
+    }
+
+    // WebSocket用の公開メソッド（板情報取得）
+    fun getOrderBookDepthPublic(symbol: String): OrderBookDepth? {
+        val orderBook = orderBooks[symbol] ?: return null
+        return getOrderBookDepth(symbol, orderBook)
+    }
+
+    // OrderBook板情報エンドポイント
+    private fun handleOrderBook(exchange: HttpExchange, symbol: String) {
+        val orderBook = orderBooks[symbol]
+        if (orderBook == null) {
+            sendResponse(exchange, 404, "OrderBook not found for symbol: $symbol")
+            return
+        }
+
+        // OrderBookから板情報を取得（現時点ではダミーデータ）
+        val depth = getOrderBookDepth(symbol, orderBook)
+        val json = objectMapper.writeValueAsString(depth)
+
+        exchange.responseHeaders.set("Content-Type", "application/json")
+        sendResponse(exchange, 200, json)
+    }
+
+    // OrderBookから5レベル板情報を生成
+    private fun getOrderBookDepth(symbol: String, orderBook: OrderBook): OrderBookDepth {
+        val basePrice = basePrices[symbol] ?: 1000.0
+        val priceInt = basePrice.toInt()
+
+        // 模擬的な5レベル板情報を生成
+        val bids = (1..5).map { level ->
+            PriceLevel(
+                price = priceInt - level * 10,
+                quantity = Random.nextInt(100, 1000),
+                orders = Random.nextInt(1, 10)
+            )
+        }
+
+        val asks = (1..5).map { level ->
+            PriceLevel(
+                price = priceInt + level * 10,
+                quantity = Random.nextInt(100, 1000),
+                orders = Random.nextInt(1, 10)
+            )
+        }
+
+        return OrderBookDepth(
+            symbol = symbol,
+            timestamp = System.currentTimeMillis(),
+            bids = bids,
+            asks = asks
+        )
+    }
+
+    // 初期注文を投入
+    private fun populateInitialOrders() {
+        stockMaster.keys.forEach { symbol ->
+            val orderBook = orderBooks[symbol] ?: return@forEach
+            val basePrice = basePrices[symbol]?.toInt() ?: 1000
+
+            // 買い注文を投入
+            repeat(10) {
+                val price = basePrice - Random.nextInt(10, 50)
+                val quantity = Random.nextInt(100, 1000)
+                orderBook.processBuyOrder(price, quantity, System.nanoTime())
+            }
+
+            // 売り注文を投入
+            repeat(10) {
+                val price = basePrice + Random.nextInt(10, 50)
+                val quantity = Random.nextInt(100, 1000)
+                orderBook.processSellOrder(price, quantity, System.nanoTime())
+            }
+        }
+    }
+
+    // ランダムに注文を生成（板を活性化）
+    private fun generateRandomOrders() {
+        stockMaster.keys.forEach { symbol ->
+            val orderBook = orderBooks[symbol] ?: return@forEach
+            val basePrice = basePrices[symbol]?.toInt() ?: 1000
+
+            // 50%の確率で注文を生成
+            if (Random.nextBoolean()) {
+                if (Random.nextBoolean()) {
+                    // 買い注文
+                    val price = basePrice - Random.nextInt(5, 30)
+                    val quantity = Random.nextInt(50, 500)
+                    orderBook.processBuyOrder(price, quantity, System.nanoTime())
+                } else {
+                    // 売り注文
+                    val price = basePrice + Random.nextInt(5, 30)
+                    val quantity = Random.nextInt(50, 500)
+                    orderBook.processSellOrder(price, quantity, System.nanoTime())
+                }
+            }
         }
     }
 
