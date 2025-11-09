@@ -218,6 +218,11 @@ class MarketDataController : HttpHandler, AutoCloseable {
         return getOrderBookDepth(symbol, orderBook)
     }
 
+    // OrderController用の公開メソッド（OrderBook取得）
+    fun getOrderBook(symbol: String): OrderBook? {
+        return orderBooks[symbol]
+    }
+
     // OrderBook板情報エンドポイント
     private fun handleOrderBook(exchange: HttpExchange, symbol: String) {
         val orderBook = orderBooks[symbol]

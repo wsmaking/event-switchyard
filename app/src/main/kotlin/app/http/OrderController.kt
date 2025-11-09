@@ -77,6 +77,7 @@ class OrderController(
         // 注文ID生成
         val orderId = UUID.randomUUID().toString()
         val submittedAt = System.currentTimeMillis()
+        val startTime = System.nanoTime()
 
         // 注文をRouterに送信（symbolをkeyとして使用）
         val payload = objectMapper.writeValueAsBytes(request)
@@ -87,35 +88,76 @@ class OrderController(
         val accepted = router.handle(routingKey, payload)
 
         val order = if (accepted) {
-            // 模擬的な約定処理（実際はRouterからのコールバックで更新）
-            // 成行注文（MARKET）: 即座に約定、低レイテンシ（0.5-2.5ms）
-            // 指値注文（LIMIT）: 価格待機、通常処理（5-15ms）
-            val executionTime = if (request.type == OrderType.MARKET) {
-                (Math.random() * 2) + 0.5  // 成行: 0.5-2.5ms
-            } else {
-                (Math.random() * 10) + 5    // 指値: 5-15ms
-            }
+            // OrderBookマッチングエンジンを使用した実際の約定処理
+            val orderBook = marketDataController.getOrderBook(request.symbol)
 
-            // 成行注文の場合は現在価格を取得
-            val executionPrice = if (request.type == OrderType.MARKET) {
-                marketDataController.getCurrentPrice(request.symbol)
-            } else {
-                request.price
-            }
+            if (orderBook != null) {
+                // 成行注文の場合は現在価格を基準価格として使用
+                val limitPrice = if (request.type == OrderType.MARKET) {
+                    marketDataController.getCurrentPrice(request.symbol).toInt()
+                } else {
+                    request.price?.toInt() ?: 0
+                }
 
-            Order(
-                id = orderId,
-                symbol = request.symbol,
-                side = request.side,
-                type = request.type,
-                quantity = request.quantity,
-                price = executionPrice,
-                status = OrderStatus.FILLED,
-                submittedAt = submittedAt,
-                filledAt = System.currentTimeMillis(),
-                executionTimeMs = executionTime
-            )
+                // OrderBookでマッチング実行
+                val execution = when (request.side) {
+                    OrderSide.BUY -> orderBook.processBuyOrder(
+                        limitPrice,
+                        request.quantity,
+                        System.nanoTime()
+                    )
+                    OrderSide.SELL -> orderBook.processSellOrder(
+                        limitPrice,
+                        request.quantity,
+                        System.nanoTime()
+                    )
+                }
+
+                val executionTimeMs = (System.nanoTime() - startTime) / 1_000_000.0
+
+                if (execution != null) {
+                    // 約定成功
+                    Order(
+                        id = orderId,
+                        symbol = request.symbol,
+                        side = request.side,
+                        type = request.type,
+                        quantity = execution.quantity,
+                        price = execution.price.toDouble(),
+                        status = OrderStatus.FILLED,
+                        submittedAt = submittedAt,
+                        filledAt = System.currentTimeMillis(),
+                        executionTimeMs = executionTimeMs
+                    )
+                } else {
+                    // マッチング失敗（板に対向注文がない）
+                    Order(
+                        id = orderId,
+                        symbol = request.symbol,
+                        side = request.side,
+                        type = request.type,
+                        quantity = request.quantity,
+                        price = request.price,
+                        status = OrderStatus.REJECTED,
+                        submittedAt = submittedAt,
+                        executionTimeMs = executionTimeMs
+                    )
+                }
+            } else {
+                // OrderBookが見つからない
+                Order(
+                    id = orderId,
+                    symbol = request.symbol,
+                    side = request.side,
+                    type = request.type,
+                    quantity = request.quantity,
+                    price = request.price,
+                    status = OrderStatus.REJECTED,
+                    submittedAt = submittedAt
+                )
+            }
         } else {
+            // ルーティング失敗
             Order(
                 id = orderId,
                 symbol = request.symbol,
@@ -132,7 +174,7 @@ class OrderController(
 
         val json = objectMapper.writeValueAsString(order)
         exchange.responseHeaders.set("Content-Type", "application/json")
-        sendResponse(exchange, if (accepted) 200 else 409, json)
+        sendResponse(exchange, if (order.status == OrderStatus.FILLED) 200 else 409, json)
     }
 
     private fun handleGetOrders(exchange: HttpExchange) {
