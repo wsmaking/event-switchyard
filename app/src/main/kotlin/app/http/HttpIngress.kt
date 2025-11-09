@@ -25,6 +25,7 @@ class HttpIngress : AutoCloseable {
     private val handler: RequestHandler
     private val server: HttpServer
     private var router: Router? = null
+    private var marketDataController: MarketDataController? = null
 
     constructor(engine: Engine, port: Int) {
         this.handler = EngineHandler(engine)
@@ -63,6 +64,13 @@ class HttpIngress : AutoCloseable {
                 createContext("/stats", StatsController(r))
                 createContext("/health", HealthController(r))
                 createContext("/metrics", MetricsController(r))
+
+                val mdc = MarketDataController()
+                this@HttpIngress.marketDataController = mdc
+                val orderController = OrderController(r, mdc)
+                createContext("/api/orders", orderController)
+                createContext("/api/positions", PositionController(orderController, mdc))
+                createContext("/api/market/", mdc)
             }
 
             // フロントエンド静的ファイル配信 (最後に登録してAPI優先)
@@ -94,6 +102,7 @@ class HttpIngress : AutoCloseable {
     }
 
     override fun close() {
+        marketDataController?.close()
         server.stop(0)
     }
 }
