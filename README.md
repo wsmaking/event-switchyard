@@ -1,10 +1,6 @@
 # HFT Fast Path Event Switchyard
 
-高頻度取引(HFT)向けの超低レイテンシイベント処理システム。LMAX Disruptor + Chronicle Queue + Kafkaによる本番環境対応済み実装。
-
-**本質**: Kafka上で動作する超低レイテンシ（p99 < 100μs）イベント処理システム
-**UI**: Operations Dashboard - リアルタイムメトリクス監視、SLO管理、システム設定
-
+実装途中
 ---
 
 ## クイックスタート（3分）
