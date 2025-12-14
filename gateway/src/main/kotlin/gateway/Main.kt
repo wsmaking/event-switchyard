@@ -53,6 +53,7 @@ fun main() {
         exchange.close()
         auditLog.close()
         fastPathQueue.close()
+        sseHub.close()
     })
     fastPathEngine.start()
     server.start()

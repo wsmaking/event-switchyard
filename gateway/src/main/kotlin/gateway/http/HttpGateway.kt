@@ -116,7 +116,7 @@ class HttpGateway(
                         sendText(ex, 404, "NOT_FOUND")
                         return false
                     }
-                    sseHub.open(orderId, ex)
+                    sseHub.open(orderId, parseLastEventId(ex), ex)
                     sseHub.publish(orderId, event = "order_snapshot", data = status)
                     true
                 } else {
@@ -163,8 +163,13 @@ class HttpGateway(
             return false
         }
         val principal = requirePrincipal(ex) ?: return false
-        sseHub.openAccount(principal.accountId, ex)
+        sseHub.openAccount(principal.accountId, parseLastEventId(ex), ex)
         return true
+    }
+
+    private fun parseLastEventId(ex: HttpExchange): Long? {
+        val h = ex.requestHeaders.getFirst("Last-Event-ID")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return h.toLongOrNull()
     }
 
     private fun requirePrincipal(ex: HttpExchange): Principal? {
