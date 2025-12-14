@@ -9,6 +9,8 @@ import gateway.order.InMemoryOrderStore
 import gateway.order.OrderSnapshot
 import gateway.order.OrderStatus
 import gateway.queue.FastPathQueue
+import gateway.queue.NewOrderCommand
+import gateway.queue.CancelOrderCommand
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -30,7 +32,10 @@ class FastPathEngine(
                 try {
                     val cmd = queue.poll()
                     if (cmd == null) continue
-                    handle(cmd.order)
+                    when (cmd) {
+                        is NewOrderCommand -> handleNewOrder(cmd.orderId)
+                        is CancelOrderCommand -> handleCancel(cmd.orderId)
+                    }
                 } catch (_: InterruptedException) {
                     break
                 } catch (_: Throwable) {
@@ -39,15 +44,26 @@ class FastPathEngine(
         }
     }
 
-    private fun handle(order: OrderSnapshot) {
+    private fun handleNewOrder(orderId: String) {
+        val order = orderStore.findById(orderId) ?: return
         val now = Instant.now()
         val updated = orderStore.update(order.orderId) { it.copy(status = OrderStatus.SENT, lastUpdateAt = now) }
         if (updated != null) {
-            auditLog.append(AuditEvent(type = "OrderSent", at = now, orderId = updated.orderId))
+            auditLog.append(AuditEvent(type = "OrderSent", at = now, accountId = updated.accountId, orderId = updated.orderId))
             sseHub.publish(updated.orderId, event = "order_update", data = updated)
+            sseHub.publishAccount(updated.accountId, event = "order_update", data = updated)
         }
 
         exchange.sendNewOrder(order) { report ->
+            onExecutionReport(report)
+        }
+    }
+
+    private fun handleCancel(orderId: String) {
+        val now = Instant.now()
+        val order = orderStore.findById(orderId)
+        auditLog.append(AuditEvent(type = "CancelSent", at = now, accountId = order?.accountId, orderId = orderId))
+        exchange.sendCancel(orderId) { report ->
             onExecutionReport(report)
         }
     }
@@ -58,6 +74,7 @@ class FastPathEngine(
             AuditEvent(
                 type = "ExecutionReport",
                 at = now,
+                accountId = orderStore.findById(report.orderId)?.accountId,
                 orderId = report.orderId,
                 data = mapOf(
                     "status" to report.status.name,
@@ -74,6 +91,7 @@ class FastPathEngine(
                 AuditEvent(
                     type = "OrderUpdated",
                     at = now,
+                    accountId = updated.accountId,
                     orderId = updated.orderId,
                     data = mapOf(
                         "status" to updated.status.name,
@@ -82,6 +100,7 @@ class FastPathEngine(
                 )
             )
             sseHub.publish(updated.orderId, event = "order_update", data = updated)
+            sseHub.publishAccount(updated.accountId, event = "order_update", data = updated)
         }
     }
 
@@ -94,4 +113,3 @@ class FastPathEngine(
         }
     }
 }
-

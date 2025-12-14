@@ -19,6 +19,7 @@ data class CreateOrderRequest @JsonCreator constructor(
 enum class OrderStatus {
     ACCEPTED,
     SENT,
+    CANCEL_REQUESTED,
     PARTIALLY_FILLED,
     FILLED,
     CANCELED,
@@ -27,6 +28,7 @@ enum class OrderStatus {
 
 data class OrderSnapshot(
     val orderId: String,
+    val accountId: String,
     val clientOrderId: String?,
     val symbol: String,
     val side: OrderSide,

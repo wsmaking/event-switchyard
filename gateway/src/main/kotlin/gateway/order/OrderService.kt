@@ -2,9 +2,11 @@ package gateway.order
 
 import gateway.audit.AuditEvent
 import gateway.audit.AuditLog
+import gateway.auth.Principal
 import gateway.risk.PreTradeRisk
 import gateway.queue.FastPathQueue
-import gateway.queue.OrderCommand
+import gateway.queue.NewOrderCommand
+import gateway.queue.CancelOrderCommand
 import java.time.Instant
 import java.util.UUID
 
@@ -24,9 +26,9 @@ class OrderService(
     private val risk: PreTradeRisk,
     private val fastPathQueue: FastPathQueue
 ) {
-    fun acceptOrder(req: CreateOrderRequest, idempotencyKey: String?): AcceptOrderResult {
+    fun acceptOrder(principal: Principal, req: CreateOrderRequest, idempotencyKey: String?): AcceptOrderResult {
         if (idempotencyKey != null) {
-            val existing = orderStore.findByIdempotencyKey(idempotencyKey)
+            val existing = orderStore.findByIdempotencyKey(principal.accountId, idempotencyKey)
             if (existing != null) return AcceptOrderResult.Accepted(existing.orderId)
         }
 
@@ -42,6 +44,7 @@ class OrderService(
         val orderId = "ord_${UUID.randomUUID()}"
         val snapshot = OrderSnapshot(
             orderId = orderId,
+            accountId = principal.accountId,
             clientOrderId = req.clientOrderId,
             symbol = req.symbol,
             side = req.side,
@@ -55,7 +58,7 @@ class OrderService(
         )
         orderStore.put(snapshot, idempotencyKey)
 
-        val enqueue = fastPathQueue.tryEnqueue(OrderCommand(snapshot))
+        val enqueue = fastPathQueue.tryEnqueue(NewOrderCommand(orderId))
         if (!enqueue.ok) {
             orderStore.remove(orderId, idempotencyKey)
             return AcceptOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
@@ -65,8 +68,10 @@ class OrderService(
             AuditEvent(
                 type = "OrderAccepted",
                 at = now,
+                accountId = principal.accountId,
                 orderId = orderId,
                 data = mapOf(
+                    "accountId" to principal.accountId,
                     "symbol" to req.symbol,
                     "side" to req.side.name,
                     "type" to req.type.name,
@@ -83,6 +88,31 @@ class OrderService(
 
     fun getOrder(orderId: String): OrderSnapshot? = orderStore.findById(orderId)
 
+    fun requestCancel(principal: Principal, orderId: String): CancelOrderResult {
+        val now = Instant.now()
+        val order = orderStore.findById(orderId) ?: return CancelOrderResult.Rejected("NOT_FOUND", 404)
+        if (order.accountId != principal.accountId) return CancelOrderResult.Rejected("NOT_FOUND", 404)
+
+        if (order.status == OrderStatus.CANCELED || order.status == OrderStatus.FILLED || order.status == OrderStatus.REJECTED) {
+            return CancelOrderResult.Rejected("ORDER_FINAL", 409)
+        }
+
+        if (order.status == OrderStatus.CANCEL_REQUESTED) {
+            return CancelOrderResult.Accepted(orderId)
+        }
+
+        orderStore.update(orderId) { it.copy(status = OrderStatus.CANCEL_REQUESTED, lastUpdateAt = now) }
+
+        val enqueue = fastPathQueue.tryEnqueue(CancelOrderCommand(orderId))
+        if (!enqueue.ok) {
+            orderStore.update(orderId) { it.copy(status = order.status, lastUpdateAt = now) }
+            return CancelOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
+        }
+
+        auditLog.append(AuditEvent(type = "CancelRequested", at = now, accountId = principal.accountId, orderId = orderId))
+        return CancelOrderResult.Accepted(orderId)
+    }
+
     private fun validate(req: CreateOrderRequest): String? {
         if (req.symbol.isBlank()) return "INVALID_SYMBOL"
         if (req.qty <= 0) return "INVALID_QTY"
@@ -94,4 +124,14 @@ class OrderService(
             }
         }
     }
+}
+
+sealed interface CancelOrderResult {
+    val httpStatus: Int
+
+    data class Accepted(val orderId: String) : CancelOrderResult {
+        override val httpStatus: Int = 202
+    }
+
+    data class Rejected(val reason: String, override val httpStatus: Int) : CancelOrderResult
 }

@@ -1,9 +1,11 @@
 package gateway.http
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import gateway.auth.JwtAuth
+import gateway.auth.Principal
+import gateway.json.Json
 import gateway.order.CreateOrderRequest
 import gateway.order.OrderService
 import java.net.InetSocketAddress
@@ -14,7 +16,8 @@ class HttpGateway(
     private val port: Int,
     private val orderService: OrderService,
     private val sseHub: SseHub,
-    private val mapper: ObjectMapper = jacksonObjectMapper().findAndRegisterModules()
+    private val jwtAuth: JwtAuth,
+    private val mapper: ObjectMapper = Json.mapper
 ) : AutoCloseable {
     private val server: HttpServer =
         HttpServer.create(InetSocketAddress(port), 0).apply {
@@ -25,6 +28,11 @@ class HttpGateway(
                 } finally {
                     ex.close()
                 }
+            }
+
+            createContext("/stream") { ex ->
+                val keepOpen = handleAccountStream(ex)
+                if (!keepOpen) ex.close()
             }
 
             createContext("/orders") { ex ->
@@ -40,7 +48,7 @@ class HttpGateway(
             }
 
             createContext("/orders/") { ex ->
-                val keepOpen = handleOrderGetOrStream(ex)
+                val keepOpen = handleOrderRoute(ex)
                 if (!keepOpen) ex.close()
             }
 
@@ -54,6 +62,7 @@ class HttpGateway(
 
     private fun handleCreateOrder(ex: HttpExchange) {
         try {
+            val principal = requirePrincipal(ex) ?: return
             val idempotencyKey = ex.requestHeaders.getFirst("Idempotency-Key")?.trim()?.takeIf { it.isNotEmpty() }
             val raw = ex.requestBody.readAllBytes()
 
@@ -63,7 +72,7 @@ class HttpGateway(
                 return sendText(ex, 400, "INVALID_JSON")
             }
 
-            val result = orderService.acceptOrder(req, idempotencyKey)
+            val result = orderService.acceptOrder(principal, req, idempotencyKey)
             when (result) {
                 is gateway.order.AcceptOrderResult.Accepted -> {
                     sendJson(ex, result.httpStatus, mapOf("orderId" to result.orderId, "status" to "ACCEPTED"))
@@ -80,12 +89,8 @@ class HttpGateway(
     /**
      * @return true if the handler keeps the connection open (SSE)
      */
-    private fun handleOrderGetOrStream(ex: HttpExchange): Boolean {
-        if (ex.requestMethod != "GET") {
-            sendText(ex, 405, "METHOD_NOT_ALLOWED")
-            return false
-        }
-
+    private fun handleOrderRoute(ex: HttpExchange): Boolean {
+        val principal = requirePrincipal(ex) ?: return false
         val rest = ex.requestURI.path.removePrefix("/orders/").trim('/')
         if (rest.isEmpty()) {
             sendText(ex, 400, "MISSING_ORDER_ID")
@@ -99,23 +104,78 @@ class HttpGateway(
             return false
         }
 
-        val isStream = parts.size == 2 && parts[1] == "stream"
-        if (isStream) {
-            val status = orderService.getOrder(orderId) ?: run {
-                sendText(ex, 404, "NOT_FOUND")
-                return false
+        return when (ex.requestMethod) {
+            "GET" -> {
+                val isStream = parts.size == 2 && parts[1] == "stream"
+                if (isStream) {
+                    val status = orderService.getOrder(orderId) ?: run {
+                        sendText(ex, 404, "NOT_FOUND")
+                        return false
+                    }
+                    if (status.accountId != principal.accountId) {
+                        sendText(ex, 404, "NOT_FOUND")
+                        return false
+                    }
+                    sseHub.open(orderId, ex)
+                    sseHub.publish(orderId, event = "order_snapshot", data = status)
+                    true
+                } else {
+                    val status = orderService.getOrder(orderId) ?: run {
+                        sendText(ex, 404, "NOT_FOUND")
+                        return false
+                    }
+                    if (status.accountId != principal.accountId) {
+                        sendText(ex, 404, "NOT_FOUND")
+                        return false
+                    }
+                    sendJson(ex, 200, status)
+                    false
+                }
             }
-            sseHub.open(orderId, ex)
-            sseHub.publish(orderId, event = "order_snapshot", data = status)
-            return true
-        }
 
-        val status = orderService.getOrder(orderId) ?: run {
-            sendText(ex, 404, "NOT_FOUND")
+            "POST" -> {
+                val isCancel = parts.size == 2 && parts[1] == "cancel"
+                if (!isCancel) {
+                    sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    return false
+                }
+                val result = orderService.requestCancel(principal, orderId)
+                when (result) {
+                    is gateway.order.CancelOrderResult.Accepted -> sendJson(ex, result.httpStatus, mapOf("orderId" to result.orderId, "status" to "CANCEL_REQUESTED"))
+                    is gateway.order.CancelOrderResult.Rejected -> sendJson(ex, result.httpStatus, mapOf("status" to "REJECTED", "reason" to result.reason))
+                }
+                false
+            }
+
+            else -> {
+                sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                false
+            }
+        }
+    }
+
+    /**
+     * @return true if the handler keeps the connection open (SSE)
+     */
+    private fun handleAccountStream(ex: HttpExchange): Boolean {
+        if (ex.requestMethod != "GET") {
+            sendText(ex, 405, "METHOD_NOT_ALLOWED")
             return false
         }
-        sendJson(ex, 200, status)
-        return false
+        val principal = requirePrincipal(ex) ?: return false
+        sseHub.openAccount(principal.accountId, ex)
+        return true
+    }
+
+    private fun requirePrincipal(ex: HttpExchange): Principal? {
+        val auth = jwtAuth.authenticate(ex.requestHeaders.getFirst("Authorization"))
+        return when (auth) {
+            is JwtAuth.Result.Ok -> auth.principal
+            is JwtAuth.Result.Err -> {
+                sendJson(ex, 401, mapOf("status" to "UNAUTHORIZED", "reason" to auth.reason))
+                null
+            }
+        }
     }
 
     private fun sendJson(ex: HttpExchange, status: Int, body: Any) {

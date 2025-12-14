@@ -1,7 +1,7 @@
 package gateway.audit
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import gateway.json.Json
 import java.io.BufferedWriter
 import java.nio.file.Files
 import java.nio.file.Path
@@ -13,7 +13,7 @@ import kotlin.concurrent.thread
 
 class FileAuditLog(
     private val path: Path,
-    private val mapper: ObjectMapper = jacksonObjectMapper().findAndRegisterModules()
+    private val mapper: ObjectMapper = Json.mapper
 ) : AuditLog {
     private val running = AtomicBoolean(true)
     private val queue = LinkedBlockingQueue<AuditEvent>(100_000)
@@ -21,7 +21,7 @@ class FileAuditLog(
     private var writer: BufferedWriter? = null
 
     init {
-        Files.createDirectories(path.parent)
+        path.parent?.let { Files.createDirectories(it) }
         writer = Files.newBufferedWriter(
             path,
             StandardOpenOption.CREATE,
@@ -53,7 +53,7 @@ class FileAuditLog(
     override fun close() {
         running.set(false)
         try {
-            writerThread.join(1000)
+            writerThread.join(5000)
         } catch (_: InterruptedException) {
         }
         try {
