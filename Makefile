@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -115,6 +115,17 @@ grafana-down:
 	@echo "==> Stopping Grafana + Prometheus..."
 	@docker-compose --profile monitoring down
 	@echo "✓ Grafana stopped"
+
+# Gateway E2E (Gateway + Kafka + BackOffice)
+compose-gateway:
+	@echo "==> Starting Gateway stack (gateway + kafka + backoffice)..."
+	@docker-compose --profile gateway up -d --build
+	@echo "✓ Gateway:    http://localhost:8081"
+	@echo "✓ BackOffice: http://localhost:8082/positions"
+
+compose-gateway-down:
+	@echo "==> Stopping Gateway stack..."
+	@docker-compose --profile gateway down
 
 # ビルド
 build:
