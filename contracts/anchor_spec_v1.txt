@@ -197,6 +197,111 @@ monitoring（現状）
       - Gateway - Operations（gateway）
 
 -----------------------------------------------------------------------------
+8) 責務表（Component Responsibility Matrix）
+
+目的
+  - 全体構造（境界・責務・失敗時の扱い）を固定し、変更時/障害時の判断を速くする。
+  - “どこまでが誰の責任か” を曖昧にしない（設計・運用のアンカー）。
+
+Component: Gateway / HttpIngress（gateway/http/HttpGateway.kt）
+  - Input: HTTP（/orders, /orders/{id}, /orders/{id}/cancel, /stream 等）
+  - Output: ACK(202)/Reject(4xx/5xx), SSE, /metrics
+  - Persistence: なし（OrderService / AuditLog に委譲）
+  - SLO: ACKまで（Ingress→Risk→FastPath queue enqueue）
+  - Failure:
+      - Auth fail → 401
+      - Validation/Risk → 422
+      - Queue full/closed → 503
+  - Notes: cross-account は 404（存在を隠す）。約定は待たない。
+
+Component: OrderService（gateway/order/OrderService.kt）
+  - Input: Principal(accountId) + CreateOrderRequest / cancel request
+  - Output:
+      - OrderSnapshot write（ACCEPTED/CANCEL_REQUESTED）
+      - FastPathQueue enqueue
+      - AuditLog append
+      - Kafka publish（BUS）
+  - Persistence: InMemoryOrderStore + AuditLog（append-only）
+  - Failure:
+      - enqueue失敗時は orderStore rollback（remove / status rollback）
+      - idempotency hit は同一 orderId を返す（202）
+
+Component: FastPathQueue（gateway/queue/*）
+  - Input: NewOrderCommand / CancelOrderCommand
+  - Output: dequeue for FastPathEngine
+  - Persistence: なし（in-memory）
+  - Failure:
+      - queue full → enqueue拒否（503の原因）
+
+Component: FastPathEngine（gateway/engine/FastPathEngine.kt）
+  - Input: FastPathCommand
+  - Output:
+      - Exchange send（SOR/ExchangeClient経由）
+      - ExecutionReport 처리（状態更新）
+      - AuditLog append
+      - Kafka publish（BUS）
+      - SSE publish（order/account）
+  - Persistence: AuditLog（ExecutionReport/OrderUpdated等）
+  - Failure:
+      - Exchange送信失敗時の扱い（再送/重複排除/復旧）は今後仕様化が必要
+      - ERは順序/重複あり得る前提で更新（filledQtyTotalでガード等）
+
+Component: SOR（gateway/sor/SmartOrderRouter.kt）
+  - Input: OrderSnapshot / cancel(orderId)
+  - Output: chosen venue の ExchangeClient へ委譲
+  - State: orderId→venue mapping（in-memory）
+  - Failure:
+      - mapping消失（再起動）時は default venue（将来は永続化検討）
+
+Component: Exchange Adapter（現状: gateway/exchange/ExchangeSimulator.kt）
+  - Input: sendNewOrder / sendCancel
+  - Output: ExecutionReport callbacks
+  - Notes: 本番は実取引所APIに置換（署名/レート制限/再接続/冪等性が重要）
+
+Component: AuditLog（gateway/audit/*）
+  - Input: AuditEvent append
+  - Output: JSONL lines, replay into OrderStore
+  - Guarantee: append-only / replay 可能（WAL的）
+  - Failure: 現状 best-effort。書き込み失敗戦略（止める/落とす/退避等）は未実装。
+
+Component: Kafka BUS（gateway/kafka/KafkaEventPublisher.kt）
+  - Input: BusEvent publish
+  - Output: Kafka topic（events）
+  - Guarantee: best-effort（internal queue full で drop あり、/metrics で可視化）
+  - Failure: publish callback error カウント（/metrics）
+
+Component: BackOffice consumer（backoffice/*）
+  - Input: Kafka topic（events）
+  - Output:
+      - 現状: positions（/positions）
+      - 将来: ledger（台帳）→ balances/fees/pnl 等
+  - Persistence:
+      - 現状: なし（in-memory）
+      - 将来: ledger append-only + replay（台帳を正とする）
+  - Failure:
+      - Kafka は at-least-once 前提（重複/順序）→ consumer 側の重複排除/再処理戦略が必要
+
+Component: Monitoring（monitoring/*）
+  - Input: /metrics scrape（Prometheus）
+  - Output: Grafana dashboards / alerts（将来）
+  - Notes: 「どのSLO/詰まりを検知するか」を alert rule と runbook に落とす。
+
+-----------------------------------------------------------------------------
+9) “ゼロ” の定義（アンカー）
+
+目的
+  - “二重発注ゼロ / 取りこぼしゼロ” の範囲を曖昧にしない。
+  - 実装・テスト・運用（アラート/復旧）をこの定義に合わせて作る。
+
+検討観点（今後の意思決定ポイント）
+  - Gateway側:
+      - 外部送信（取引所）と Audit append の順序/原子性
+      - timeout/retry 時の二重発注リスクをどう潰すか（idempotency/outbox 等）
+  - BackOffice側:
+      - at-least-once 前提で、同一 Fill/ER を二重適用しない（dedup key の定義）
+      - reprocess/replay 時に同じ最終状態へ収束する（再現性）
+
+-----------------------------------------------------------------------------
 更新ルール
   - 本ファイル（anchor_spec_v1.txt）は “実装アンカーの仕様” として扱う。
   - 実装がこの仕様から逸脱する場合は、まずこのファイルの更新 PR を作って合意してから変更する。
