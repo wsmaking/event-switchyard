@@ -3,6 +3,8 @@ package gateway.order
 import gateway.audit.AuditEvent
 import gateway.audit.AuditLog
 import gateway.auth.Principal
+import gateway.bus.BusEvent
+import gateway.bus.EventPublisher
 import gateway.risk.PreTradeRisk
 import gateway.queue.FastPathQueue
 import gateway.queue.NewOrderCommand
@@ -23,6 +25,7 @@ sealed interface AcceptOrderResult {
 class OrderService(
     private val orderStore: InMemoryOrderStore,
     private val auditLog: AuditLog,
+    private val eventPublisher: EventPublisher,
     private val risk: PreTradeRisk,
     private val fastPathQueue: FastPathQueue
 ) {
@@ -82,6 +85,22 @@ class OrderService(
                 )
             )
         )
+        eventPublisher.publish(
+            BusEvent(
+                type = "OrderAccepted",
+                at = now,
+                accountId = principal.accountId,
+                orderId = orderId,
+                data = mapOf(
+                    "symbol" to req.symbol,
+                    "side" to req.side.name,
+                    "type" to req.type.name,
+                    "qty" to req.qty,
+                    "price" to req.price,
+                    "clientOrderId" to req.clientOrderId
+                )
+            )
+        )
 
         return AcceptOrderResult.Accepted(orderId)
     }
@@ -110,6 +129,14 @@ class OrderService(
         }
 
         auditLog.append(AuditEvent(type = "CancelRequested", at = now, accountId = principal.accountId, orderId = orderId))
+        eventPublisher.publish(
+            BusEvent(
+                type = "CancelRequested",
+                at = now,
+                accountId = principal.accountId,
+                orderId = orderId
+            )
+        )
         return CancelOrderResult.Accepted(orderId)
     }
 

@@ -2,6 +2,8 @@ package gateway.engine
 
 import gateway.audit.AuditEvent
 import gateway.audit.AuditLog
+import gateway.bus.BusEvent
+import gateway.bus.EventPublisher
 import gateway.exchange.ExchangeClient
 import gateway.exchange.ExecutionReport
 import gateway.http.SseHub
@@ -19,6 +21,7 @@ class FastPathEngine(
     private val queue: FastPathQueue,
     private val orderStore: InMemoryOrderStore,
     private val auditLog: AuditLog,
+    private val eventPublisher: EventPublisher,
     private val exchange: ExchangeClient,
     private val sseHub: SseHub
 ) : AutoCloseable {
@@ -50,6 +53,14 @@ class FastPathEngine(
         val updated = orderStore.update(order.orderId) { it.copy(status = OrderStatus.SENT, lastUpdateAt = now) }
         if (updated != null) {
             auditLog.append(AuditEvent(type = "OrderSent", at = now, accountId = updated.accountId, orderId = updated.orderId))
+            eventPublisher.publish(
+                BusEvent(
+                    type = "OrderSent",
+                    at = now,
+                    accountId = updated.accountId,
+                    orderId = updated.orderId
+                )
+            )
             sseHub.publish(updated.orderId, event = "order_update", data = updated)
             sseHub.publishAccount(updated.accountId, event = "order_update", data = updated)
         }
@@ -63,6 +74,16 @@ class FastPathEngine(
         val now = Instant.now()
         val order = orderStore.findById(orderId)
         auditLog.append(AuditEvent(type = "CancelSent", at = now, accountId = order?.accountId, orderId = orderId))
+        if (order?.accountId != null) {
+            eventPublisher.publish(
+                BusEvent(
+                    type = "CancelSent",
+                    at = now,
+                    accountId = order.accountId,
+                    orderId = orderId
+                )
+            )
+        }
         exchange.sendCancel(orderId) { report ->
             onExecutionReport(report)
         }
@@ -70,11 +91,26 @@ class FastPathEngine(
 
     private fun onExecutionReport(report: ExecutionReport) {
         val now = report.at
+        val accountId = orderStore.findById(report.orderId)?.accountId ?: return
         auditLog.append(
             AuditEvent(
                 type = "ExecutionReport",
                 at = now,
-                accountId = orderStore.findById(report.orderId)?.accountId,
+                accountId = accountId,
+                orderId = report.orderId,
+                data = mapOf(
+                    "status" to report.status.name,
+                    "filledQtyDelta" to report.filledQtyDelta,
+                    "filledQtyTotal" to report.filledQtyTotal,
+                    "price" to report.price
+                )
+            )
+        )
+        eventPublisher.publish(
+            BusEvent(
+                type = "ExecutionReport",
+                at = now,
+                accountId = accountId,
                 orderId = report.orderId,
                 data = mapOf(
                     "status" to report.status.name,
@@ -89,6 +125,18 @@ class FastPathEngine(
         if (updated != null) {
             auditLog.append(
                 AuditEvent(
+                    type = "OrderUpdated",
+                    at = now,
+                    accountId = updated.accountId,
+                    orderId = updated.orderId,
+                    data = mapOf(
+                        "status" to updated.status.name,
+                        "filledQty" to updated.filledQty
+                    )
+                )
+            )
+            eventPublisher.publish(
+                BusEvent(
                     type = "OrderUpdated",
                     at = now,
                     accountId = updated.accountId,
