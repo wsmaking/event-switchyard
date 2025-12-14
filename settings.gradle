@@ -13,3 +13,4 @@ plugins {
 rootProject.name = 'event-switchyard'
 include('app')
 include('gateway')
+include('backoffice')
