@@ -5,7 +5,7 @@ import gateway.audit.FileAuditLog
 import gateway.auth.JwtAuth
 import gateway.bus.EventPublisher
 import gateway.engine.FastPathEngine
-import gateway.exchange.ExchangeSimulator
+import gateway.exchange.ExchangeClient
 import gateway.http.SseHub
 import gateway.http.HttpGateway
 import gateway.kafka.KafkaEventPublisher
@@ -14,6 +14,7 @@ import gateway.order.InMemoryOrderStore
 import gateway.order.OrderService
 import gateway.risk.SimplePreTradeRisk
 import gateway.queue.BlockingFastPathQueue
+import gateway.sor.SmartOrderRouter
 import java.nio.file.Path
 
 fun main() {
@@ -33,7 +34,7 @@ fun main() {
     val eventPublisher: EventPublisher = KafkaEventPublisher()
     val risk = SimplePreTradeRisk()
     val fastPathQueue = BlockingFastPathQueue(capacity = queueCapacity)
-    val exchange = ExchangeSimulator()
+    val exchange: ExchangeClient = SmartOrderRouter.fromEnv()
     val jwtAuth = JwtAuth()
     val metrics = GatewayMetrics(queue = fastPathQueue, sseHub = sseHub, kafka = (eventPublisher as? KafkaEventPublisher))
     val fastPathEngine = FastPathEngine(
