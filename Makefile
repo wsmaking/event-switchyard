@@ -1,4 +1,4 @@
-.PHONY: help run dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -17,6 +17,7 @@ help:
 	@echo "基本コマンド:"
 	@echo "  make run         - 旧アプリケーション起動 (/events)"
 	@echo "  make run-gateway - 新Gateway起動 (/orders)"
+	@echo "  make run-backoffice - BackOffice(consumer)起動 (/positions)"
 	@echo "  make dev-bench   - 開発用ベンチマーク (10,000 runs)"
 	@echo "  make dashboard   - リアルタイムダッシュボード表示"
 	@echo ""
@@ -55,6 +56,11 @@ run:
 run-gateway:
 	@echo "==> Starting Gateway..."
 	./gradlew :gateway:run
+
+# BackOffice起動
+run-backoffice:
+	@echo "==> Starting BackOffice..."
+	./gradlew :backoffice:run
 
 # 開発用ベンチマーク実行
 dev-bench:
