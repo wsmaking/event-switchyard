@@ -41,6 +41,55 @@ class HttpBackOffice(
                 }
             }
 
+            createContext("/balances") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val accountId = ex.requestURI.query.orEmpty().split('&')
+                        .firstOrNull { it.startsWith("accountId=") }
+                        ?.substringAfter("accountId=")
+                        ?.takeIf { it.isNotBlank() }
+                    val balances = store.listBalances(accountId)
+                    sendJson(ex, 200, mapOf("balances" to balances))
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
+            createContext("/fills") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val accountId = ex.requestURI.query.orEmpty().split('&')
+                        .firstOrNull { it.startsWith("accountId=") }
+                        ?.substringAfter("accountId=")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: return@createContext sendText(ex, 400, "MISSING_ACCOUNT_ID")
+                    val fills = store.listFills(accountId)
+                    sendJson(ex, 200, mapOf("fills" to fills))
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
+            createContext("/pnl") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val accountId = ex.requestURI.query.orEmpty().split('&')
+                        .firstOrNull { it.startsWith("accountId=") }
+                        ?.substringAfter("accountId=")
+                        ?.takeIf { it.isNotBlank() }
+                    val pnl = store.listRealizedPnl(accountId)
+                    sendJson(ex, 200, mapOf("pnl" to pnl))
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
             executor = Executors.newCachedThreadPool()
         }
 
@@ -67,4 +116,3 @@ class HttpBackOffice(
         server.stop(0)
     }
 }
-

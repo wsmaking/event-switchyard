@@ -1,6 +1,9 @@
 package backoffice.kafka
 
 import backoffice.json.Json
+import backoffice.ledger.FileLedger
+import backoffice.ledger.LedgerFill
+import backoffice.ledger.LedgerOrderAccepted
 import backoffice.model.BusEvent
 import backoffice.model.Side
 import backoffice.store.InMemoryBackOfficeStore
@@ -17,9 +20,12 @@ import kotlin.concurrent.thread
 
 class BackOfficeConsumer(
     private val store: InMemoryBackOfficeStore,
+    private val ledger: FileLedger,
     bootstrapServers: String = System.getenv("KAFKA_BOOTSTRAP_SERVERS") ?: "localhost:9092",
     topic: String = System.getenv("KAFKA_TOPIC") ?: "events",
     groupId: String = System.getenv("KAFKA_GROUP_ID") ?: "backoffice",
+    private val quoteCcy: String = System.getenv("BACKOFFICE_QUOTE_CCY") ?: "JPY",
+    feeBps: Long = (System.getenv("BACKOFFICE_FEE_BPS") ?: "10").toLong(),
     private val enabled: Boolean =
         (System.getenv("BACKOFFICE_ENABLE") ?: "1").let { it == "1" || it.equals("true", ignoreCase = true) }
 ) : AutoCloseable {
@@ -27,6 +33,7 @@ class BackOfficeConsumer(
     private val consumer: KafkaConsumer<String, ByteArray>?
     private val topic: String
     private var worker: Thread? = null
+    private val feeBps: Long = feeBps.coerceAtLeast(0)
 
     init {
         this.topic = topic
@@ -97,6 +104,15 @@ class BackOfficeConsumer(
             } catch (_: Throwable) {
                 return
             }
+        ledger.append(
+            LedgerOrderAccepted(
+                at = ev.at,
+                accountId = ev.accountId,
+                orderId = orderId,
+                symbol = symbol,
+                side = side
+            )
+        )
         store.upsertOrderMeta(
             OrderMeta(
                 accountId = ev.accountId,
@@ -110,6 +126,7 @@ class BackOfficeConsumer(
     private fun onExecutionReport(ev: BusEvent) {
         val orderId = ev.orderId ?: return
         val meta = store.findOrderMeta(orderId) ?: return
+        val lastTotal = store.lastFilledTotal(orderId)
 
         val filledDelta =
             when (val v = ev.data["filledQtyDelta"]) {
@@ -120,13 +137,56 @@ class BackOfficeConsumer(
 
         val price =
             when (val v = ev.data["price"]) {
-                is Number -> v.toDouble()
-                is String -> v.toDoubleOrNull()
+                is Number -> v.toLong()
+                is String -> v.toLongOrNull()
                 else -> null
             }
 
-        val signed = if (meta.side == Side.BUY) filledDelta else -filledDelta
-        store.applyFill(meta.accountId, meta.symbol, signed, price)
+        val filledTotal =
+            when (val v = ev.data["filledQtyTotal"]) {
+                is Number -> v.toLong()
+                is String -> v.toLongOrNull()
+                else -> null
+            } ?: return
+
+        if (filledTotal <= lastTotal) return
+        val delta = filledDelta.coerceAtMost(filledTotal - lastTotal).coerceAtLeast(0L)
+        if (delta <= 0L) return
+
+        val notional = if (price == null) 0L else delta * price
+        val fee = (notional * feeBps) / 10_000L
+        val cashDeltaExFee = if (meta.side == Side.BUY) -notional else notional
+        val cashDelta = cashDeltaExFee - fee
+
+        ledger.append(
+            LedgerFill(
+                at = ev.at,
+                accountId = meta.accountId,
+                orderId = orderId,
+                symbol = meta.symbol,
+                side = meta.side,
+                filledQtyDelta = delta,
+                filledQtyTotal = filledTotal,
+                price = price,
+                quoteCcy = quoteCcy,
+                quoteCashDelta = cashDelta,
+                feeQuote = fee
+            )
+        )
+
+        store.applyFill(
+            at = ev.at,
+            accountId = meta.accountId,
+            orderId = orderId,
+            symbol = meta.symbol,
+            side = meta.side,
+            filledQtyDelta = delta,
+            filledQtyTotal = filledTotal,
+            price = price,
+            quoteCcy = quoteCcy,
+            quoteCashDelta = cashDelta,
+            feeQuote = fee
+        )
     }
 
     override fun close() {
@@ -146,4 +206,3 @@ class BackOfficeConsumer(
         }
     }
 }
-
