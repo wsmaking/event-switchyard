@@ -8,3 +8,9 @@ scrape_configs:
       - targets: ['host.docker.internal:8080']
     metrics_path: '/metrics'
     scrape_interval: 1s
+
+  - job_name: 'event-switchyard-gateway'
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 1s
