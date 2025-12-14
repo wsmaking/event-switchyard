@@ -18,6 +18,10 @@ data class CreateOrderRequest @JsonCreator constructor(
 
 enum class OrderStatus {
     ACCEPTED,
+    SENT,
+    PARTIALLY_FILLED,
+    FILLED,
+    CANCELED,
     REJECTED
 }
 
@@ -30,6 +34,7 @@ data class OrderSnapshot(
     val qty: Long,
     val price: Long?,
     val status: OrderStatus,
-    val acceptedAt: Instant
+    val acceptedAt: Instant,
+    val lastUpdateAt: Instant = acceptedAt,
+    val filledQty: Long = 0
 )
-

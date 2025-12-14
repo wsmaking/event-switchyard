@@ -1,5 +1,7 @@
 package gateway.order
 
+import gateway.exchange.ExecutionReport
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryOrderStore {
@@ -19,5 +21,28 @@ class InMemoryOrderStore {
             idempotencyIndex.putIfAbsent(idempotencyKey, order.orderId)
         }
     }
-}
 
+    fun remove(orderId: String, idempotencyKey: String?) {
+        byId.remove(orderId)
+        if (idempotencyKey != null) {
+            idempotencyIndex.remove(idempotencyKey, orderId)
+        }
+    }
+
+    fun update(orderId: String, fn: (OrderSnapshot) -> OrderSnapshot): OrderSnapshot? {
+        return byId.computeIfPresent(orderId) { _, prev -> fn(prev) }
+    }
+
+    fun applyExecutionReport(report: ExecutionReport): OrderSnapshot? {
+        return byId.computeIfPresent(report.orderId) { _, prev ->
+            val now: Instant = report.at
+            val nextStatus = report.status
+            val nextFilled = maxOf(prev.filledQty, report.filledQtyTotal)
+            prev.copy(
+                status = nextStatus,
+                filledQty = nextFilled,
+                lastUpdateAt = now
+            )
+        }
+    }
+}

@@ -3,18 +3,26 @@ package gateway.order
 import gateway.audit.AuditEvent
 import gateway.audit.AuditLog
 import gateway.risk.PreTradeRisk
+import gateway.queue.FastPathQueue
+import gateway.queue.OrderCommand
 import java.time.Instant
 import java.util.UUID
 
 sealed interface AcceptOrderResult {
-    data class Accepted(val orderId: String) : AcceptOrderResult
-    data class Rejected(val reason: String) : AcceptOrderResult
+    val httpStatus: Int
+
+    data class Accepted(val orderId: String) : AcceptOrderResult {
+        override val httpStatus: Int = 202
+    }
+
+    data class Rejected(val reason: String, override val httpStatus: Int) : AcceptOrderResult
 }
 
 class OrderService(
     private val orderStore: InMemoryOrderStore,
     private val auditLog: AuditLog,
-    private val risk: PreTradeRisk
+    private val risk: PreTradeRisk,
+    private val fastPathQueue: FastPathQueue
 ) {
     fun acceptOrder(req: CreateOrderRequest, idempotencyKey: String?): AcceptOrderResult {
         if (idempotencyKey != null) {
@@ -23,11 +31,11 @@ class OrderService(
         }
 
         val validationError = validate(req)
-        if (validationError != null) return AcceptOrderResult.Rejected(validationError)
+        if (validationError != null) return AcceptOrderResult.Rejected(validationError, 422)
 
         val riskResult = risk.validate(req)
         if (!riskResult.ok) {
-            return AcceptOrderResult.Rejected(riskResult.reason ?: "RISK_REJECT")
+            return AcceptOrderResult.Rejected(riskResult.reason ?: "RISK_REJECT", 422)
         }
 
         val now = Instant.now()
@@ -41,9 +49,17 @@ class OrderService(
             qty = req.qty,
             price = req.price,
             status = OrderStatus.ACCEPTED,
-            acceptedAt = now
+            acceptedAt = now,
+            lastUpdateAt = now,
+            filledQty = 0
         )
         orderStore.put(snapshot, idempotencyKey)
+
+        val enqueue = fastPathQueue.tryEnqueue(OrderCommand(snapshot))
+        if (!enqueue.ok) {
+            orderStore.remove(orderId, idempotencyKey)
+            return AcceptOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
+        }
 
         auditLog.append(
             AuditEvent(
@@ -79,4 +95,3 @@ class OrderService(
         }
     }
 }
-

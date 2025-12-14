@@ -13,6 +13,7 @@ import java.util.concurrent.Executors
 class HttpGateway(
     private val port: Int,
     private val orderService: OrderService,
+    private val sseHub: SseHub,
     private val mapper: ObjectMapper = jacksonObjectMapper().findAndRegisterModules()
 ) : AutoCloseable {
     private val server: HttpServer =
@@ -39,16 +40,8 @@ class HttpGateway(
             }
 
             createContext("/orders/") { ex ->
-                try {
-                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
-                    val orderId = ex.requestURI.path.removePrefix("/orders/").trim()
-                    if (orderId.isEmpty()) return@createContext sendText(ex, 400, "MISSING_ORDER_ID")
-                    val status = orderService.getOrder(orderId)
-                        ?: return@createContext sendText(ex, 404, "NOT_FOUND")
-                    sendJson(ex, 200, status)
-                } finally {
-                    ex.close()
-                }
+                val keepOpen = handleOrderGetOrStream(ex)
+                if (!keepOpen) ex.close()
             }
 
             executor = Executors.newCachedThreadPool()
@@ -73,15 +66,56 @@ class HttpGateway(
             val result = orderService.acceptOrder(req, idempotencyKey)
             when (result) {
                 is gateway.order.AcceptOrderResult.Accepted -> {
-                    sendJson(ex, 202, mapOf("orderId" to result.orderId, "status" to "ACCEPTED"))
+                    sendJson(ex, result.httpStatus, mapOf("orderId" to result.orderId, "status" to "ACCEPTED"))
                 }
                 is gateway.order.AcceptOrderResult.Rejected -> {
-                    sendJson(ex, 422, mapOf("status" to "REJECTED", "reason" to result.reason))
+                    sendJson(ex, result.httpStatus, mapOf("status" to "REJECTED", "reason" to result.reason))
                 }
             }
         } catch (_: Throwable) {
             sendText(ex, 500, "ERROR")
         }
+    }
+
+    /**
+     * @return true if the handler keeps the connection open (SSE)
+     */
+    private fun handleOrderGetOrStream(ex: HttpExchange): Boolean {
+        if (ex.requestMethod != "GET") {
+            sendText(ex, 405, "METHOD_NOT_ALLOWED")
+            return false
+        }
+
+        val rest = ex.requestURI.path.removePrefix("/orders/").trim('/')
+        if (rest.isEmpty()) {
+            sendText(ex, 400, "MISSING_ORDER_ID")
+            return false
+        }
+
+        val parts = rest.split('/')
+        val orderId = parts.firstOrNull()?.trim().orEmpty()
+        if (orderId.isEmpty()) {
+            sendText(ex, 400, "MISSING_ORDER_ID")
+            return false
+        }
+
+        val isStream = parts.size == 2 && parts[1] == "stream"
+        if (isStream) {
+            val status = orderService.getOrder(orderId) ?: run {
+                sendText(ex, 404, "NOT_FOUND")
+                return false
+            }
+            sseHub.open(orderId, ex)
+            sseHub.publish(orderId, event = "order_snapshot", data = status)
+            return true
+        }
+
+        val status = orderService.getOrder(orderId) ?: run {
+            sendText(ex, 404, "NOT_FOUND")
+            return false
+        }
+        sendJson(ex, 200, status)
+        return false
     }
 
     private fun sendJson(ex: HttpExchange, status: Int, body: Any) {
