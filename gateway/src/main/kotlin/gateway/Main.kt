@@ -3,10 +3,12 @@ package gateway
 import gateway.audit.AuditLogReplay
 import gateway.audit.FileAuditLog
 import gateway.auth.JwtAuth
+import gateway.bus.EventPublisher
 import gateway.engine.FastPathEngine
 import gateway.exchange.ExchangeSimulator
 import gateway.http.SseHub
 import gateway.http.HttpGateway
+import gateway.kafka.KafkaEventPublisher
 import gateway.order.InMemoryOrderStore
 import gateway.order.OrderService
 import gateway.risk.SimplePreTradeRisk
@@ -27,6 +29,7 @@ fun main() {
 
     val auditLog = FileAuditLog(auditFile)
     val sseHub = SseHub()
+    val eventPublisher: EventPublisher = KafkaEventPublisher()
     val risk = SimplePreTradeRisk()
     val fastPathQueue = BlockingFastPathQueue(capacity = queueCapacity)
     val exchange = ExchangeSimulator()
@@ -35,6 +38,7 @@ fun main() {
         queue = fastPathQueue,
         orderStore = orderStore,
         auditLog = auditLog,
+        eventPublisher = eventPublisher,
         exchange = exchange,
         sseHub = sseHub
     )
@@ -42,6 +46,7 @@ fun main() {
     val orderService = OrderService(
         orderStore = orderStore,
         auditLog = auditLog,
+        eventPublisher = eventPublisher,
         risk = risk,
         fastPathQueue = fastPathQueue
     )
@@ -51,6 +56,7 @@ fun main() {
         server.close()
         fastPathEngine.close()
         exchange.close()
+        eventPublisher.close()
         auditLog.close()
         fastPathQueue.close()
         sseHub.close()
