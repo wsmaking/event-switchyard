@@ -15,7 +15,8 @@ help:
 	@echo "========================================="
 	@echo ""
 	@echo "基本コマンド:"
-	@echo "  make run         - アプリケーション起動"
+	@echo "  make run         - 旧アプリケーション起動 (/events)"
+	@echo "  make run-gateway - 新Gateway起動 (/orders)"
 	@echo "  make dev-bench   - 開発用ベンチマーク (10,000 runs)"
 	@echo "  make dashboard   - リアルタイムダッシュボード表示"
 	@echo ""
@@ -48,7 +49,12 @@ help:
 # アプリケーション起動
 run:
 	@echo "==> Starting HFT Fast Path..."
-	FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run
+	FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew :app:run
+
+# Gateway起動
+run-gateway:
+	@echo "==> Starting Gateway..."
+	./gradlew :gateway:run
 
 # 開発用ベンチマーク実行
 dev-bench:
@@ -122,12 +128,14 @@ clean:
 # 実行中プロセス停止
 stop:
 	@echo "==> Stopping running processes..."
-	@pkill -f "gradlew run" || echo "No processes to stop"
+	@pkill -f "gradlew :app:run" || true
+	@pkill -f "gradlew :gateway:run" || true
+	@echo "✓ Stop requested"
 
 # ワンコマンド実行: ビルド→起動→待機→ベンチ→メトリクス
 all: build
 	@echo "==> Starting application in background..."
-	@FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run > /dev/null 2>&1 &
+	@FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew :app:run > /dev/null 2>&1 &
 	@echo "==> Waiting for application startup (30s)..."
 	@sleep 30
 	@echo "==> Running benchmark..."

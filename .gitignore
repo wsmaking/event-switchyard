@@ -1,4 +1,3 @@
-cat > .gitignore <<'EOF'
 # --- Java / Gradle
 .gradle/
 build/
@@ -36,19 +35,19 @@ data/
 # --- 無効化ファイル
 *.broken
 
-# md
-#*.md
+# --- Markdown (docs are local-only in this repo)
 LY*.md
 README.md
 *.md
 
-
 # --- Docker
 *.local.yaml
-EOF
+
 W1-*.html
 W1-*.csv
 symbols.txt
 e1
 var/results/
 var/logs/
+.gradle-user-home/
+
