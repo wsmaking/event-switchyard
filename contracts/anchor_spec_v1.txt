@@ -1,0 +1,307 @@
+Event Switchyard — Implementation Anchor Spec v1
+
+目的
+  overview.md は全体像の説明に寄せているため、実装を進めるときに “読み取れない/曖昧な部分” が残る。
+  本ファイルは、本リポジトリの実装を進める際のアンカー（最小仕様）として扱う。
+
+前提（システムの立ち位置）
+  - 本システムは Exchange ではない（Execution Gateway / SOR）。
+  - 同期境界は「受理(ACK)」まで。約定/部分約定/拒否は非同期（SSE/Kafka等）。
+
+用語
+  - ACK: HTTP 202 Accepted を返すこと（orderId 発行済み）。
+  - Execution Report (ER): 取引所（またはシミュレータ）から返る執行結果イベント。
+  - Audit Log: append-only の監査ログ（WAL的に replay 可能）。
+  - BUS: Kafka Topic 等の “イベントログ” （社内向け配布）。
+  - BackOffice: 台帳/残高/ポジション/レポート等の後段（本リポでは簡易consumer）。
+  - Venue: ルーティング先（取引所/市場/接続先）を識別する名前。
+
+-----------------------------------------------------------------------------
+1) API（Gateway）
+
+共通
+  - 認証: JWT（Authorization: Bearer <JWT>）必須（/health と /metrics は例外あり、後述）。
+  - accountId は JWT claim accountId を優先、無ければ sub を使用。
+  - cross-account アクセス（別 accountId の order 参照）は 404（存在を隠す）を原則。
+  - レスポンスは JSON（エラーも JSON の場合あり）。
+
+エンドポイント一覧（実装の現状）
+  - GET  /health
+      - 200: {"status":"ok"}
+      - 認証不要
+
+  - POST /orders
+      - 入力（JSON）:
+          - symbol: string (non-empty)
+          - side: "BUY" | "SELL"
+          - type: "LIMIT" | "MARKET"
+          - qty: integer (>0)
+          - price: integer (>0) ※LIMIT必須
+          - clientOrderId: string? （任意）
+      - 受理成功:
+          - 202: {"orderId":"ord_...","status":"ACCEPTED"}
+      - 却下:
+          - 400: "INVALID_JSON" など（text/plainの場合あり）
+          - 401: {"status":"UNAUTHORIZED","reason":...}
+          - 422: {"status":"REJECTED","reason":...}（バリデーション/リスク）
+          - 503: {"status":"REJECTED","reason":"QUEUE_REJECT"}（FastPath queue）
+      - Idempotency:
+          - Header: Idempotency-Key を付与すると、同一 accountId + key は同じ orderId を返す（202）。
+
+  - GET /orders/{orderId}
+      - 200: OrderSnapshot（現状の JSON そのまま）
+      - 404: NOT_FOUND（存在しない/別account）
+
+  - POST /orders/{orderId}/cancel
+      - 202: {"orderId":"...","status":"CANCEL_REQUESTED"}
+      - 404: NOT_FOUND（存在しない/別account）
+      - 409: {"status":"REJECTED","reason":"ORDER_FINAL"}（最終状態）
+
+  - GET /stream
+      - accountId 単位の SSE ストリーム（order_update 等）
+
+  - GET /orders/{orderId}/stream
+      - orderId 単位の SSE ストリーム（order_snapshot / order_update 等）
+
+  - GET /metrics
+      - Prometheus text format（version=0.0.4）
+      - 認証不要（JWTは要求しない）
+      - 簡易保護（任意）:
+          - env: GATEWAY_METRICS_TOKEN を設定した場合、
+            request header: X-Metrics-Token が一致しないと 401。
+
+-----------------------------------------------------------------------------
+2) SSE（Gateway → Client）
+
+目的
+  - 注文の “結果” を非同期に届ける（ACKと約定を分離）。
+
+仕様（現状）
+  - Content-Type: text/event-stream
+  - サーバは接続を維持し keepalive コメントを送る。
+  - event id を付与し、再接続時に Last-Event-ID でリプレイ可能。
+
+イベント種類（現状）
+  - ready: 初期接続確認（data: {"orderId":...} / {"accountId":...}）
+  - order_snapshot: order stream 開始直後に現状スナップショットを送る
+  - order_update: 状態更新（OrderSnapshotを data として送る）
+
+再接続
+  - client は header: Last-Event-ID を送れる（数値）。
+  - server は in-memory リングバッファ（SSE_BUFFER_SIZE）から “id > Last-Event-ID” を再送。
+  - バッファを超えた過去は保証しない（必要なら client が REST で再同期）。
+
+チューニング env
+  - SSE_BUFFER_SIZE（default 1000）
+  - SSE_KEEPALIVE_SEC（default 15）
+  - SSE_DISPATCH_QUEUE_CAPACITY（default 10000）
+
+-----------------------------------------------------------------------------
+3) Audit Log（append-only / replay）
+
+目的
+  - 監査証跡（append-only）を残し、起動時に状態を再構成（replay）できること。
+
+現状仕様
+  - パス: env GATEWAY_AUDIT_PATH（default var/gateway/audit.log）
+  - 形式: JSON Lines（1行=1イベント）
+  - replay: 監査ログを読み、(at, lineIndex) でソートして適用する。
+
+監査イベント types（現状）
+  - OrderAccepted
+  - OrderSent
+  - CancelRequested
+  - CancelSent
+  - ExecutionReport
+  - OrderUpdated
+
+注意（実装の制約）
+  - FileAuditLog は best-effort（書き込み失敗戦略は今後要設計）。
+  - “二重発注ゼロ” を目指す場合、Audit と外部送信の整合性（outbox/WAL）を仕様化して実装する必要がある。
+
+-----------------------------------------------------------------------------
+4) BUS（Kafka / Event Log）
+
+目的
+  - Client向け（SSE）とは別に、社内向けの非同期配信を行う（BackOffice/監査/監視/分析など）。
+
+現状仕様（Gateway側）
+  - Kafka publish はデフォルト無効（KAFKA_ENABLE=1/true の時だけ有効）。
+  - Topic: env KAFKA_TOPIC（default events）
+  - bootstrap: env KAFKA_BOOTSTRAP_SERVERS（default localhost:9092）
+  - client id: env KAFKA_CLIENT_ID（default gateway）
+  - 内部キュー: env KAFKA_QUEUE_CAPACITY（default 10000）
+  - 配信は best-effort（キュー満杯で drop する可能性あり）→ /metrics で可視化する。
+
+イベント schema（現状）
+  - 1メッセージ = BusEvent（JSON）
+      - type: string
+      - at: ISO-8601 instant
+      - accountId: string
+      - orderId: string|null
+      - data: map
+  - type 一覧（現状）:
+      - OrderAccepted / OrderSent / CancelRequested / CancelSent / ExecutionReport / OrderUpdated
+
+-----------------------------------------------------------------------------
+5) BackOffice（簡易 consumer の現状） + 今後のアンカー
+
+現状（実装）
+  - backoffice は Kafka topic=events を購読し、positions を更新して GET /positions を提供する。
+  - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
+
+今後（アンカーとして明文化すべきが overview から読み取りづらい点）
+  - 台帳（Ledger）の定義:
+      - “注文” ではなく “約定による増減（fills/fees/cash/position delta）” を append-only で積む。
+      - replay で balances/positions/pnl を再構成できること。
+  - “ゼロ” の定義（超重要）:
+      - 取りこぼしゼロ / 二重適用ゼロを、どこまで（Gateway/BackOffice/両方）で保証するか。
+      - Kafka の at-least-once を前提に consumer 側で重複排除するのか、
+        outbox 等で end-to-end を詰めるのかを決める。
+  - 運用:
+      - metrics/alerts/runbook をセットで作り、障害時に “何を見るか/どう復旧するか” を書く。
+
+-----------------------------------------------------------------------------
+6) SOR（Smart Order Router）のアンカー
+
+目的
+  - 複数 venue（取引所/市場/接続先）に対して注文をルーティングする。
+  - cancel は「送った先と同じvenue」に送る（orderId→venue を記憶）。
+
+現状仕様（最小）
+  - env:
+      - SOR_VENUES: "simA,simB"（default "sim"）
+      - SOR_DEFAULT_VENUE: default venue 名（default: SOR_VENUESの先頭）
+      - SOR_SYMBOL_ROUTES: "BTC=simA,ETH=simB"
+  - venue別シミュレータ調整（任意）:
+      - EXCHANGE_SIM_DELAY_MS_<VENUE>
+      - EXCHANGE_SIM_PARTIAL_STEPS_<VENUE>
+      - EXCHANGE_SIM_REJECT_ALL_<VENUE>（1/true）
+
+今後（Smart の中身として）
+  - 最良執行（価格/手数料/流動性/遅延）
+  - フェイルオーバー（片系障害/遅延時の切替）
+  - レート制限・バックオフ
+
+-----------------------------------------------------------------------------
+7) 運用（observability / compose / monitoring）
+
+docker-compose（現状）
+  - profile gateway: gateway + kafka + backoffice を起動可能
+  - make compose-gateway で起動（8081 gateway / 8082 backoffice）
+
+monitoring（現状）
+  - Prometheus は host.docker.internal:8080（旧app）と :8081（gateway）を scrape
+  - Grafana dashboards:
+      - HFT Fast Path - Real-time Performance（旧app）
+      - Gateway - Operations（gateway）
+
+-----------------------------------------------------------------------------
+8) 責務表（Component Responsibility Matrix）
+
+目的
+  - 全体構造（境界・責務・失敗時の扱い）を固定し、変更時/障害時の判断を速くする。
+  - “どこまでが誰の責任か” を曖昧にしない（設計・運用のアンカー）。
+
+Component: Gateway / HttpIngress（gateway/http/HttpGateway.kt）
+  - Input: HTTP（/orders, /orders/{id}, /orders/{id}/cancel, /stream 等）
+  - Output: ACK(202)/Reject(4xx/5xx), SSE, /metrics
+  - Persistence: なし（OrderService / AuditLog に委譲）
+  - SLO: ACKまで（Ingress→Risk→FastPath queue enqueue）
+  - Failure:
+      - Auth fail → 401
+      - Validation/Risk → 422
+      - Queue full/closed → 503
+  - Notes: cross-account は 404（存在を隠す）。約定は待たない。
+
+Component: OrderService（gateway/order/OrderService.kt）
+  - Input: Principal(accountId) + CreateOrderRequest / cancel request
+  - Output:
+      - OrderSnapshot write（ACCEPTED/CANCEL_REQUESTED）
+      - FastPathQueue enqueue
+      - AuditLog append
+      - Kafka publish（BUS）
+  - Persistence: InMemoryOrderStore + AuditLog（append-only）
+  - Failure:
+      - enqueue失敗時は orderStore rollback（remove / status rollback）
+      - idempotency hit は同一 orderId を返す（202）
+
+Component: FastPathQueue（gateway/queue/*）
+  - Input: NewOrderCommand / CancelOrderCommand
+  - Output: dequeue for FastPathEngine
+  - Persistence: なし（in-memory）
+  - Failure:
+      - queue full → enqueue拒否（503の原因）
+
+Component: FastPathEngine（gateway/engine/FastPathEngine.kt）
+  - Input: FastPathCommand
+  - Output:
+      - Exchange send（SOR/ExchangeClient経由）
+      - ExecutionReport 처리（状態更新）
+      - AuditLog append
+      - Kafka publish（BUS）
+      - SSE publish（order/account）
+  - Persistence: AuditLog（ExecutionReport/OrderUpdated等）
+  - Failure:
+      - Exchange送信失敗時の扱い（再送/重複排除/復旧）は今後仕様化が必要
+      - ERは順序/重複あり得る前提で更新（filledQtyTotalでガード等）
+
+Component: SOR（gateway/sor/SmartOrderRouter.kt）
+  - Input: OrderSnapshot / cancel(orderId)
+  - Output: chosen venue の ExchangeClient へ委譲
+  - State: orderId→venue mapping（in-memory）
+  - Failure:
+      - mapping消失（再起動）時は default venue（将来は永続化検討）
+
+Component: Exchange Adapter（現状: gateway/exchange/ExchangeSimulator.kt）
+  - Input: sendNewOrder / sendCancel
+  - Output: ExecutionReport callbacks
+  - Notes: 本番は実取引所APIに置換（署名/レート制限/再接続/冪等性が重要）
+
+Component: AuditLog（gateway/audit/*）
+  - Input: AuditEvent append
+  - Output: JSONL lines, replay into OrderStore
+  - Guarantee: append-only / replay 可能（WAL的）
+  - Failure: 現状 best-effort。書き込み失敗戦略（止める/落とす/退避等）は未実装。
+
+Component: Kafka BUS（gateway/kafka/KafkaEventPublisher.kt）
+  - Input: BusEvent publish
+  - Output: Kafka topic（events）
+  - Guarantee: best-effort（internal queue full で drop あり、/metrics で可視化）
+  - Failure: publish callback error カウント（/metrics）
+
+Component: BackOffice consumer（backoffice/*）
+  - Input: Kafka topic（events）
+  - Output:
+      - 現状: positions（/positions）
+      - 将来: ledger（台帳）→ balances/fees/pnl 等
+  - Persistence:
+      - 現状: なし（in-memory）
+      - 将来: ledger append-only + replay（台帳を正とする）
+  - Failure:
+      - Kafka は at-least-once 前提（重複/順序）→ consumer 側の重複排除/再処理戦略が必要
+
+Component: Monitoring（monitoring/*）
+  - Input: /metrics scrape（Prometheus）
+  - Output: Grafana dashboards / alerts（将来）
+  - Notes: 「どのSLO/詰まりを検知するか」を alert rule と runbook に落とす。
+
+-----------------------------------------------------------------------------
+9) “ゼロ” の定義（アンカー）
+
+目的
+  - “二重発注ゼロ / 取りこぼしゼロ” の範囲を曖昧にしない。
+  - 実装・テスト・運用（アラート/復旧）をこの定義に合わせて作る。
+
+検討観点（今後の意思決定ポイント）
+  - Gateway側:
+      - 外部送信（取引所）と Audit append の順序/原子性
+      - timeout/retry 時の二重発注リスクをどう潰すか（idempotency/outbox 等）
+  - BackOffice側:
+      - at-least-once 前提で、同一 Fill/ER を二重適用しない（dedup key の定義）
+      - reprocess/replay 時に同じ最終状態へ収束する（再現性）
+
+-----------------------------------------------------------------------------
+更新ルール
+  - 本ファイル（anchor_spec_v1.txt）は “実装アンカーの仕様” として扱う。
+  - 実装がこの仕様から逸脱する場合は、まずこのファイルの更新 PR を作って合意してから変更する。
