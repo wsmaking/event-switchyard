@@ -27,6 +27,7 @@ class SseHub(
     private val orderBuffers = ConcurrentHashMap<String, EventBuffer>()
     private val accountBuffers = ConcurrentHashMap<String, EventBuffer>()
     private val dispatchQueue = ArrayBlockingQueue<Dispatch>(queueCapacity)
+    private val dispatchDropped = AtomicLong(0)
     private val running = AtomicBoolean(true)
     private val worker: Thread
     private val defaultBufferSize: Int = bufferSize
@@ -93,13 +94,17 @@ class SseHub(
     fun publish(orderId: String, event: String, data: Any) {
         val e = SseEvent(id = nextEventId(), event = event, jsonData = mapper.writeValueAsString(data))
         orderBuffer(orderId).append(e)
-        dispatchQueue.offer(Dispatch(DispatchTarget.Order(orderId), e))
+        if (!dispatchQueue.offer(Dispatch(DispatchTarget.Order(orderId), e))) {
+            dispatchDropped.incrementAndGet()
+        }
     }
 
     fun publishAccount(accountId: String, event: String, data: Any) {
         val e = SseEvent(id = nextEventId(), event = event, jsonData = mapper.writeValueAsString(data))
         accountBuffer(accountId).append(e)
-        dispatchQueue.offer(Dispatch(DispatchTarget.Account(accountId), e))
+        if (!dispatchQueue.offer(Dispatch(DispatchTarget.Account(accountId), e))) {
+            dispatchDropped.incrementAndGet()
+        }
     }
 
     private fun sendToOrder(orderId: String, event: SseEvent) {
@@ -183,6 +188,14 @@ class SseHub(
     private fun accountBuffer(accountId: String): EventBuffer {
         return accountBuffers.computeIfAbsent(accountId) { EventBuffer(defaultBufferSize) }
     }
+
+    fun orderClientCount(): Int = clientsByOrderId.values.sumOf { it.size }
+
+    fun accountClientCount(): Int = clientsByAccountId.values.sumOf { it.size }
+
+    fun dispatchQueueDepth(): Int = dispatchQueue.size
+
+    fun dispatchDroppedTotal(): Long = dispatchDropped.get()
 
     override fun close() {
         running.set(false)

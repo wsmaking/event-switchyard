@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer
 import gateway.auth.JwtAuth
 import gateway.auth.Principal
 import gateway.json.Json
+import gateway.metrics.GatewayMetrics
 import gateway.order.CreateOrderRequest
 import gateway.order.OrderService
 import java.net.InetSocketAddress
@@ -17,12 +18,14 @@ class HttpGateway(
     private val orderService: OrderService,
     private val sseHub: SseHub,
     private val jwtAuth: JwtAuth,
+    private val metrics: GatewayMetrics,
     private val mapper: ObjectMapper = Json.mapper
 ) : AutoCloseable {
     private val server: HttpServer =
         HttpServer.create(InetSocketAddress(port), 0).apply {
             createContext("/health") { ex ->
                 try {
+                    metrics.onHttpRequest()
                     if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
                     sendJson(ex, 200, mapOf("status" to "ok"))
                 } finally {
@@ -30,13 +33,36 @@ class HttpGateway(
                 }
             }
 
+            createContext("/metrics") { ex ->
+                try {
+                    metrics.onHttpRequest()
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val token = System.getenv("GATEWAY_METRICS_TOKEN")?.trim().orEmpty()
+                    if (token.isNotEmpty()) {
+                        val got = ex.requestHeaders.getFirst("X-Metrics-Token")?.trim().orEmpty()
+                        if (got != token) return@createContext sendText(ex, 401, "UNAUTHORIZED")
+                    }
+                    val body = metrics.renderPrometheus()
+                    val bytes = body.toByteArray(UTF_8)
+                    ex.responseHeaders.add("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    ex.sendResponseHeaders(200, bytes.size.toLong())
+                    ex.responseBody.use { it.write(bytes) }
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
             createContext("/stream") { ex ->
+                metrics.onHttpRequest()
                 val keepOpen = handleAccountStream(ex)
                 if (!keepOpen) ex.close()
             }
 
             createContext("/orders") { ex ->
                 try {
+                    metrics.onHttpRequest()
                     if (ex.requestMethod == "POST") {
                         handleCreateOrder(ex)
                     } else {
@@ -48,6 +74,7 @@ class HttpGateway(
             }
 
             createContext("/orders/") { ex ->
+                metrics.onHttpRequest()
                 val keepOpen = handleOrderRoute(ex)
                 if (!keepOpen) ex.close()
             }
@@ -177,6 +204,7 @@ class HttpGateway(
         return when (auth) {
             is JwtAuth.Result.Ok -> auth.principal
             is JwtAuth.Result.Err -> {
+                metrics.onHttpUnauthorized()
                 sendJson(ex, 401, mapOf("status" to "UNAUTHORIZED", "reason" to auth.reason))
                 null
             }

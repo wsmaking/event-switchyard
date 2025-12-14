@@ -89,6 +89,14 @@ class KafkaEventPublisher(
         }
     }
 
+    fun isEnabled(): Boolean = enabled
+
+    fun queueDepth(): Int = queue.size
+
+    fun droppedTotal(): Long = dropped.get()
+
+    fun publishErrorsTotal(): Long = publishErrors.get()
+
     override fun close() {
         running.set(false)
         worker?.interrupt()

@@ -5,6 +5,7 @@ import gateway.audit.AuditLog
 import gateway.auth.Principal
 import gateway.bus.BusEvent
 import gateway.bus.EventPublisher
+import gateway.metrics.GatewayMetrics
 import gateway.risk.PreTradeRisk
 import gateway.queue.FastPathQueue
 import gateway.queue.NewOrderCommand
@@ -26,6 +27,7 @@ class OrderService(
     private val orderStore: InMemoryOrderStore,
     private val auditLog: AuditLog,
     private val eventPublisher: EventPublisher,
+    private val metrics: GatewayMetrics,
     private val risk: PreTradeRisk,
     private val fastPathQueue: FastPathQueue
 ) {
@@ -40,6 +42,7 @@ class OrderService(
 
         val riskResult = risk.validate(req)
         if (!riskResult.ok) {
+            metrics.onOrderRejected()
             return AcceptOrderResult.Rejected(riskResult.reason ?: "RISK_REJECT", 422)
         }
 
@@ -62,8 +65,10 @@ class OrderService(
         orderStore.put(snapshot, idempotencyKey)
 
         val enqueue = fastPathQueue.tryEnqueue(NewOrderCommand(orderId))
+        metrics.onFastPathEnqueue(enqueue.ok)
         if (!enqueue.ok) {
             orderStore.remove(orderId, idempotencyKey)
+            metrics.onOrderRejected()
             return AcceptOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
         }
 
@@ -102,6 +107,7 @@ class OrderService(
             )
         )
 
+        metrics.onOrderAccepted()
         return AcceptOrderResult.Accepted(orderId)
     }
 
@@ -123,6 +129,7 @@ class OrderService(
         orderStore.update(orderId) { it.copy(status = OrderStatus.CANCEL_REQUESTED, lastUpdateAt = now) }
 
         val enqueue = fastPathQueue.tryEnqueue(CancelOrderCommand(orderId))
+        metrics.onFastPathEnqueue(enqueue.ok)
         if (!enqueue.ok) {
             orderStore.update(orderId) { it.copy(status = order.status, lastUpdateAt = now) }
             return CancelOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
@@ -137,6 +144,7 @@ class OrderService(
                 orderId = orderId
             )
         )
+        metrics.onCancelRequested()
         return CancelOrderResult.Accepted(orderId)
     }
 

@@ -9,6 +9,7 @@ import gateway.exchange.ExchangeSimulator
 import gateway.http.SseHub
 import gateway.http.HttpGateway
 import gateway.kafka.KafkaEventPublisher
+import gateway.metrics.GatewayMetrics
 import gateway.order.InMemoryOrderStore
 import gateway.order.OrderService
 import gateway.risk.SimplePreTradeRisk
@@ -34,11 +35,13 @@ fun main() {
     val fastPathQueue = BlockingFastPathQueue(capacity = queueCapacity)
     val exchange = ExchangeSimulator()
     val jwtAuth = JwtAuth()
+    val metrics = GatewayMetrics(queue = fastPathQueue, sseHub = sseHub, kafka = (eventPublisher as? KafkaEventPublisher))
     val fastPathEngine = FastPathEngine(
         queue = fastPathQueue,
         orderStore = orderStore,
         auditLog = auditLog,
         eventPublisher = eventPublisher,
+        metrics = metrics,
         exchange = exchange,
         sseHub = sseHub
     )
@@ -47,11 +50,12 @@ fun main() {
         orderStore = orderStore,
         auditLog = auditLog,
         eventPublisher = eventPublisher,
+        metrics = metrics,
         risk = risk,
         fastPathQueue = fastPathQueue
     )
 
-    val server = HttpGateway(port = port, orderService = orderService, sseHub = sseHub, jwtAuth = jwtAuth)
+    val server = HttpGateway(port = port, orderService = orderService, sseHub = sseHub, jwtAuth = jwtAuth, metrics = metrics)
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
         fastPathEngine.close()

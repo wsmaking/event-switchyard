@@ -7,6 +7,7 @@ import gateway.bus.EventPublisher
 import gateway.exchange.ExchangeClient
 import gateway.exchange.ExecutionReport
 import gateway.http.SseHub
+import gateway.metrics.GatewayMetrics
 import gateway.order.InMemoryOrderStore
 import gateway.order.OrderSnapshot
 import gateway.order.OrderStatus
@@ -22,6 +23,7 @@ class FastPathEngine(
     private val orderStore: InMemoryOrderStore,
     private val auditLog: AuditLog,
     private val eventPublisher: EventPublisher,
+    private val metrics: GatewayMetrics,
     private val exchange: ExchangeClient,
     private val sseHub: SseHub
 ) : AutoCloseable {
@@ -61,6 +63,7 @@ class FastPathEngine(
                     orderId = updated.orderId
                 )
             )
+            metrics.onOrderSent()
             sseHub.publish(updated.orderId, event = "order_update", data = updated)
             sseHub.publishAccount(updated.accountId, event = "order_update", data = updated)
         }
@@ -84,6 +87,7 @@ class FastPathEngine(
                 )
             )
         }
+        metrics.onCancelSent()
         exchange.sendCancel(orderId) { report ->
             onExecutionReport(report)
         }
@@ -92,6 +96,7 @@ class FastPathEngine(
     private fun onExecutionReport(report: ExecutionReport) {
         val now = report.at
         val accountId = orderStore.findById(report.orderId)?.accountId ?: return
+        metrics.onExecutionReport()
         auditLog.append(
             AuditEvent(
                 type = "ExecutionReport",
@@ -123,6 +128,7 @@ class FastPathEngine(
 
         val updated = orderStore.applyExecutionReport(report)
         if (updated != null) {
+            metrics.onOrderUpdated()
             auditLog.append(
                 AuditEvent(
                     type = "OrderUpdated",

@@ -8,6 +8,7 @@ class BlockingFastPathQueue(
     capacity: Int
 ) : FastPathQueue {
     private val running = AtomicBoolean(true)
+    private val capacity: Int = capacity
     private val queue = ArrayBlockingQueue<FastPathCommand>(capacity)
 
     override fun tryEnqueue(cmd: FastPathCommand): EnqueueResult {
@@ -20,6 +21,10 @@ class BlockingFastPathQueue(
         if (!running.get()) return null
         return queue.poll(100, TimeUnit.MILLISECONDS)
     }
+
+    override fun depth(): Int = queue.size
+
+    override fun capacity(): Int = capacity
 
     override fun close() {
         running.set(false)
