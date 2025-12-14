@@ -16,8 +16,10 @@ COPY build.gradle* ./
 COPY gradle gradle
 COPY gradle.properties gradle.properties
 
-# app 側の build スクリプト
+# build スクリプト
 COPY app/build.gradle app/build.gradle
+COPY gateway/build.gradle gateway/build.gradle
+COPY backoffice/build.gradle backoffice/build.gradle
 
 # 依存だけ先に解決（キャッシュ利用、configuration-cache除外）
 RUN --mount=type=cache,target=/home/gradle/.gradle \
@@ -29,11 +31,13 @@ COPY frontend /workspace/frontend
 
 # ソースをコピー
 COPY app/src /workspace/app/src
+COPY gateway/src /workspace/gateway/src
+COPY backoffice/src /workspace/backoffice/src
 
 # fat-jar を作る（フロントエンドも自動ビルド、configuration-cache除外）
 RUN --mount=type=cache,target=/home/gradle/.gradle \
     rm -rf /home/gradle/.gradle/configuration-cache && \
-    gradle --no-daemon :app:shadowJar
+    gradle --no-daemon :app:shadowJar :gateway:shadowJar :backoffice:shadowJar
 
 
 # ===== Runtime stage (JRE + HFT最適化) =====
@@ -45,6 +49,8 @@ RUN mkdir -p /app/var/logs /app/var/chronicle-queue
 
 # fat-jarをコピー
 COPY --from=builder /workspace/app/build/libs/app-all.jar /app/app-all.jar
+COPY --from=builder /workspace/gateway/build/libs/gateway-all.jar /app/gateway-all.jar
+COPY --from=builder /workspace/backoffice/build/libs/backoffice-all.jar /app/backoffice-all.jar
 
 # HFT最適化JVMフラグ
 # - ZGC: 低レイテンシGC
