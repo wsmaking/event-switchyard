@@ -15,13 +15,23 @@ class AuditLogReader(
         orderId: String,
         limit: Int?,
         since: java.time.Instant?,
-        after: java.time.Instant?,
-        types: Set<String>?
+        after: java.time.Instant?
     ): List<AuditEvent> {
         return readEvents(limit) { event ->
             if (event.orderId != orderId) return@readEvents false
             if (event.accountId != null && event.accountId != accountId) return@readEvents false
-            if (!matchType(event.type, types)) return@readEvents false
+            matchTime(event.at, since, after)
+        }
+    }
+
+    fun readAccountEvents(
+        accountId: String,
+        limit: Int?,
+        since: java.time.Instant?,
+        after: java.time.Instant?
+    ): List<AuditEvent> {
+        return readEvents(limit) { event ->
+            if (event.accountId != accountId) return@readEvents false
             matchTime(event.at, since, after)
         }
     }
@@ -42,6 +52,16 @@ class AuditLogReader(
         }
 
         return buffer.toList()
+    }
+
+    private fun matchTime(
+        at: java.time.Instant,
+        since: java.time.Instant?,
+        after: java.time.Instant?
+    ): Boolean {
+        if (since != null && at.isBefore(since)) return false
+        if (after != null && !at.isAfter(after)) return false
+        return true
     }
 
     private fun parseEvent(line: String): AuditEvent? {
