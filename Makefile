@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -18,6 +18,8 @@ help:
 	@echo "  make run         - 旧アプリケーション起動 (/events)"
 	@echo "  make run-gateway - 新Gateway起動 (/orders)"
 	@echo "  make run-backoffice - BackOffice(consumer)起動 (/positions)"
+	@echo "  make backoffice-recovery - BackOffice復旧チェック"
+	@echo "  make gateway-backoffice-e2e - Gateway→BackOfficeの疎通確認"
 	@echo "  make dev-bench   - 開発用ベンチマーク (10,000 runs)"
 	@echo "  make dashboard   - リアルタイムダッシュボード表示"
 	@echo ""
@@ -126,6 +128,14 @@ compose-gateway:
 compose-gateway-down:
 	@echo "==> Stopping Gateway stack..."
 	@docker-compose --profile gateway down
+
+# BackOffice復旧チェック
+backoffice-recovery:
+	@scripts/backoffice_recovery_check.sh
+
+# Gateway→BackOffice E2E
+gateway-backoffice-e2e:
+	@scripts/gateway_backoffice_e2e.sh
 
 # ビルド
 build:
