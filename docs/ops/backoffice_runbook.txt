@@ -1,0 +1,44 @@
+# BackOffice Runbook (Minimal)
+
+Purpose
+- Provide a minimal recovery and verification checklist for the BackOffice service.
+
+Prereqs
+- BackOffice is running on `BACKOFFICE_URL` (default `http://localhost:8082`).
+- JWT secret for the account (`JWT_HS256_SECRET`) is known.
+- Kafka and Gateway are running if you want end-to-end checks.
+
+Env (examples)
+```
+export BACKOFFICE_URL=http://localhost:8082
+export BACKOFFICE_ACCOUNT_ID=acct_demo
+export JWT_HS256_SECRET=dev-secret-change-me
+```
+
+1) Start / Restart
+- Start BackOffice (and Kafka, Gateway if needed).
+- On boot, BackOffice replays the ledger and prints replay stats in logs.
+
+2) Recovery Check
+- Use the recovery check script (stats/positions/balances/ledger):
+```
+BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
+```
+
+3) End-to-end Verification (optional)
+- Place an order and check BackOffice state in one shot:
+```
+scripts/gateway_backoffice_e2e.sh
+```
+
+4) If Data Looks Stale
+- Confirm consumer is enabled: `BACKOFFICE_ENABLE=1`
+- Check `/stats` for `lastEventAt` and `lastKafkaOffset`.
+- If offsets are not advancing, check Kafka connectivity and topic name.
+
+5) If Ledger Replay Fails
+- Inspect `var/backoffice/ledger.log` for malformed lines.
+- Restart BackOffice after fixing any invalid entries.
+
+Notes
+- This runbook is intentionally minimal. Extend with alerting/metrics as needed.
