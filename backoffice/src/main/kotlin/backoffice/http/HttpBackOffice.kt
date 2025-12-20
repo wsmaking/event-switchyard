@@ -7,6 +7,7 @@ import backoffice.auth.JwtAuth
 import backoffice.auth.Principal
 import backoffice.json.Json
 import backoffice.ledger.FileLedger
+import backoffice.ledger.LedgerReconciler
 import backoffice.metrics.BackOfficeStats
 import backoffice.store.InMemoryBackOfficeStore
 import java.net.InetSocketAddress
@@ -19,6 +20,7 @@ class HttpBackOffice(
     private val store: InMemoryBackOfficeStore,
     private val ledger: FileLedger,
     private val stats: BackOfficeStats,
+    private val reconciler: LedgerReconciler,
     private val jwtAuth: JwtAuth,
     private val mapper: ObjectMapper = Json.mapper
 ) : AutoCloseable {
@@ -138,6 +140,29 @@ class HttpBackOffice(
                     val principal = requirePrincipal(ex) ?: return@createContext
                     resolveAccountId(ex, principal) ?: return@createContext
                     sendJson(ex, 200, stats.snapshot())
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
+            createContext("/reconcile") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val principal = requirePrincipal(ex) ?: return@createContext
+                    val accountId = resolveAccountId(ex, principal) ?: return@createContext
+                    val params = parseQueryParams(ex.requestURI.rawQuery)
+                    val limit =
+                        params["limit"]?.let {
+                            it.toIntOrNull()?.coerceIn(1, 10000) ?: run {
+                                sendText(ex, 400, "INVALID_LIMIT")
+                                return@createContext
+                            }
+                        } ?: 1000
+                    val quoteCcy = params["quoteCcy"]?.trim()?.takeIf { it.isNotEmpty() } ?: "JPY"
+                    val result = reconciler.reconcile(accountId = accountId, limit = limit, quoteCcy = quoteCcy)
+                    sendJson(ex, 200, result)
                 } catch (_: Throwable) {
                     sendText(ex, 500, "ERROR")
                 } finally {

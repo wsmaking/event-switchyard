@@ -177,8 +177,11 @@ Event Switchyard — Implementation Anchor Spec v1
       - Fill は filledQtyTotal を基準に増分のみ適用（再送でも二重加算しない）。
   - GET /stats で consumer の処理状況を返す（JWT 必須）。
       - 200: {"startedAt":..., "processed":..., "skipped":..., "lastEventAt":..., "lastKafkaOffset":..., "ledgerReplay":...}
+  - GET /reconcile で台帳の整合チェックを返す（JWT 必須）。
+      - query: accountId?, limit=1000, quoteCcy=JPY
+      - 200: {"accountId":"...", "balances":{...}, "positions":{...}}
   - 復旧チェック:
-      - scripts/backoffice_recovery_check.sh で /health・/stats・/positions・/balances・/ledger を一括確認する。
+      - scripts/backoffice_recovery_check.sh で /health・/stats・/positions・/balances・/ledger・/reconcile を一括確認する。
       - BACKOFFICE_STALE_SEC で lastEventAt の新鮮度チェックを行う（0で無効）。
       - BACKOFFICE_STRICT=1 の場合、lastEventAt が無いと失敗扱い。
       - BACKOFFICE_JWT が無い場合は JWT_HS256_SECRET + BACKOFFICE_ACCOUNT_ID から生成する。

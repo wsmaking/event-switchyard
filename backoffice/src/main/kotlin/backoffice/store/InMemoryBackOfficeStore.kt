@@ -131,6 +131,18 @@ class InMemoryBackOfficeStore(
             .sortedWith(compareBy<RealizedPnl> { it.accountId }.thenBy { it.symbol }.thenBy { it.quoteCcy })
     }
 
+    fun snapshotBalances(accountId: String): Map<String, Long> {
+        return balances
+            .filterKeys { it.startsWith("$accountId::") }
+            .mapKeys { it.key.substringAfter("::") }
+    }
+
+    fun snapshotPositions(accountId: String): Map<String, Long> {
+        return positions
+            .filterValues { it.accountId == accountId }
+            .mapValues { it.value.netQty }
+    }
+
     private fun balanceKey(accountId: String, ccy: String): String = "$accountId::$ccy"
 
     private fun pnlKey(accountId: String, symbol: String, ccy: String): String = "$accountId::$symbol::$ccy"
