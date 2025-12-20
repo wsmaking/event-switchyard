@@ -158,6 +158,8 @@ services:
       KAFKA_ENABLE: "1"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TOPIC: "events"
+      EXCHANGE_SIM_PARTIAL_STEPS: "3"
+      EXCHANGE_SIM_DELAY_MS: "150"
 
   backoffice:
     <<: *app

@@ -3,6 +3,7 @@ package gateway.http
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import gateway.audit.AuditLogReader
 import gateway.auth.JwtAuth
 import gateway.auth.Principal
 import gateway.json.Json
@@ -10,6 +11,7 @@ import gateway.metrics.GatewayMetrics
 import gateway.order.CreateOrderRequest
 import gateway.order.OrderService
 import java.net.InetSocketAddress
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.concurrent.Executors
 
@@ -17,6 +19,7 @@ class HttpGateway(
     private val port: Int,
     private val orderService: OrderService,
     private val sseHub: SseHub,
+    private val auditLogReader: AuditLogReader,
     private val jwtAuth: JwtAuth,
     private val metrics: GatewayMetrics,
     private val mapper: ObjectMapper = Json.mapper
@@ -134,6 +137,7 @@ class HttpGateway(
         return when (ex.requestMethod) {
             "GET" -> {
                 val isStream = parts.size == 2 && parts[1] == "stream"
+                val isEvents = parts.size == 2 && parts[1] == "events"
                 if (isStream) {
                     val status = orderService.getOrder(orderId) ?: run {
                         sendText(ex, 404, "NOT_FOUND")
@@ -146,6 +150,9 @@ class HttpGateway(
                     sseHub.open(orderId, parseLastEventId(ex), ex)
                     sseHub.publish(orderId, event = "order_snapshot", data = status)
                     true
+                } else if (isEvents) {
+                    handleOrderEvents(ex, principal, orderId)
+                    false
                 } else {
                     val status = orderService.getOrder(orderId) ?: run {
                         sendText(ex, 404, "NOT_FOUND")
@@ -181,6 +188,21 @@ class HttpGateway(
         }
     }
 
+    private fun handleOrderEvents(ex: HttpExchange, principal: Principal, orderId: String) {
+        val status = orderService.getOrder(orderId) ?: run {
+            sendText(ex, 404, "NOT_FOUND")
+            return
+        }
+        if (status.accountId != principal.accountId) {
+            sendText(ex, 404, "NOT_FOUND")
+            return
+        }
+        val params = parseQueryParams(ex.requestURI.rawQuery)
+        val limit = params["limit"]?.toIntOrNull()
+        val events = auditLogReader.readOrderEvents(principal.accountId, orderId, limit)
+        sendJson(ex, 200, mapOf("orderId" to orderId, "events" to events))
+    }
+
     /**
      * @return true if the handler keeps the connection open (SSE)
      */
@@ -197,6 +219,21 @@ class HttpGateway(
     private fun parseLastEventId(ex: HttpExchange): Long? {
         val h = ex.requestHeaders.getFirst("Last-Event-ID")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         return h.toLongOrNull()
+    }
+
+    private fun parseQueryParams(rawQuery: String?): Map<String, String> {
+        val raw = rawQuery?.trim().orEmpty()
+        if (raw.isEmpty()) return emptyMap()
+        return raw
+            .split('&')
+            .mapNotNull { part ->
+                val idx = part.indexOf('=')
+                if (idx <= 0 || idx == part.lastIndex) return@mapNotNull null
+                val key = URLDecoder.decode(part.substring(0, idx), UTF_8)
+                val value = URLDecoder.decode(part.substring(idx + 1), UTF_8)
+                key to value
+            }
+            .toMap()
     }
 
     private fun requirePrincipal(ex: HttpExchange): Principal? {
