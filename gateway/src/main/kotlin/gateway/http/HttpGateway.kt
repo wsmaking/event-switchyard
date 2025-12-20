@@ -63,6 +63,12 @@ class HttpGateway(
                 if (!keepOpen) ex.close()
             }
 
+            createContext("/accounts/") { ex ->
+                metrics.onHttpRequest()
+                val keepOpen = handleAccountRoute(ex)
+                if (!keepOpen) ex.close()
+            }
+
             createContext("/orders") { ex ->
                 try {
                     metrics.onHttpRequest()
@@ -188,6 +194,41 @@ class HttpGateway(
         }
     }
 
+    /**
+     * @return true if the handler keeps the connection open (SSE)
+     */
+    private fun handleAccountRoute(ex: HttpExchange): Boolean {
+        val principal = requirePrincipal(ex) ?: return false
+        val rest = ex.requestURI.path.removePrefix("/accounts/").trim('/')
+        if (rest.isEmpty()) {
+            sendText(ex, 400, "MISSING_ACCOUNT_ID")
+            return false
+        }
+
+        val parts = rest.split('/')
+        val accountId = parts.firstOrNull()?.trim().orEmpty()
+        if (accountId.isEmpty()) {
+            sendText(ex, 400, "MISSING_ACCOUNT_ID")
+            return false
+        }
+
+        return when (ex.requestMethod) {
+            "GET" -> {
+                val isEvents = parts.size == 2 && parts[1] == "events"
+                if (!isEvents) {
+                    sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    return false
+                }
+                handleAccountEvents(ex, principal, accountId)
+                false
+            }
+            else -> {
+                sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                false
+            }
+        }
+    }
+
     private fun handleOrderEvents(ex: HttpExchange, principal: Principal, orderId: String) {
         val status = orderService.getOrder(orderId) ?: run {
             sendText(ex, 404, "NOT_FOUND")
@@ -199,8 +240,35 @@ class HttpGateway(
         }
         val params = parseQueryParams(ex.requestURI.rawQuery)
         val limit = params["limit"]?.toIntOrNull()
-        val events = auditLogReader.readOrderEvents(principal.accountId, orderId, limit)
+        val since = params["since"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_SINCE")
+            return
+        } }
+        val after = params["after"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_AFTER")
+            return
+        } }
+        val events = auditLogReader.readOrderEvents(principal.accountId, orderId, limit, since, after)
         sendJson(ex, 200, mapOf("orderId" to orderId, "events" to events))
+    }
+
+    private fun handleAccountEvents(ex: HttpExchange, principal: Principal, accountId: String) {
+        if (accountId != principal.accountId) {
+            sendText(ex, 404, "NOT_FOUND")
+            return
+        }
+        val params = parseQueryParams(ex.requestURI.rawQuery)
+        val limit = params["limit"]?.toIntOrNull()
+        val since = params["since"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_SINCE")
+            return
+        } }
+        val after = params["after"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_AFTER")
+            return
+        } }
+        val events = auditLogReader.readAccountEvents(accountId, limit, since, after)
+        sendJson(ex, 200, mapOf("accountId" to accountId, "events" to events))
     }
 
     /**
@@ -234,6 +302,24 @@ class HttpGateway(
                 key to value
             }
             .toMap()
+    }
+
+    private fun parseInstantParam(raw: String): java.time.Instant? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.all { it.isDigit() }) {
+            val value = trimmed.toLongOrNull() ?: return null
+            return if (trimmed.length <= 10) {
+                java.time.Instant.ofEpochSecond(value)
+            } else {
+                java.time.Instant.ofEpochMilli(value)
+            }
+        }
+        return try {
+            java.time.Instant.parse(trimmed)
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun requirePrincipal(ex: HttpExchange): Principal? {
