@@ -37,6 +37,12 @@ BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
 scripts/gateway_backoffice_e2e.sh
 ```
 
+3.5) Replay Verification (optional)
+- Start BackOffice with a ledger replay and validate reconcile:
+```
+scripts/backoffice_replay_verify.sh
+```
+
 4) If Data Looks Stale
 - Confirm consumer is enabled: `BACKOFFICE_ENABLE=1`
 - Check `/stats` for `lastEventAt` and `lastKafkaOffset`.
