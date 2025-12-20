@@ -5,6 +5,7 @@ import backoffice.kafka.BackOfficeConsumer
 import backoffice.ledger.FileLedger
 import backoffice.ledger.LedgerFill
 import backoffice.ledger.LedgerOrderAccepted
+import backoffice.metrics.BackOfficeStats
 import backoffice.auth.JwtAuth
 import backoffice.store.InMemoryBackOfficeStore
 import backoffice.store.OrderMeta
@@ -16,6 +17,7 @@ fun main() {
 
     val store = InMemoryBackOfficeStore()
     val ledgerFile = FileLedger(Path.of(ledgerPath))
+    val stats = BackOfficeStats()
     val replayStats =
         ledgerFile.replay { entry ->
             when (entry) {
@@ -49,10 +51,11 @@ fun main() {
     if (replayStats.lines > 0) {
         println("Ledger replay: $replayStats (path=$ledgerPath)")
     }
+    stats.setReplayStats(replayStats)
 
-    val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile)
+    val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile, stats = stats)
     val jwtAuth = JwtAuth()
-    val server = HttpBackOffice(port = port, store = store, ledger = ledgerFile, jwtAuth = jwtAuth)
+    val server = HttpBackOffice(port = port, store = store, ledger = ledgerFile, stats = stats, jwtAuth = jwtAuth)
 
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
