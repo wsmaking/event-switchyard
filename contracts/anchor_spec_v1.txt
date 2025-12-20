@@ -179,6 +179,8 @@ Event Switchyard — Implementation Anchor Spec v1
       - 200: {"startedAt":..., "processed":..., "skipped":..., "lastEventAt":..., "lastKafkaOffset":..., "ledgerReplay":...}
   - 復旧チェック:
       - scripts/backoffice_recovery_check.sh で /stats・/positions・/balances・/ledger を一括確認する。
+      - BACKOFFICE_STALE_SEC で lastEventAt の新鮮度チェックを行う（0で無効）。
+      - BACKOFFICE_STRICT=1 の場合、lastEventAt が無いと失敗扱い。
   - Runbook:
       - docs/ops/backoffice_runbook.txt に最小の復旧手順をまとめる。
       - Checklist を併記して最短確認手順を示す。
