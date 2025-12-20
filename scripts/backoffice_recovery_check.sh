@@ -7,6 +7,11 @@ ACCOUNT_ID="${BACKOFFICE_ACCOUNT_ID:-}"
 STALE_SEC="${BACKOFFICE_STALE_SEC:-120}"
 STRICT="${BACKOFFICE_STRICT:-0}"
 JWT_SECRET="${JWT_HS256_SECRET:-}"
+PASS_FAIL="${BACKOFFICE_PASSFAIL:-1}"
+PASS_COUNT=0
+if [[ "${PASS_FAIL}" == "1" ]]; then
+  trap 'echo "FAIL" >&2' ERR
+fi
 
 if [[ -z "$TOKEN" ]]; then
   if [[ -n "$JWT_SECRET" && -n "$ACCOUNT_ID" ]]; then
@@ -32,6 +37,7 @@ fi
 echo "# health"
 curl -fsS "${BASE_URL}/health"
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
 
 if [[ -z "$TOKEN" ]]; then
   echo "BACKOFFICE_JWT is required (Authorization: Bearer <JWT>)" >&2
@@ -106,21 +112,50 @@ if age > stale_sec:
     sys.exit(1)
 PY
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
 
 echo "# positions"
 curl -fsS -H "${auth_header[@]}" "${BASE_URL}/positions$(query_with "${account_qs}")"
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
 
 echo "# balances"
 curl -fsS -H "${auth_header[@]}" "${BASE_URL}/balances$(query_with "${account_qs}")"
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
 
 echo "# ledger (last 10)"
 ledger_query="$(append_query "${account_qs}" "limit=10")"
 curl -fsS -H "${auth_header[@]}" "${BASE_URL}/ledger$(query_with "${ledger_query}")"
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
 
 echo "# reconcile"
 reconcile_query="$(append_query "${account_qs}" "limit=1000")"
-curl -fsS -H "${auth_header[@]}" "${BASE_URL}/reconcile$(query_with "${reconcile_query}")"
+reconcile_json="$(curl -fsS -H "${auth_header[@]}" "${BASE_URL}/reconcile$(query_with "${reconcile_query}")")"
+echo "$reconcile_json"
+printf "%s" "$reconcile_json" | python3 - <<'PY'
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    print("reconcile: empty response", file=sys.stderr)
+    sys.exit(1)
+
+data = json.loads(raw)
+balances = data.get("balances") or {}
+positions = data.get("positions") or {}
+bal_ok = balances.get("ok")
+pos_ok = positions.get("ok")
+if bal_ok is not True or pos_ok is not True:
+    print("reconcile: mismatch detected", file=sys.stderr)
+    sys.exit(1)
+print("reconcile: ok")
+PY
 echo
+PASS_COUNT=$((PASS_COUNT + 1))
+
+if [[ "${PASS_FAIL}" == "1" ]]; then
+  echo "PASS (${PASS_COUNT} checks)"
+fi
