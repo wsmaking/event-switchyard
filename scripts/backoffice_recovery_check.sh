@@ -7,6 +7,10 @@ ACCOUNT_ID="${BACKOFFICE_ACCOUNT_ID:-}"
 STALE_SEC="${BACKOFFICE_STALE_SEC:-120}"
 STRICT="${BACKOFFICE_STRICT:-0}"
 
+echo "# health"
+curl -fsS "${BASE_URL}/health"
+echo
+
 if [[ -z "$TOKEN" ]]; then
   echo "BACKOFFICE_JWT is required (Authorization: Bearer <JWT>)" >&2
   exit 2

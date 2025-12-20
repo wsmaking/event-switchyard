@@ -22,7 +22,7 @@ export BACKOFFICE_STRICT=0
 - On boot, BackOffice replays the ledger and prints replay stats in logs.
 
 2) Recovery Check
-- Use the recovery check script (stats/positions/balances/ledger):
+- Use the recovery check script (health/stats/positions/balances/ledger):
 ```
 BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
 ```

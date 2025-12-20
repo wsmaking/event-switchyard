@@ -178,7 +178,7 @@ Event Switchyard — Implementation Anchor Spec v1
   - GET /stats で consumer の処理状況を返す（JWT 必須）。
       - 200: {"startedAt":..., "processed":..., "skipped":..., "lastEventAt":..., "lastKafkaOffset":..., "ledgerReplay":...}
   - 復旧チェック:
-      - scripts/backoffice_recovery_check.sh で /stats・/positions・/balances・/ledger を一括確認する。
+      - scripts/backoffice_recovery_check.sh で /health・/stats・/positions・/balances・/ledger を一括確認する。
       - BACKOFFICE_STALE_SEC で lastEventAt の新鮮度チェックを行う（0で無効）。
       - BACKOFFICE_STRICT=1 の場合、lastEventAt が無いと失敗扱い。
   - Runbook:
