@@ -177,6 +177,8 @@ Event Switchyard — Implementation Anchor Spec v1
       - Fill は filledQtyTotal を基準に増分のみ適用（再送でも二重加算しない）。
   - GET /stats で consumer の処理状況を返す（JWT 必須）。
       - 200: {"startedAt":..., "processed":..., "skipped":..., "lastEventAt":..., "lastKafkaOffset":..., "ledgerReplay":...}
+  - 復旧チェック:
+      - scripts/backoffice_recovery_check.sh で /stats・/positions・/balances・/ledger を一括確認する。
   - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
   - HTTP API は JWT を要求し、accountId はトークン由来（クエリ指定は同一accountのみ許可）。
 
