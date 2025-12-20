@@ -15,6 +15,7 @@ export BACKOFFICE_ACCOUNT_ID=acct_demo
 export JWT_HS256_SECRET=dev-secret-change-me
 export BACKOFFICE_STALE_SEC=120
 export BACKOFFICE_STRICT=0
+export BACKOFFICE_PASSFAIL=1
 ```
 
 1) Start / Restart
@@ -28,6 +29,7 @@ BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
 ```
 - If BACKOFFICE_JWT is not set, the script will generate a JWT from
   JWT_HS256_SECRET + BACKOFFICE_ACCOUNT_ID.
+- BACKOFFICE_PASSFAIL=1 prints a final PASS/FAIL summary.
 
 3) End-to-end Verification (optional)
 - Place an order and check BackOffice state in one shot:
