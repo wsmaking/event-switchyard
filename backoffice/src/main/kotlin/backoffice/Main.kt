@@ -5,6 +5,7 @@ import backoffice.kafka.BackOfficeConsumer
 import backoffice.ledger.FileLedger
 import backoffice.ledger.LedgerFill
 import backoffice.ledger.LedgerOrderAccepted
+import backoffice.auth.JwtAuth
 import backoffice.store.InMemoryBackOfficeStore
 import backoffice.store.OrderMeta
 import java.nio.file.Path
@@ -50,7 +51,8 @@ fun main() {
     }
 
     val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile)
-    val server = HttpBackOffice(port = port, store = store)
+    val jwtAuth = JwtAuth()
+    val server = HttpBackOffice(port = port, store = store, jwtAuth = jwtAuth)
 
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()

@@ -35,5 +35,5 @@ echo "==> Waiting for execution (2s)"
 sleep 2
 
 echo "==> GET /positions (backoffice)"
-curl -fsS "$BACKOFFICE_URL/positions?accountId=$ACCOUNT_ID" | python3 -m json.tool
-
+curl -fsS "$BACKOFFICE_URL/positions" \
+  -H "Authorization: Bearer $token" | python3 -m json.tool

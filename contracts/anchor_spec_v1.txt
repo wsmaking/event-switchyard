@@ -149,6 +149,7 @@ Event Switchyard — Implementation Anchor Spec v1
 現状（実装）
   - backoffice は Kafka topic=events を購読し、positions を更新して GET /positions を提供する。
   - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
+  - HTTP API は JWT を要求し、accountId はトークン由来（クエリ指定は同一accountのみ許可）。
 
 今後（アンカーとして明文化すべきが overview から読み取りづらい点）
   - 台帳（Ledger）の定義:
