@@ -181,6 +181,7 @@ Event Switchyard — Implementation Anchor Spec v1
       - scripts/backoffice_recovery_check.sh で /stats・/positions・/balances・/ledger を一括確認する。
   - Runbook:
       - docs/ops/backoffice_runbook.txt に最小の復旧手順をまとめる。
+      - Checklist を併記して最短確認手順を示す。
   - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
   - HTTP API は JWT を要求し、accountId はトークン由来（クエリ指定は同一accountのみ許可）。
 
