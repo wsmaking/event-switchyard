@@ -199,7 +199,16 @@ class HttpGateway(
         }
         val params = parseQueryParams(ex.requestURI.rawQuery)
         val limit = params["limit"]?.toIntOrNull()
-        val events = auditLogReader.readOrderEvents(principal.accountId, orderId, limit)
+        val since = params["since"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_SINCE")
+            return
+        } }
+        val after = params["after"]?.let { parseInstantParam(it) ?: run {
+            sendText(ex, 400, "INVALID_AFTER")
+            return
+        } }
+        val types = parseTypesParam(params["type"])
+        val events = auditLogReader.readOrderEvents(principal.accountId, orderId, limit, since, after, types)
         sendJson(ex, 200, mapOf("orderId" to orderId, "events" to events))
     }
 
@@ -234,6 +243,34 @@ class HttpGateway(
                 key to value
             }
             .toMap()
+    }
+
+    private fun parseInstantParam(raw: String): java.time.Instant? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.all { it.isDigit() }) {
+            val value = trimmed.toLongOrNull() ?: return null
+            return if (trimmed.length <= 10) {
+                java.time.Instant.ofEpochSecond(value)
+            } else {
+                java.time.Instant.ofEpochMilli(value)
+            }
+        }
+        return try {
+            java.time.Instant.parse(trimmed)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun parseTypesParam(raw: String?): Set<String>? {
+        val value = raw?.trim().orEmpty()
+        if (value.isEmpty()) return null
+        val types =
+            value.split(',')
+                .mapNotNull { it.trim().takeIf { t -> t.isNotEmpty() }?.lowercase() }
+                .toSet()
+        return if (types.isEmpty()) null else types
     }
 
     private fun requirePrincipal(ex: HttpExchange): Principal? {
