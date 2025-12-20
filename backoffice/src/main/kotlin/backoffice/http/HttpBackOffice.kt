@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer
 import backoffice.auth.JwtAuth
 import backoffice.auth.Principal
 import backoffice.json.Json
+import backoffice.ledger.FileLedger
 import backoffice.store.InMemoryBackOfficeStore
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -15,6 +16,7 @@ import java.util.concurrent.Executors
 class HttpBackOffice(
     private val port: Int,
     private val store: InMemoryBackOfficeStore,
+    private val ledger: FileLedger,
     private val jwtAuth: JwtAuth,
     private val mapper: ObjectMapper = Json.mapper
 ) : AutoCloseable {
@@ -85,6 +87,49 @@ class HttpBackOffice(
                 }
             }
 
+            createContext("/ledger") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val principal = requirePrincipal(ex) ?: return@createContext
+                    val accountId = resolveAccountId(ex, principal) ?: return@createContext
+                    val params = parseQueryParams(ex.requestURI.rawQuery)
+                    val orderId = params["orderId"]?.trim()?.takeIf { it.isNotEmpty() }
+                    val limit =
+                        params["limit"]?.let {
+                            it.toIntOrNull()?.coerceIn(1, 1000) ?: run {
+                                sendText(ex, 400, "INVALID_LIMIT")
+                                return@createContext
+                            }
+                        } ?: 100
+                    val since = params["since"]?.let { parseInstantParam(it) ?: run {
+                        sendText(ex, 400, "INVALID_SINCE")
+                        return@createContext
+                    } }
+                    val after = params["after"]?.let { parseInstantParam(it) ?: run {
+                        sendText(ex, 400, "INVALID_AFTER")
+                        return@createContext
+                    } }
+                    val types = params["type"]?.let { parseTypesParam(it) ?: run {
+                        sendText(ex, 400, "INVALID_TYPE")
+                        return@createContext
+                    } }
+                    val entries =
+                        ledger.readEntries(
+                            accountId = accountId,
+                            orderId = orderId,
+                            limit = limit,
+                            since = since,
+                            after = after,
+                            types = types
+                        )
+                    sendJson(ex, 200, mapOf("accountId" to accountId, "entries" to entries))
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
             executor = Executors.newCachedThreadPool()
         }
 
@@ -126,6 +171,51 @@ class HttpBackOffice(
             }
         }
         return null
+    }
+
+    private fun parseQueryParams(rawQuery: String?): Map<String, String> {
+        val raw = rawQuery?.trim().orEmpty()
+        if (raw.isEmpty()) return emptyMap()
+        return raw
+            .split('&')
+            .mapNotNull { part ->
+                val idx = part.indexOf('=')
+                if (idx <= 0 || idx == part.lastIndex) return@mapNotNull null
+                val key = URLDecoder.decode(part.substring(0, idx), UTF_8)
+                val value = URLDecoder.decode(part.substring(idx + 1), UTF_8)
+                key to value
+            }
+            .toMap()
+    }
+
+    private fun parseInstantParam(raw: String): java.time.Instant? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.all { it.isDigit() }) {
+            val value = trimmed.toLongOrNull() ?: return null
+            return if (trimmed.length <= 10) {
+                java.time.Instant.ofEpochSecond(value)
+            } else {
+                java.time.Instant.ofEpochMilli(value)
+            }
+        }
+        return try {
+            java.time.Instant.parse(trimmed)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun parseTypesParam(raw: String): Set<String>? {
+        val types =
+            raw
+                .split(',', ';')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+        if (types.isEmpty()) return null
+        val allowed = setOf("orderaccepted", "fill")
+        if (types.any { it !in allowed }) return null
+        return types.toSet()
     }
 
     private fun sendJson(ex: HttpExchange, status: Int, body: Any) {

@@ -52,7 +52,7 @@ fun main() {
 
     val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile)
     val jwtAuth = JwtAuth()
-    val server = HttpBackOffice(port = port, store = store, jwtAuth = jwtAuth)
+    val server = HttpBackOffice(port = port, store = store, ledger = ledgerFile, jwtAuth = jwtAuth)
 
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
