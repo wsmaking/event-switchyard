@@ -27,6 +27,12 @@ class GatewayMetrics(
     private val cancelsSentTotal = AtomicLong(0)
     private val executionReportsTotal = AtomicLong(0)
     private val ordersUpdatedTotal = AtomicLong(0)
+    private val acceptToSentLatencyTotalMs = AtomicLong(0)
+    private val acceptToSentLatencyCount = AtomicLong(0)
+    private val acceptToSentLatencyMaxMs = AtomicLong(0)
+    private val acceptToExecLatencyTotalMs = AtomicLong(0)
+    private val acceptToExecLatencyCount = AtomicLong(0)
+    private val acceptToExecLatencyMaxMs = AtomicLong(0)
 
     fun onHttpRequest() {
         httpRequestsTotal.incrementAndGet()
@@ -66,6 +72,14 @@ class GatewayMetrics(
 
     fun onOrderUpdated() {
         ordersUpdatedTotal.incrementAndGet()
+    }
+
+    fun onAcceptToSentLatency(ms: Long) {
+        recordLatency(ms, acceptToSentLatencyTotalMs, acceptToSentLatencyCount, acceptToSentLatencyMaxMs)
+    }
+
+    fun onAcceptToExecutionReportLatency(ms: Long) {
+        recordLatency(ms, acceptToExecLatencyTotalMs, acceptToExecLatencyCount, acceptToExecLatencyMaxMs)
     }
 
     fun renderPrometheus(now: Instant = Instant.now()): String {
@@ -145,6 +159,30 @@ class GatewayMetrics(
         type("gateway_order_updates_total", "counter")
         counter("gateway_order_updates_total", ordersUpdatedTotal.get())
 
+        help("gateway_accept_to_sent_latency_ms_sum", "Total milliseconds from order accept to send")
+        type("gateway_accept_to_sent_latency_ms_sum", "counter")
+        counter("gateway_accept_to_sent_latency_ms_sum", acceptToSentLatencyTotalMs.get())
+
+        help("gateway_accept_to_sent_latency_ms_count", "Count of order accept to send latency samples")
+        type("gateway_accept_to_sent_latency_ms_count", "counter")
+        counter("gateway_accept_to_sent_latency_ms_count", acceptToSentLatencyCount.get())
+
+        help("gateway_accept_to_sent_latency_ms_max", "Max milliseconds from order accept to send")
+        type("gateway_accept_to_sent_latency_ms_max", "gauge")
+        gauge("gateway_accept_to_sent_latency_ms_max", acceptToSentLatencyMaxMs.get())
+
+        help("gateway_accept_to_execution_report_latency_ms_sum", "Total milliseconds from order accept to execution report")
+        type("gateway_accept_to_execution_report_latency_ms_sum", "counter")
+        counter("gateway_accept_to_execution_report_latency_ms_sum", acceptToExecLatencyTotalMs.get())
+
+        help("gateway_accept_to_execution_report_latency_ms_count", "Count of order accept to execution report latency samples")
+        type("gateway_accept_to_execution_report_latency_ms_count", "counter")
+        counter("gateway_accept_to_execution_report_latency_ms_count", acceptToExecLatencyCount.get())
+
+        help("gateway_accept_to_execution_report_latency_ms_max", "Max milliseconds from order accept to execution report")
+        type("gateway_accept_to_execution_report_latency_ms_max", "gauge")
+        gauge("gateway_accept_to_execution_report_latency_ms_max", acceptToExecLatencyMaxMs.get())
+
         help("gateway_sse_clients", "Current SSE client count (scope=order/account)")
         type("gateway_sse_clients", "gauge")
         sb.append("gateway_sse_clients{scope=\"order\"} ").append(sseHub.orderClientCount()).append('\n')
@@ -194,5 +232,19 @@ class GatewayMetrics(
 
         return sb.toString()
     }
-}
 
+    private fun recordLatency(ms: Long, total: AtomicLong, count: AtomicLong, max: AtomicLong) {
+        val value = if (ms < 0) 0 else ms
+        total.addAndGet(value)
+        count.incrementAndGet()
+        updateMax(max, value)
+    }
+
+    private fun updateMax(target: AtomicLong, value: Long) {
+        while (true) {
+            val cur = target.get()
+            if (value <= cur) return
+            if (target.compareAndSet(cur, value)) return
+        }
+    }
+}

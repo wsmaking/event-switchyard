@@ -64,6 +64,7 @@ class FastPathEngine(
                 )
             )
             metrics.onOrderSent()
+            metrics.onAcceptToSentLatency(now.toEpochMilli() - order.acceptedAt.toEpochMilli())
             sseHub.publish(updated.orderId, event = "order_update", data = updated)
             sseHub.publishAccount(updated.accountId, event = "order_update", data = updated)
         }
@@ -95,8 +96,10 @@ class FastPathEngine(
 
     private fun onExecutionReport(report: ExecutionReport) {
         val now = report.at
-        val accountId = orderStore.findById(report.orderId)?.accountId ?: return
+        val order = orderStore.findById(report.orderId) ?: return
+        val accountId = order.accountId
         metrics.onExecutionReport()
+        metrics.onAcceptToExecutionReportLatency(now.toEpochMilli() - order.acceptedAt.toEpochMilli())
         auditLog.append(
             AuditEvent(
                 type = "ExecutionReport",

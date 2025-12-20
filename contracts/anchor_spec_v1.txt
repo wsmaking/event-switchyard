@@ -243,6 +243,9 @@ monitoring（現状）
   - Grafana dashboards:
       - HFT Fast Path - Real-time Performance（旧app）
       - Gateway - Operations（gateway）
+  - 主要メトリクス（gateway）:
+      - gateway_accept_to_sent_latency_ms_sum / _count / _max
+      - gateway_accept_to_execution_report_latency_ms_sum / _count / _max
 
 -----------------------------------------------------------------------------
 8) 責務表（Component Responsibility Matrix）
