@@ -127,6 +127,7 @@ class BackOfficeConsumer(
 
     private fun onOrderAccepted(ev: BusEvent): Boolean {
         val orderId = ev.orderId ?: return false
+        if (store.findOrderMeta(orderId) != null) return false
         val symbol = ev.data["symbol"] as? String ?: return false
         val sideStr = ev.data["side"] as? String ?: return false
         val side =

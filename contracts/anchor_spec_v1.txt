@@ -172,6 +172,9 @@ Event Switchyard — Implementation Anchor Spec v1
       - query: accountId?, orderId?, limit=100, since=ISO-8601|epoch, after=ISO-8601|epoch, type=OrderAccepted|Fill
       - accountId は JWT 由来を優先（別 accountId 指定は 404）
       - 200: {"accountId":"...","entries":[LedgerEntry,...]}
+  - 重複排除:
+      - OrderAccepted は既存 orderId がある場合は無視（ledger の二重記録を防止）。
+      - Fill は filledQtyTotal を基準に増分のみ適用（再送でも二重加算しない）。
   - GET /stats で consumer の処理状況を返す（JWT 必須）。
       - 200: {"startedAt":..., "processed":..., "skipped":..., "lastEventAt":..., "lastKafkaOffset":..., "ledgerReplay":...}
   - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
