@@ -179,6 +179,9 @@ Pre-Trade Risk（口座別ルール）
   - RISK_MAX_PRICE_BY_SYMBOL=BTC:100000,ETH:5000
   - RISK_ALLOWED_SYMBOLS_BY_ACCOUNT=acctA:BTC|ETH,acctB:BTC
     - アカウント区切りは ','、銘柄区切りは '|' または ';'
+  - RISK_ALLOWED_SIDES=BUY|SELL
+  - RISK_ALLOWED_SIDES_BY_ACCOUNT=acctA:BUY|SELL,acctB:BUY
+  - RISK_ALLOWED_SIDES_BY_SYMBOL=BTC:BUY
   - RISK_ALLOWED_TYPES=LIMIT|MARKET
   - RISK_ALLOWED_TYPES_BY_ACCOUNT=acctA:LIMIT|MARKET,acctB:LIMIT
   - RISK_ALLOWED_TYPES_BY_SYMBOL=BTC:LIMIT
@@ -191,6 +194,7 @@ Pre-Trade Risk（口座別ルール）
   - 口座×銘柄は key を accountId|symbol で指定し、より厳しい上限を採用。
   - 価格制限は account/symbol/global の中で「より厳しい方」を採用。
   - 注文タイプは global/account/symbol の共通集合（AND）を採用。
+  - 注文サイドは global/account/symbol の共通集合（AND）を採用。
   - レート制限は token-bucket を使用（per_sec/burst）。
 
 -----------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package gateway.risk
 
 import gateway.order.CreateOrderRequest
+import gateway.order.OrderSide
 import gateway.order.OrderType
 
 class SimplePreTradeRisk(
@@ -11,6 +12,9 @@ class SimplePreTradeRisk(
     private val maxPrice: Long? = System.getenv("RISK_MAX_PRICE")?.toLongOrNull(),
     private val allowedSymbols: Set<String> = parseSymbols(),
     private val allowedSymbolsByAccount: Map<String, Set<String>> = parseSymbolMap("RISK_ALLOWED_SYMBOLS_BY_ACCOUNT"),
+    private val allowedSides: Set<OrderSide> = parseSides("RISK_ALLOWED_SIDES"),
+    private val allowedSidesByAccount: Map<String, Set<OrderSide>> = parseSideMap("RISK_ALLOWED_SIDES_BY_ACCOUNT"),
+    private val allowedSidesBySymbol: Map<String, Set<OrderSide>> = parseSideMap("RISK_ALLOWED_SIDES_BY_SYMBOL"),
     private val allowedTypes: Set<OrderType> = parseTypes("RISK_ALLOWED_TYPES"),
     private val allowedTypesByAccount: Map<String, Set<OrderType>> = parseTypeMap("RISK_ALLOWED_TYPES_BY_ACCOUNT"),
     private val allowedTypesBySymbol: Map<String, Set<OrderType>> = parseTypeMap("RISK_ALLOWED_TYPES_BY_SYMBOL"),
@@ -38,6 +42,15 @@ class SimplePreTradeRisk(
         val accountSymbols = allowedSymbolsByAccount[accountId] ?: allowedSymbols
         if (accountSymbols.isNotEmpty() && !accountSymbols.contains(order.symbol)) {
             return RiskResult(false, "SYMBOL_NOT_ALLOWED")
+        }
+        val baseSides = if (allowedSides.isNotEmpty()) allowedSides else setOf(OrderSide.BUY, OrderSide.SELL)
+        val accountSides = allowedSidesByAccount[accountId]
+        val symbolSides = allowedSidesBySymbol[order.symbol]
+        var effectiveSides = baseSides
+        if (accountSides != null) effectiveSides = effectiveSides.intersect(accountSides)
+        if (symbolSides != null) effectiveSides = effectiveSides.intersect(symbolSides)
+        if (effectiveSides.isNotEmpty() && !effectiveSides.contains(order.side)) {
+            return RiskResult(false, "SIDE_NOT_ALLOWED")
         }
         val baseTypes = if (allowedTypes.isNotEmpty()) allowedTypes else setOf(OrderType.LIMIT, OrderType.MARKET)
         val accountTypes = allowedTypesByAccount[accountId]
@@ -138,6 +151,46 @@ class SimplePreTradeRisk(
                     .toSet()
                 if (key.isNotEmpty() && types.isNotEmpty()) {
                     out[key] = types
+                }
+            }
+            return out
+        }
+
+        private fun parseSides(envKey: String): Set<OrderSide> {
+            val raw = System.getenv(envKey) ?: return emptySet()
+            return raw.split(',', '|', ';')
+                .map { it.trim().uppercase() }
+                .mapNotNull {
+                    try {
+                        OrderSide.valueOf(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                }
+                .toSet()
+        }
+
+        private fun parseSideMap(envKey: String): Map<String, Set<OrderSide>> {
+            val raw = System.getenv(envKey) ?: return emptyMap()
+            val out = mutableMapOf<String, Set<OrderSide>>()
+            for (entry in raw.split(',')) {
+                if (entry.isBlank()) continue
+                val parts = entry.split(':', limit = 2)
+                if (parts.size != 2) continue
+                val key = parts[0].trim()
+                val sides = parts[1]
+                    .split('|', ';')
+                    .map { it.trim().uppercase() }
+                    .mapNotNull {
+                        try {
+                            OrderSide.valueOf(it)
+                        } catch (_: IllegalArgumentException) {
+                            null
+                        }
+                    }
+                    .toSet()
+                if (key.isNotEmpty() && sides.isNotEmpty()) {
+                    out[key] = sides
                 }
             }
             return out
