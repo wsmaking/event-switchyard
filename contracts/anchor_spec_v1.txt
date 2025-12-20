@@ -266,6 +266,7 @@ e2e（現状）
   - scripts/gateway_e2e_smoke.sh: 受理〜ポジション更新の疎通
   - scripts/gateway_e2e_partial.sh: 部分約定/遅延と監査イベントの確認
   - scripts/gateway_backoffice_e2e.sh: 受理〜約定〜BackOfficeの復旧チェックまでを一括確認
+      - env: WAIT_SEC で約定待機時間を調整（default 2）
 
 monitoring（現状）
   - Prometheus は host.docker.internal:8080（旧app）と :8081（gateway）を scrape
