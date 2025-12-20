@@ -11,6 +11,7 @@ ORDER_TYPE="${ORDER_TYPE:-LIMIT}"
 QTY="${QTY:-1}"
 PRICE="${PRICE:-100.0}"
 CLIENT_ORDER_ID="${CLIENT_ORDER_ID:-c1}"
+WAIT_SEC="${WAIT_SEC:-2}"
 
 token="$(
   python3 - <<'PY'
@@ -36,8 +37,31 @@ order_json="$(curl -fsS "$GATEWAY_URL/orders" \
   -d "{\"symbol\":\"$SYMBOL\",\"side\":\"$SIDE\",\"type\":\"$ORDER_TYPE\",\"qty\":$QTY,\"price\":$PRICE,\"clientOrderId\":\"$CLIENT_ORDER_ID\"}")"
 echo "$order_json"
 
-echo "==> Waiting for execution (2s)"
-sleep 2
+ORDER_JSON="$order_json" python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("ORDER_JSON", "")
+try:
+    data = json.loads(raw)
+except Exception:
+    print("order: invalid JSON", file=sys.stderr)
+    sys.exit(1)
+
+order_id = data.get("orderId")
+status = data.get("status")
+if not order_id:
+    print("order: missing orderId", file=sys.stderr)
+    sys.exit(1)
+if status and status != "ACCEPTED":
+    print(f"order: unexpected status {status}", file=sys.stderr)
+    sys.exit(1)
+print(f"order: accepted orderId={order_id}")
+PY
+
+echo "==> Waiting for execution (${WAIT_SEC}s)"
+sleep "$WAIT_SEC"
 
 echo "==> BackOffice recovery check"
 BACKOFFICE_URL="$BACKOFFICE_URL" \
