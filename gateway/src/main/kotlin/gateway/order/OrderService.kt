@@ -40,7 +40,7 @@ class OrderService(
         val validationError = validate(req)
         if (validationError != null) return AcceptOrderResult.Rejected(validationError, 422)
 
-        val riskResult = risk.validate(req)
+        val riskResult = risk.validate(principal.accountId, req)
         if (!riskResult.ok) {
             metrics.onOrderRejected()
             return AcceptOrderResult.Rejected(riskResult.reason ?: "RISK_REJECT", 422)

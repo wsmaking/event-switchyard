@@ -159,8 +159,39 @@ Event Switchyard — Implementation Anchor Spec v1
       - 取りこぼしゼロ / 二重適用ゼロを、どこまで（Gateway/BackOffice/両方）で保証するか。
       - Kafka の at-least-once を前提に consumer 側で重複排除するのか、
         outbox 等で end-to-end を詰めるのかを決める。
-  - 運用:
+ - 運用:
       - metrics/alerts/runbook をセットで作り、障害時に “何を見るか/どう復旧するか” を書く。
+
+-----------------------------------------------------------------------------
+Pre-Trade Risk（口座別ルール）
+
+目的
+  - 受理前に「口座ごとの取引制限」を適用する。
+
+現状仕様（環境変数）
+  - RISK_MAX_QTY_BY_ACCOUNT=acctA:100,acctB:500
+  - RISK_MAX_NOTIONAL_BY_ACCOUNT=acctA:100000,acctB:500000
+  - RISK_MAX_QTY_BY_ACCOUNT_SYMBOL=acctA|BTC:5,acctA|ETH:20
+  - RISK_MAX_NOTIONAL_BY_ACCOUNT_SYMBOL=acctA|BTC:10000,acctA|ETH:50000
+  - RISK_MIN_PRICE_BY_ACCOUNT=acctA:100,acctB:500
+  - RISK_MAX_PRICE_BY_ACCOUNT=acctA:10000,acctB:20000
+  - RISK_MIN_PRICE_BY_SYMBOL=BTC:100,ETH:50
+  - RISK_MAX_PRICE_BY_SYMBOL=BTC:100000,ETH:5000
+  - RISK_ALLOWED_SYMBOLS_BY_ACCOUNT=acctA:BTC|ETH,acctB:BTC
+    - アカウント区切りは ','、銘柄区切りは '|' または ';'
+  - RISK_ALLOWED_TYPES=LIMIT|MARKET
+  - RISK_ALLOWED_TYPES_BY_ACCOUNT=acctA:LIMIT|MARKET,acctB:LIMIT
+  - RISK_ALLOWED_TYPES_BY_SYMBOL=BTC:LIMIT
+  - RISK_RATE_PER_SEC=10
+  - RISK_RATE_BURST=20
+
+挙動
+  - 口座別の設定がある場合は「口座別を優先」。
+  - 口座別が無い場合は、全体設定（RISK_MAX_QTY 等）を使用。
+  - 口座×銘柄は key を accountId|symbol で指定し、より厳しい上限を採用。
+  - 価格制限は account/symbol/global の中で「より厳しい方」を採用。
+  - 注文タイプは global/account/symbol の共通集合（AND）を採用。
+  - レート制限は token-bucket を使用（per_sec/burst）。
 
 -----------------------------------------------------------------------------
 6) SOR（Smart Order Router）のアンカー

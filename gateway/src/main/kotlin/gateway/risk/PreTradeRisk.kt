@@ -5,6 +5,5 @@ import gateway.order.CreateOrderRequest
 data class RiskResult(val ok: Boolean, val reason: String? = null)
 
 interface PreTradeRisk {
-    fun validate(order: CreateOrderRequest): RiskResult
+    fun validate(accountId: String, order: CreateOrderRequest): RiskResult
 }
-
