@@ -64,6 +64,36 @@ class FileLedger(
         return ReplayStats(lines = lines, applied = applied, skipped = skipped)
     }
 
+    fun readEntries(
+        accountId: String,
+        orderId: String?,
+        limit: Int,
+        since: Instant?,
+        after: Instant?,
+        types: Set<String>?
+    ): List<LedgerEntry> {
+        if (limit <= 0) return emptyList()
+        if (!Files.exists(path)) return emptyList()
+
+        val bucket = ArrayDeque<LedgerEntry>(limit.coerceAtMost(10_000))
+        Files.newBufferedReader(path).use { reader ->
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isBlank()) continue
+                val entry = parseLine(line) ?: continue
+                if (entry.accountId != accountId) continue
+                if (orderId != null && entry.orderId != orderId) continue
+                if (!matchTime(entry.at, since, after)) continue
+                if (!matchType(entry.type, types)) continue
+                bucket.addLast(entry)
+                if (bucket.size > limit) {
+                    bucket.removeFirst()
+                }
+            }
+        }
+        return bucket.toList()
+    }
+
     override fun close() {
         synchronized(lock) {
             try {
@@ -75,6 +105,17 @@ class FileLedger(
             } catch (_: Throwable) {
             }
         }
+    }
+
+    private fun matchTime(at: Instant, since: Instant?, after: Instant?): Boolean {
+        if (since != null && at.isBefore(since)) return false
+        if (after != null && !at.isAfter(after)) return false
+        return true
+    }
+
+    private fun matchType(type: String, types: Set<String>?): Boolean {
+        if (types.isNullOrEmpty()) return true
+        return types.contains(type.lowercase())
     }
 
     data class ReplayStats(

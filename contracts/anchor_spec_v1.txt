@@ -168,6 +168,10 @@ Event Switchyard — Implementation Anchor Spec v1
 
 現状（実装）
   - backoffice は Kafka topic=events を購読し、positions を更新して GET /positions を提供する。
+  - GET /ledger で accountId 単位の台帳イベントを返す（JWT 必須）。
+      - query: accountId?, orderId?, limit=100, since=ISO-8601|epoch, after=ISO-8601|epoch, type=OrderAccepted|Fill
+      - accountId は JWT 由来を優先（別 accountId 指定は 404）
+      - 200: {"accountId":"...","entries":[LedgerEntry,...]}
   - これは “台帳” の入口であり、本格化するなら ledger（append-only）を定義して replay 可能にする。
   - HTTP API は JWT を要求し、accountId はトークン由来（クエリ指定は同一accountのみ許可）。
 
