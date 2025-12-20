@@ -119,3 +119,8 @@ echo "# ledger (last 10)"
 ledger_query="$(append_query "${account_qs}" "limit=10")"
 curl -fsS -H "${auth_header[@]}" "${BASE_URL}/ledger$(query_with "${ledger_query}")"
 echo
+
+echo "# reconcile"
+reconcile_query="$(append_query "${account_qs}" "limit=1000")"
+curl -fsS -H "${auth_header[@]}" "${BASE_URL}/reconcile$(query_with "${reconcile_query}")"
+echo

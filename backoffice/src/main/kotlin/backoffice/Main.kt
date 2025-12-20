@@ -5,6 +5,7 @@ import backoffice.kafka.BackOfficeConsumer
 import backoffice.ledger.FileLedger
 import backoffice.ledger.LedgerFill
 import backoffice.ledger.LedgerOrderAccepted
+import backoffice.ledger.LedgerReconciler
 import backoffice.metrics.BackOfficeStats
 import backoffice.auth.JwtAuth
 import backoffice.store.InMemoryBackOfficeStore
@@ -53,9 +54,18 @@ fun main() {
     }
     stats.setReplayStats(replayStats)
 
+    val reconciler = LedgerReconciler(ledger = ledgerFile, store = store)
     val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile, stats = stats)
     val jwtAuth = JwtAuth()
-    val server = HttpBackOffice(port = port, store = store, ledger = ledgerFile, stats = stats, jwtAuth = jwtAuth)
+    val server =
+        HttpBackOffice(
+            port = port,
+            store = store,
+            ledger = ledgerFile,
+            stats = stats,
+            reconciler = reconciler,
+            jwtAuth = jwtAuth
+        )
 
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
