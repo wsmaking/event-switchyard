@@ -4,6 +4,7 @@ import backoffice.json.Json
 import backoffice.ledger.FileLedger
 import backoffice.ledger.LedgerFill
 import backoffice.ledger.LedgerOrderAccepted
+import backoffice.metrics.BackOfficeStats
 import backoffice.model.BusEvent
 import backoffice.model.Side
 import backoffice.store.InMemoryBackOfficeStore
@@ -25,6 +26,7 @@ import kotlin.concurrent.thread
 class BackOfficeConsumer(
     private val store: InMemoryBackOfficeStore,
     private val ledger: FileLedger,
+    private val stats: BackOfficeStats? = null,
     bootstrapServers: String = System.getenv("KAFKA_BOOTSTRAP_SERVERS") ?: "localhost:9092",
     topic: String = System.getenv("KAFKA_TOPIC") ?: "events",
     groupId: String = System.getenv("KAFKA_GROUP_ID") ?: "backoffice",
@@ -105,27 +107,34 @@ class BackOfficeConsumer(
             try {
                 Json.mapper.readValue(rec.value(), BusEvent::class.java)
             } catch (_: Throwable) {
+                stats?.onSkipped(offsetInfo(rec))
                 return true
             }
 
-        when (ev.type) {
-            "OrderAccepted" -> onOrderAccepted(ev)
-            "ExecutionReport" -> onExecutionReport(ev)
-            else -> return true
+        val applied =
+            when (ev.type) {
+                "OrderAccepted" -> onOrderAccepted(ev)
+                "ExecutionReport" -> onExecutionReport(ev)
+                else -> false
+            }
+        if (applied) {
+            stats?.onProcessed(ev, offsetInfo(rec))
+        } else {
+            stats?.onSkipped(offsetInfo(rec))
         }
         return true
     }
 
-    private fun onOrderAccepted(ev: BusEvent) {
-        val orderId = ev.orderId ?: return
-        if (store.findOrderMeta(orderId) != null) return
-        val symbol = ev.data["symbol"] as? String ?: return
-        val sideStr = ev.data["side"] as? String ?: return
+    private fun onOrderAccepted(ev: BusEvent): Boolean {
+        val orderId = ev.orderId ?: return false
+        if (store.findOrderMeta(orderId) != null) return false
+        val symbol = ev.data["symbol"] as? String ?: return false
+        val sideStr = ev.data["side"] as? String ?: return false
         val side =
             try {
                 Side.valueOf(sideStr)
             } catch (_: Throwable) {
-                return
+                return false
             }
         ledger.append(
             LedgerOrderAccepted(
@@ -144,11 +153,12 @@ class BackOfficeConsumer(
                 side = side
             )
         )
+        return true
     }
 
-    private fun onExecutionReport(ev: BusEvent) {
-        val orderId = ev.orderId ?: return
-        val meta = store.findOrderMeta(orderId) ?: return
+    private fun onExecutionReport(ev: BusEvent): Boolean {
+        val orderId = ev.orderId ?: return false
+        val meta = store.findOrderMeta(orderId) ?: return false
         val lastTotal = store.lastFilledTotal(orderId)
 
         val filledDelta =
@@ -156,7 +166,7 @@ class BackOfficeConsumer(
                 is Number -> v.toLong()
                 is String -> v.toLongOrNull()
                 else -> null
-            } ?: return
+            } ?: return false
 
         val price =
             when (val v = ev.data["price"]) {
@@ -170,11 +180,11 @@ class BackOfficeConsumer(
                 is Number -> v.toLong()
                 is String -> v.toLongOrNull()
                 else -> null
-            } ?: return
+            } ?: return false
 
-        if (filledTotal <= lastTotal) return
+        if (filledTotal <= lastTotal) return false
         val delta = filledDelta.coerceAtMost(filledTotal - lastTotal).coerceAtLeast(0L)
-        if (delta <= 0L) return
+        if (delta <= 0L) return false
 
         val notional = if (price == null) 0L else delta * price
         val fee = (notional * feeBps) / 10_000L
@@ -210,6 +220,11 @@ class BackOfficeConsumer(
             quoteCashDelta = cashDelta,
             feeQuote = fee
         )
+        return true
+    }
+
+    private fun offsetInfo(rec: ConsumerRecord<String, ByteArray>): String {
+        return "${rec.topic()}:${rec.partition()}:${rec.offset()}"
     }
 
     private fun commitOffsets() {

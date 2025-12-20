@@ -7,6 +7,7 @@ import backoffice.auth.JwtAuth
 import backoffice.auth.Principal
 import backoffice.json.Json
 import backoffice.ledger.FileLedger
+import backoffice.metrics.BackOfficeStats
 import backoffice.store.InMemoryBackOfficeStore
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -17,6 +18,7 @@ class HttpBackOffice(
     private val port: Int,
     private val store: InMemoryBackOfficeStore,
     private val ledger: FileLedger,
+    private val stats: BackOfficeStats,
     private val jwtAuth: JwtAuth,
     private val mapper: ObjectMapper = Json.mapper
 ) : AutoCloseable {
@@ -123,6 +125,19 @@ class HttpBackOffice(
                             types = types
                         )
                     sendJson(ex, 200, mapOf("accountId" to accountId, "entries" to entries))
+                } catch (_: Throwable) {
+                    sendText(ex, 500, "ERROR")
+                } finally {
+                    ex.close()
+                }
+            }
+
+            createContext("/stats") { ex ->
+                try {
+                    if (ex.requestMethod != "GET") return@createContext sendText(ex, 405, "METHOD_NOT_ALLOWED")
+                    val principal = requirePrincipal(ex) ?: return@createContext
+                    resolveAccountId(ex, principal) ?: return@createContext
+                    sendJson(ex, 200, stats.snapshot())
                 } catch (_: Throwable) {
                     sendText(ex, 500, "ERROR")
                 } finally {
