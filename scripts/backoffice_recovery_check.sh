@@ -4,6 +4,8 @@ set -euo pipefail
 BASE_URL="${BACKOFFICE_URL:-http://localhost:8082}"
 TOKEN="${BACKOFFICE_JWT:-}"
 ACCOUNT_ID="${BACKOFFICE_ACCOUNT_ID:-}"
+STALE_SEC="${BACKOFFICE_STALE_SEC:-120}"
+STRICT="${BACKOFFICE_STRICT:-0}"
 
 if [[ -z "$TOKEN" ]]; then
   echo "BACKOFFICE_JWT is required (Authorization: Bearer <JWT>)" >&2
@@ -36,7 +38,47 @@ append_query() {
 }
 
 echo "# stats"
-curl -fsS -H "${auth_header[@]}" "${BASE_URL}/stats$(query_with "${account_qs}")"
+stats_json="$(curl -fsS -H "${auth_header[@]}" "${BASE_URL}/stats$(query_with "${account_qs}")")"
+echo "$stats_json"
+printf "%s" "$stats_json" | STALE_SEC="$STALE_SEC" STRICT="$STRICT" python3 - <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    print("stats: empty response", file=sys.stderr)
+    sys.exit(1)
+
+stats = json.loads(raw)
+stale_sec = int(os.environ.get("STALE_SEC", "120"))
+strict = os.environ.get("STRICT", "0").lower() in ("1", "true", "yes")
+last_event_at = stats.get("lastEventAt")
+
+if last_event_at is None:
+    msg = "stats: lastEventAt missing (no events yet?)"
+    print(msg, file=sys.stderr)
+    sys.exit(1 if strict else 0)
+
+if stale_sec <= 0:
+    sys.exit(0)
+
+try:
+    if last_event_at.endswith("Z"):
+        last_event_at = last_event_at.replace("Z", "+00:00")
+    last_dt = dt.datetime.fromisoformat(last_event_at)
+except Exception:
+    print("stats: invalid lastEventAt", file=sys.stderr)
+    sys.exit(1)
+
+now = dt.datetime.now(tz=last_dt.tzinfo or dt.timezone.utc)
+age = (now - last_dt).total_seconds()
+print(f"stats: lastEventAt age={age:.0f}s")
+if age > stale_sec:
+    print(f"stats: stale (>{stale_sec}s)", file=sys.stderr)
+    sys.exit(1)
+PY
 echo
 
 echo "# positions"

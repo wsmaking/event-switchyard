@@ -13,6 +13,8 @@ Env (examples)
 export BACKOFFICE_URL=http://localhost:8082
 export BACKOFFICE_ACCOUNT_ID=acct_demo
 export JWT_HS256_SECRET=dev-secret-change-me
+export BACKOFFICE_STALE_SEC=120
+export BACKOFFICE_STRICT=0
 ```
 
 1) Start / Restart
