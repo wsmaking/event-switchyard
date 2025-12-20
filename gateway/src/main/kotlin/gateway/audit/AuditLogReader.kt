@@ -76,4 +76,19 @@ class AuditLogReader(
         val raw = limit ?: maxLimit
         return raw.coerceIn(1, maxLimit)
     }
+
+    private fun matchTime(
+        at: java.time.Instant,
+        since: java.time.Instant?,
+        after: java.time.Instant?
+    ): Boolean {
+        if (since != null && at.isBefore(since)) return false
+        if (after != null && !at.isAfter(after)) return false
+        return true
+    }
+
+    private fun matchType(type: String, types: Set<String>?): Boolean {
+        if (types == null || types.isEmpty()) return true
+        return types.contains(type.lowercase())
+    }
 }

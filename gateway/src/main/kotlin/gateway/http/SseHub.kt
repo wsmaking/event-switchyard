@@ -70,6 +70,13 @@ class SseHub(
             event = "ready",
             jsonData = mapper.writeValueAsString(mapOf("orderId" to orderId))
         )
+        maybeSendResync(
+            scope = "order",
+            entityId = orderId,
+            lastEventId = lastEventId,
+            buffer = orderBuffer(orderId),
+            client = client
+        )
         replayOrder(orderId, lastEventId, client)
     }
 
@@ -179,6 +186,30 @@ class SseHub(
         }
     }
 
+    private fun maybeSendResync(
+        scope: String,
+        entityId: String,
+        lastEventId: Long?,
+        buffer: EventBuffer,
+        client: SseClient
+    ) {
+        val from = lastEventId ?: return
+        val range = buffer.idRange() ?: return
+        if (from >= range.first) return
+        val data =
+            mapOf(
+                "scope" to scope,
+                "id" to entityId,
+                "lastEventId" to from,
+                "oldestAvailableId" to range.first,
+                "eventsEndpoint" to when (scope) {
+                    "order" -> "/orders/$entityId/events"
+                    else -> "/accounts/$entityId/events"
+                }
+            )
+        client.sendEvent(id = null, event = "resync_required", jsonData = mapper.writeValueAsString(data))
+    }
+
     private fun nextEventId(): Long = nextEventId.incrementAndGet()
 
     private fun orderBuffer(orderId: String): EventBuffer {
@@ -233,6 +264,13 @@ class SseHub(
             synchronized(this) {
                 if (deque.isEmpty()) return emptyList()
                 return deque.filter { it.id > lastId }
+            }
+        }
+
+        fun idRange(): LongRange? {
+            synchronized(this) {
+                if (deque.isEmpty()) return null
+                return deque.first().id..deque.last().id
             }
         }
     }

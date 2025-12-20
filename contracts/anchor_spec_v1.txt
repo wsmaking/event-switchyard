@@ -103,6 +103,8 @@ Event Switchyard — Implementation Anchor Spec v1
   - order_update: 状態更新（OrderSnapshotを data として送る）
   - execution_report: 約定通知（ExecutionReport を data として送る）
     - 部分約定/遅延の場合は複数回届く
+  - resync_required: Last-Event-ID が古すぎる場合の再同期通知（order stream）
+    - data: {"scope":"order","id":"...","lastEventId":N,"oldestAvailableId":N,"eventsEndpoint":"/orders/.../events"}
 
 再接続
   - client は header: Last-Event-ID を送れる（数値）。
