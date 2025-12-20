@@ -40,5 +40,11 @@ scripts/gateway_backoffice_e2e.sh
 - Inspect `var/backoffice/ledger.log` for malformed lines.
 - Restart BackOffice after fixing any invalid entries.
 
+Checklist (quick pass)
+- /stats returns 200 and `lastEventAt` is recent.
+- /positions and /balances return 200 for the account.
+- /ledger returns entries for the account (limit=10).
+- If any check fails, verify Kafka connectivity and `BACKOFFICE_ENABLE=1`.
+
 Notes
 - This runbook is intentionally minimal. Extend with alerting/metrics as needed.
