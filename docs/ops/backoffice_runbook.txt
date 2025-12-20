@@ -22,10 +22,12 @@ export BACKOFFICE_STRICT=0
 - On boot, BackOffice replays the ledger and prints replay stats in logs.
 
 2) Recovery Check
-- Use the recovery check script (stats/positions/balances/ledger):
+- Use the recovery check script (health/stats/positions/balances/ledger):
 ```
 BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
 ```
+- If BACKOFFICE_JWT is not set, the script will generate a JWT from
+  JWT_HS256_SECRET + BACKOFFICE_ACCOUNT_ID.
 
 3) End-to-end Verification (optional)
 - Place an order and check BackOffice state in one shot:
