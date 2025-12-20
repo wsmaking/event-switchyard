@@ -169,6 +169,7 @@ services:
     environment:
       BACKOFFICE_PORT: "8082"
       BACKOFFICE_ENABLE: "1"
+      JWT_HS256_SECRET: "dev-secret-change-me"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TOPIC: "events"
 
