@@ -63,6 +63,12 @@ Event Switchyard — Implementation Anchor Spec v1
   - GET /orders/{orderId}/stream
       - orderId 単位の SSE ストリーム（order_snapshot / order_update 等）
 
+  - GET /orders/{orderId}/events
+      - 監査ログ由来のイベント一覧を返す（最終 N 件）
+      - query: limit=100 など（省略時は上限まで）
+      - 200: {"orderId":"...","events":[AuditEvent,...]}
+      - 404: NOT_FOUND（存在しない/別account）
+
   - GET /metrics
       - Prometheus text format（version=0.0.4）
       - 認証不要（JWTは要求しない）
@@ -85,6 +91,8 @@ Event Switchyard — Implementation Anchor Spec v1
   - ready: 初期接続確認（data: {"orderId":...} / {"accountId":...}）
   - order_snapshot: order stream 開始直後に現状スナップショットを送る
   - order_update: 状態更新（OrderSnapshotを data として送る）
+  - execution_report: 約定通知（ExecutionReport を data として送る）
+    - 部分約定/遅延の場合は複数回届く
 
 再接続
   - client は header: Last-Event-ID を送れる（数値）。
@@ -225,6 +233,10 @@ Pre-Trade Risk（口座別ルール）
 docker-compose（現状）
   - profile gateway: gateway + kafka + backoffice を起動可能
   - make compose-gateway で起動（8081 gateway / 8082 backoffice）
+
+e2e（現状）
+  - scripts/gateway_e2e_smoke.sh: 受理〜ポジション更新の疎通
+  - scripts/gateway_e2e_partial.sh: 部分約定/遅延と監査イベントの確認
 
 monitoring（現状）
   - Prometheus は host.docker.internal:8080（旧app）と :8081（gateway）を scrape

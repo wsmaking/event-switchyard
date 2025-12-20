@@ -1,6 +1,7 @@
 package gateway
 
 import gateway.audit.AuditLogReplay
+import gateway.audit.AuditLogReader
 import gateway.audit.FileAuditLog
 import gateway.auth.JwtAuth
 import gateway.bus.EventPublisher
@@ -30,6 +31,7 @@ fun main() {
     }
 
     val auditLog = FileAuditLog(auditFile)
+    val auditLogReader = AuditLogReader(auditFile)
     val sseHub = SseHub()
     val eventPublisher: EventPublisher = KafkaEventPublisher()
     val risk = SimplePreTradeRisk()
@@ -56,7 +58,14 @@ fun main() {
         fastPathQueue = fastPathQueue
     )
 
-    val server = HttpGateway(port = port, orderService = orderService, sseHub = sseHub, jwtAuth = jwtAuth, metrics = metrics)
+    val server = HttpGateway(
+        port = port,
+        orderService = orderService,
+        sseHub = sseHub,
+        auditLogReader = auditLogReader,
+        jwtAuth = jwtAuth,
+        metrics = metrics
+    )
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
         fastPathEngine.close()

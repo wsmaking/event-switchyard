@@ -125,6 +125,8 @@ class FastPathEngine(
                 )
             )
         )
+        sseHub.publish(report.orderId, event = "execution_report", data = report)
+        sseHub.publishAccount(accountId, event = "execution_report", data = report)
 
         val updated = orderStore.applyExecutionReport(report)
         if (updated != null) {
