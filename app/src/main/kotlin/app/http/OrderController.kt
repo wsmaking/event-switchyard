@@ -1,11 +1,15 @@
 package app.http
 
 import app.engine.Router
+import app.integration.GatewayClient
+import app.integration.GatewayOrderRequest
+import app.integration.GatewayOrderSnapshot
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -40,7 +44,7 @@ data class OrderRequest(
  */
 class OrderController(
     private val router: Router,
-    private val marketDataController: MarketDataController
+    private val gatewayClient: GatewayClient
 ) : HttpHandler {
     private val objectMapper = jacksonObjectMapper()
     private val orders = ConcurrentHashMap<String, Order>()
@@ -79,85 +83,49 @@ class OrderController(
         val submittedAt = System.currentTimeMillis()
         val startTime = System.nanoTime()
 
-        // 注文をRouterに送信（symbolをkeyとして使用）
+        // まず戦略エンジン側でローカル判定（担当外や抑止は拒否）
         val payload = objectMapper.writeValueAsBytes(request)
-
-        // ルーティングキーは銘柄コードそのまま（OWNED_KEYSと一致させる）
         val routingKey = request.symbol
+        val locallyAccepted = router.handle(routingKey, payload)
 
-        val accepted = router.handle(routingKey, payload)
-
-        val order = if (accepted) {
-            // OrderBookマッチングエンジンを使用した実際の約定処理
-            val orderBook = marketDataController.getOrderBook(request.symbol)
-
-            if (orderBook != null) {
-                // 成行注文の場合は現在価格を基準価格として使用
-                val limitPrice = if (request.type == OrderType.MARKET) {
-                    marketDataController.getCurrentPrice(request.symbol).toInt()
-                } else {
-                    request.price?.toInt() ?: 0
-                }
-
-                // OrderBookでマッチング実行
-                val execution = when (request.side) {
-                    OrderSide.BUY -> orderBook.processBuyOrder(
-                        limitPrice,
-                        request.quantity,
-                        System.nanoTime()
-                    )
-                    OrderSide.SELL -> orderBook.processSellOrder(
-                        limitPrice,
-                        request.quantity,
-                        System.nanoTime()
-                    )
-                }
-
-                val executionTimeMs = (System.nanoTime() - startTime) / 1_000_000.0
-
-                if (execution != null) {
-                    // 約定成功
-                    Order(
-                        id = orderId,
-                        symbol = request.symbol,
-                        side = request.side,
-                        type = request.type,
-                        quantity = execution.quantity,
-                        price = execution.price.toDouble(),
-                        status = OrderStatus.FILLED,
-                        submittedAt = submittedAt,
-                        filledAt = System.currentTimeMillis(),
-                        executionTimeMs = executionTimeMs
-                    )
-                } else {
-                    // マッチング失敗（板に対向注文がない）
-                    Order(
-                        id = orderId,
-                        symbol = request.symbol,
-                        side = request.side,
-                        type = request.type,
-                        quantity = request.quantity,
-                        price = request.price,
-                        status = OrderStatus.REJECTED,
-                        submittedAt = submittedAt,
-                        executionTimeMs = executionTimeMs
-                    )
-                }
-            } else {
-                // OrderBookが見つからない
+        val order = if (locallyAccepted) {
+            val gatewayRequest = GatewayOrderRequest(
+                symbol = request.symbol,
+                side = request.side.name,
+                type = request.type.name,
+                qty = request.quantity.toLong(),
+                price = request.price?.toLong(),
+                clientOrderId = orderId
+            )
+            val gatewayResult = gatewayClient.submitOrder(gatewayRequest, idempotencyKey = orderId)
+            val executionTimeMs = (System.nanoTime() - startTime) / 1_000_000.0
+            if (gatewayResult.accepted) {
                 Order(
-                    id = orderId,
+                    id = gatewayResult.orderId ?: orderId,
+                    symbol = request.symbol,
+                    side = request.side,
+                    type = request.type,
+                    quantity = request.quantity,
+                    price = request.price,
+                    status = OrderStatus.PENDING,
+                    submittedAt = submittedAt,
+                    filledAt = null,
+                    executionTimeMs = executionTimeMs
+                )
+            } else {
+                Order(
+                    id = gatewayResult.orderId ?: orderId,
                     symbol = request.symbol,
                     side = request.side,
                     type = request.type,
                     quantity = request.quantity,
                     price = request.price,
                     status = OrderStatus.REJECTED,
-                    submittedAt = submittedAt
+                    submittedAt = submittedAt,
+                    executionTimeMs = executionTimeMs
                 )
             }
         } else {
-            // ルーティング失敗
             Order(
                 id = orderId,
                 symbol = request.symbol,
@@ -170,20 +138,73 @@ class OrderController(
             )
         }
 
-        orders[orderId] = order
+        orders[order.id] = order
 
         val json = objectMapper.writeValueAsString(order)
         exchange.responseHeaders.set("Content-Type", "application/json")
-        sendResponse(exchange, if (order.status == OrderStatus.FILLED) 200 else 409, json)
+        val httpStatus = when (order.status) {
+            OrderStatus.PENDING -> 202
+            OrderStatus.FILLED -> 200
+            OrderStatus.REJECTED -> 409
+        }
+        sendResponse(exchange, httpStatus, json)
     }
 
     private fun handleGetOrders(exchange: HttpExchange) {
+        refreshPendingOrders()
         // 注文履歴を新しい順にソート
-        val orderList = orders.values.sortedByDescending { it.submittedAt }
+        val orderList = orders.values
+            .distinctBy { it.id }
+            .sortedByDescending { it.submittedAt }
         val json = objectMapper.writeValueAsString(orderList)
 
         exchange.responseHeaders.set("Content-Type", "application/json")
         sendResponse(exchange, 200, json)
+    }
+
+    private fun refreshPendingOrders() {
+        val pending = orders.values.filter { it.status == OrderStatus.PENDING }
+        if (pending.isEmpty()) return
+        for (order in pending) {
+            val snapshot = gatewayClient.fetchOrder(order.id) ?: continue
+            val mapped = mapGatewayStatus(snapshot.status) ?: continue
+            if (mapped == order.status) continue
+            val updated = order.copy(
+                status = mapped,
+                price = order.price ?: snapshot.price?.toDouble(),
+                filledAt = updatedFilledAt(order, mapped, snapshot),
+                executionTimeMs = order.executionTimeMs
+            )
+            orders[order.id] = updated
+        }
+    }
+
+    private fun mapGatewayStatus(status: String?): OrderStatus? {
+        val normalized = status?.uppercase() ?: return null
+        return when (normalized) {
+            "FILLED" -> OrderStatus.FILLED
+            "REJECTED", "CANCELED" -> OrderStatus.REJECTED
+            "ACCEPTED", "SENT", "CANCEL_REQUESTED", "PARTIALLY_FILLED" -> OrderStatus.PENDING
+            else -> OrderStatus.PENDING
+        }
+    }
+
+    private fun updatedFilledAt(
+        order: Order,
+        status: OrderStatus,
+        snapshot: GatewayOrderSnapshot
+    ): Long? {
+        if (status != OrderStatus.FILLED) return order.filledAt
+        val ts = snapshot.lastUpdateAt ?: snapshot.acceptedAt
+        return ts?.let { parseInstantMillis(it) } ?: System.currentTimeMillis()
+    }
+
+    private fun parseInstantMillis(raw: String): Long? {
+        return try {
+            Instant.parse(raw).toEpochMilli()
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun sendResponse(exchange: HttpExchange, statusCode: Int, body: String) {
