@@ -131,6 +131,48 @@ class InMemoryBackOfficeStore(
             .sortedWith(compareBy<RealizedPnl> { it.accountId }.thenBy { it.symbol }.thenBy { it.quoteCcy })
     }
 
+    fun snapshotState(): BackOfficeSnapshotState {
+        val fills =
+            fillsByAccount.mapValues { (_, q) ->
+                synchronized(q) { q.toList() }
+            }
+        return BackOfficeSnapshotState(
+            orderMeta = orderMetaById.values.toList(),
+            lastFilledTotals = HashMap(lastFilledTotalByOrderId),
+            positions = positions.values.map { it.toPosition() },
+            balances = listBalances(),
+            realizedPnl = listRealizedPnl(),
+            fillsByAccount = fills
+        )
+    }
+
+    fun restoreState(state: BackOfficeSnapshotState) {
+        orderMetaById.clear()
+        lastFilledTotalByOrderId.clear()
+        positions.clear()
+        balances.clear()
+        realizedPnl.clear()
+        fillsByAccount.clear()
+
+        state.orderMeta.forEach { meta -> orderMetaById[meta.orderId] = meta }
+        state.lastFilledTotals.forEach { (k, v) -> lastFilledTotalByOrderId[k] = v }
+        state.positions.forEach { pos ->
+            positions["${pos.accountId}::${pos.symbol}"] = MutablePosition(pos.accountId, pos.symbol, pos.netQty, pos.avgPrice)
+        }
+        state.balances.forEach { bal ->
+            balances["${bal.accountId}::${bal.currency}"] = bal.amount
+        }
+        state.realizedPnl.forEach { pnl ->
+            realizedPnl["${pnl.accountId}::${pnl.symbol}::${pnl.quoteCcy}"] = pnl.realizedPnl
+        }
+        state.fillsByAccount.forEach { (accountId, fills) ->
+            val q = ArrayDeque<FillRecord>(maxFills)
+            val tail = if (fills.size > maxFills) fills.takeLast(maxFills) else fills
+            tail.forEach { q.addLast(it) }
+            fillsByAccount[accountId] = q
+        }
+    }
+
     fun snapshotBalances(accountId: String): Map<String, Long> {
         return balances
             .filterKeys { it.startsWith("$accountId::") }
