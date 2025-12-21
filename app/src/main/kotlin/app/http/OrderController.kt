@@ -2,8 +2,11 @@ package app.http
 
 import app.engine.Router
 import app.integration.GatewayClient
+import app.integration.GatewayExecutionReport
 import app.integration.GatewayOrderRequest
 import app.integration.GatewayOrderSnapshot
+import app.integration.GatewaySseEvent
+import app.integration.GatewaySseListener
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpExchange
@@ -45,7 +48,7 @@ data class OrderRequest(
 class OrderController(
     private val router: Router,
     private val gatewayClient: GatewayClient
-) : HttpHandler {
+) : HttpHandler, GatewaySseListener {
     private val objectMapper = jacksonObjectMapper()
     private val orders = ConcurrentHashMap<String, Order>()
 
@@ -204,6 +207,93 @@ class OrderController(
             Instant.parse(raw).toEpochMilli()
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    override fun onGatewayEvent(event: GatewaySseEvent) {
+        when (event.event) {
+            "order_update", "order_snapshot" -> applyGatewaySnapshot(event.data)
+            "execution_report" -> applyGatewayExecution(event.data)
+        }
+    }
+
+    private fun applyGatewaySnapshot(raw: String) {
+        val snapshot =
+            try {
+                objectMapper.readValue<GatewayOrderSnapshot>(raw)
+            } catch (_: Throwable) {
+                null
+            } ?: return
+
+        val orderId = snapshot.orderId ?: return
+        val mapped = mapGatewayStatus(snapshot.status) ?: return
+        val existing = orders[orderId]
+
+        val submittedAt =
+            snapshot.acceptedAt?.let { parseInstantMillis(it) } ?: existing?.submittedAt ?: System.currentTimeMillis()
+        val updated =
+            if (existing == null) {
+                Order(
+                    id = orderId,
+                    symbol = snapshot.symbol ?: "UNKNOWN",
+                    side = parseSide(snapshot.side) ?: OrderSide.BUY,
+                    type = parseType(snapshot.type) ?: OrderType.MARKET,
+                    quantity = snapshot.qty?.toInt() ?: 0,
+                    price = snapshot.price?.toDouble(),
+                    status = mapped,
+                    submittedAt = submittedAt,
+                    filledAt = updatedFilledAtFromSnapshot(mapped, snapshot),
+                    executionTimeMs = null
+                )
+            } else {
+                existing.copy(
+                    status = mapped,
+                    price = existing.price ?: snapshot.price?.toDouble(),
+                    filledAt = updatedFilledAt(existing, mapped, snapshot)
+                )
+            }
+        orders[orderId] = updated
+    }
+
+    private fun applyGatewayExecution(raw: String) {
+        val report =
+            try {
+                objectMapper.readValue<GatewayExecutionReport>(raw)
+            } catch (_: Throwable) {
+                null
+            } ?: return
+        val orderId = report.orderId ?: return
+        val existing = orders[orderId] ?: return
+        val mapped = mapGatewayStatus(report.status) ?: return
+        val updated =
+            existing.copy(
+                status = mapped,
+                filledAt = if (mapped == OrderStatus.FILLED) System.currentTimeMillis() else existing.filledAt
+            )
+        orders[orderId] = updated
+    }
+
+    private fun updatedFilledAtFromSnapshot(status: OrderStatus, snapshot: GatewayOrderSnapshot): Long? {
+        if (status != OrderStatus.FILLED) return null
+        val ts = snapshot.lastUpdateAt ?: snapshot.acceptedAt
+        return ts?.let { parseInstantMillis(it) } ?: System.currentTimeMillis()
+    }
+
+    private fun parseSide(raw: String?): OrderSide? {
+        val normalized = raw?.uppercase() ?: return null
+        return when (normalized) {
+            "BUY" -> OrderSide.BUY
+            "SELL" -> OrderSide.SELL
+            else -> null
+        }
+    }
+
+    private fun parseType(raw: String?): OrderType? {
+        val normalized = raw?.uppercase() ?: return null
+        return when (normalized) {
+            "MARKET" -> OrderType.MARKET
+            "LIMIT" -> OrderType.LIMIT
+            else -> null
         }
     }
 

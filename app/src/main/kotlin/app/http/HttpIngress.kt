@@ -4,8 +4,10 @@ import app.engine.Engine
 import app.engine.Router
 import app.integration.BackOfficeClient
 import app.integration.GatewayClient
+import app.integration.GatewaySseClient
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import app.strategy.StrategyAutoTrader
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
@@ -27,6 +29,8 @@ class HttpIngress : AutoCloseable {
     private val handler: RequestHandler
     private val server: HttpServer
     private var router: Router? = null
+    private var gatewaySseClient: GatewaySseClient? = null
+    private var strategyAutoTrader: StrategyAutoTrader? = null
 
     constructor(engine: Engine, port: Int) {
         this.handler = EngineHandler(engine)
@@ -74,6 +78,18 @@ class HttpIngress : AutoCloseable {
                 val positionController = PositionController(backOfficeClient, marketDataController)
                 val webSocketController = WebSocketController(marketDataController)
 
+                val sseClient = GatewaySseClient()
+                sseClient.start(orderController)
+                gatewaySseClient = sseClient
+
+                val strategyEnabled =
+                    (System.getenv("STRATEGY_AUTO_ENABLE") ?: "0").let { it == "1" || it.equals("true", ignoreCase = true) }
+                if (strategyEnabled) {
+                    val trader = StrategyAutoTrader(marketDataController, gatewayClient)
+                    trader.start()
+                    strategyAutoTrader = trader
+                }
+
                 createContext("/api/market-data", marketDataController)
                 createContext("/api/orders", orderController)
                 createContext("/api/positions", positionController)
@@ -110,5 +126,13 @@ class HttpIngress : AutoCloseable {
 
     override fun close() {
         server.stop(0)
+        try {
+            gatewaySseClient?.close()
+        } catch (_: Throwable) {
+        }
+        try {
+            strategyAutoTrader?.close()
+        } catch (_: Throwable) {
+        }
     }
 }
