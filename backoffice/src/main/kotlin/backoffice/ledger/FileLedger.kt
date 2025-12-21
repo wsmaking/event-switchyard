@@ -16,9 +16,11 @@ class FileLedger(
 ) : AutoCloseable {
     private val lock = Any()
     private val writer: BufferedWriter
+    @Volatile private var lineCount: Long = 0
 
     init {
         path.parent?.let { Files.createDirectories(it) }
+        lineCount = if (Files.exists(path)) countLines(path) else 0
         writer =
             Files.newBufferedWriter(
                 path,
@@ -34,10 +36,15 @@ class FileLedger(
             writer.write(json)
             writer.newLine()
             writer.flush()
+            lineCount += 1
         }
     }
 
     fun replay(apply: (LedgerEntry) -> Unit): ReplayStats {
+        return replayFromLine(0, apply)
+    }
+
+    fun replayFromLine(startLine: Long, apply: (LedgerEntry) -> Unit): ReplayStats {
         if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0)
 
         var lines = 0L
@@ -47,6 +54,7 @@ class FileLedger(
             while (true) {
                 val line = reader.readLine() ?: break
                 lines++
+                if (lines <= startLine) continue
                 if (line.isBlank()) continue
                 val entry = parseLine(line)
                 if (entry == null) {
@@ -63,6 +71,8 @@ class FileLedger(
         }
         return ReplayStats(lines = lines, applied = applied, skipped = skipped)
     }
+
+    fun currentLineCount(): Long = lineCount
 
     fun readEntries(
         accountId: String,
@@ -94,6 +104,35 @@ class FileLedger(
         return bucket.toList()
     }
 
+    fun compactFromLine(startLine: Long, outputPath: Path): ReplayStats {
+        if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0)
+        var lines = 0L
+        var kept = 0L
+        var skipped = 0L
+        outputPath.parent?.let { Files.createDirectories(it) }
+        Files.newBufferedWriter(
+            outputPath,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE
+        ).use { writer ->
+            Files.newBufferedReader(path).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    lines++
+                    if (lines <= startLine) {
+                        skipped++
+                        continue
+                    }
+                    writer.write(line)
+                    writer.newLine()
+                    kept++
+                }
+            }
+        }
+        return ReplayStats(lines = lines, applied = kept, skipped = skipped)
+    }
+
     override fun close() {
         synchronized(lock) {
             try {
@@ -105,6 +144,16 @@ class FileLedger(
             } catch (_: Throwable) {
             }
         }
+    }
+
+    private fun countLines(path: Path): Long {
+        var count = 0L
+        Files.newBufferedReader(path).use { reader ->
+            while (reader.readLine() != null) {
+                count++
+            }
+        }
+        return count
     }
 
     private fun matchTime(at: Instant, since: Instant?, after: Instant?): Boolean {

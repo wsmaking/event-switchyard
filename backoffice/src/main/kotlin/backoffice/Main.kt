@@ -8,6 +8,8 @@ import backoffice.ledger.LedgerOrderAccepted
 import backoffice.ledger.LedgerReconciler
 import backoffice.metrics.BackOfficeStats
 import backoffice.auth.JwtAuth
+import backoffice.snapshot.BackOfficeSnapshotStore
+import backoffice.snapshot.BackOfficeSnapshotter
 import backoffice.store.InMemoryBackOfficeStore
 import backoffice.store.OrderMeta
 import java.nio.file.Path
@@ -15,37 +17,74 @@ import java.nio.file.Path
 fun main() {
     val port = (System.getenv("BACKOFFICE_PORT") ?: "8082").toInt()
     val ledgerPath = System.getenv("BACKOFFICE_LEDGER_PATH") ?: "var/backoffice/ledger.log"
+    val snapshotPath = System.getenv("BACKOFFICE_SNAPSHOT_PATH") ?: "var/backoffice/snapshot.json"
 
     val store = InMemoryBackOfficeStore()
     val ledgerFile = FileLedger(Path.of(ledgerPath))
     val stats = BackOfficeStats()
+    val snapshotStore = BackOfficeSnapshotStore(Path.of(snapshotPath))
+    val snapshot = snapshotStore.load()
+
     val replayStats =
-        ledgerFile.replay { entry ->
-            when (entry) {
-                is LedgerOrderAccepted -> {
-                    store.upsertOrderMeta(
-                        OrderMeta(
+        if (snapshot != null && snapshot.ledgerLines <= ledgerFile.currentLineCount()) {
+            store.restoreState(snapshot.state)
+            ledgerFile.replayFromLine(snapshot.ledgerLines) { entry ->
+                when (entry) {
+                    is LedgerOrderAccepted -> {
+                        store.upsertOrderMeta(
+                            OrderMeta(
+                                accountId = entry.accountId,
+                                orderId = entry.orderId,
+                                symbol = entry.symbol,
+                                side = entry.side
+                            )
+                        )
+                    }
+                    is LedgerFill -> {
+                        store.applyFill(
+                            at = entry.at,
                             accountId = entry.accountId,
                             orderId = entry.orderId,
                             symbol = entry.symbol,
-                            side = entry.side
+                            side = entry.side,
+                            filledQtyDelta = entry.filledQtyDelta,
+                            filledQtyTotal = entry.filledQtyTotal,
+                            price = entry.price,
+                            quoteCcy = entry.quoteCcy,
+                            quoteCashDelta = entry.quoteCashDelta,
+                            feeQuote = entry.feeQuote
                         )
-                    )
+                    }
                 }
-                is LedgerFill -> {
-                    store.applyFill(
-                        at = entry.at,
-                        accountId = entry.accountId,
-                        orderId = entry.orderId,
-                        symbol = entry.symbol,
-                        side = entry.side,
-                        filledQtyDelta = entry.filledQtyDelta,
-                        filledQtyTotal = entry.filledQtyTotal,
-                        price = entry.price,
-                        quoteCcy = entry.quoteCcy,
-                        quoteCashDelta = entry.quoteCashDelta,
-                        feeQuote = entry.feeQuote
-                    )
+            }
+        } else {
+            ledgerFile.replay { entry ->
+                when (entry) {
+                    is LedgerOrderAccepted -> {
+                        store.upsertOrderMeta(
+                            OrderMeta(
+                                accountId = entry.accountId,
+                                orderId = entry.orderId,
+                                symbol = entry.symbol,
+                                side = entry.side
+                            )
+                        )
+                    }
+                    is LedgerFill -> {
+                        store.applyFill(
+                            at = entry.at,
+                            accountId = entry.accountId,
+                            orderId = entry.orderId,
+                            symbol = entry.symbol,
+                            side = entry.side,
+                            filledQtyDelta = entry.filledQtyDelta,
+                            filledQtyTotal = entry.filledQtyTotal,
+                            price = entry.price,
+                            quoteCcy = entry.quoteCcy,
+                            quoteCashDelta = entry.quoteCashDelta,
+                            feeQuote = entry.feeQuote
+                        )
+                    }
                 }
             }
         }
@@ -57,6 +96,7 @@ fun main() {
     val reconciler = LedgerReconciler(ledger = ledgerFile, store = store)
     val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile, stats = stats)
     val jwtAuth = JwtAuth()
+    val snapshotter = BackOfficeSnapshotter(store = store, ledger = ledgerFile, snapshotStore = snapshotStore)
     val server =
         HttpBackOffice(
             port = port,
@@ -70,9 +110,11 @@ fun main() {
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
         consumer.close()
+        snapshotter.close()
         ledgerFile.close()
     })
 
     consumer.start()
+    snapshotter.start()
     server.start()
 }
