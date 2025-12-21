@@ -51,7 +51,12 @@ class AdminController(
             "FAST_PATH_ENABLE" to System.getenv("FAST_PATH_ENABLE").orEmpty(),
             "KAFKA_BRIDGE_ENABLE" to System.getenv("KAFKA_BRIDGE_ENABLE").orEmpty(),
             "FAST_PATH_SYMBOLS" to System.getenv("FAST_PATH_SYMBOLS").orEmpty(),
-            "OWNED_KEYS" to System.getenv("OWNED_KEYS").orEmpty()
+            "OWNED_KEYS" to System.getenv("OWNED_KEYS").orEmpty(),
+            "JWT_HS256_SECRET_SET" to (System.getenv("JWT_HS256_SECRET")?.isNotBlank() == true).toString(),
+            "GATEWAY_JWT_SET" to (System.getenv("GATEWAY_JWT")?.isNotBlank() == true).toString(),
+            "GATEWAY_JWT_FILE_SET" to (System.getenv("GATEWAY_JWT_FILE")?.isNotBlank() == true).toString(),
+            "BACKOFFICE_JWT_SET" to (System.getenv("BACKOFFICE_JWT")?.isNotBlank() == true).toString(),
+            "BACKOFFICE_JWT_FILE_SET" to (System.getenv("BACKOFFICE_JWT_FILE")?.isNotBlank() == true).toString()
         )
 
         val response = ConfigResponse(

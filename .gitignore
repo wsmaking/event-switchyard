@@ -49,5 +49,7 @@ symbols.txt
 e1
 var/results/
 var/logs/
+var/run/
+*.pid
+*.jwt
 .gradle-user-home/
-

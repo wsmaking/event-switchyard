@@ -2,6 +2,8 @@ package app.http
 
 import app.engine.Engine
 import app.engine.Router
+import app.integration.BackOfficeClient
+import app.integration.GatewayClient
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
@@ -66,8 +68,10 @@ class HttpIngress : AutoCloseable {
 
                 // Trading API endpoints (依存関係に注意)
                 val marketDataController = MarketDataController()
-                val orderController = OrderController(r, marketDataController)
-                val positionController = PositionController(orderController, marketDataController)
+                val gatewayClient = GatewayClient()
+                val backOfficeClient = BackOfficeClient()
+                val orderController = OrderController(r, gatewayClient)
+                val positionController = PositionController(backOfficeClient, marketDataController)
                 val webSocketController = WebSocketController(marketDataController)
 
                 createContext("/api/market-data", marketDataController)

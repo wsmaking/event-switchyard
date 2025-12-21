@@ -1,9 +1,11 @@
 package app.http
 
+import app.integration.BackOfficeClient
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import java.nio.charset.StandardCharsets
+import kotlin.math.abs
 
 data class Position(
     val symbol: String,
@@ -16,10 +18,10 @@ data class Position(
 
 /**
  * 保有銘柄API
- * OrderControllerの注文履歴から計算
+ * BackOfficeの台帳を参照して計算
  */
 class PositionController(
-    private val orderController: OrderController,
+    private val backOfficeClient: BackOfficeClient,
     private val marketDataController: MarketDataController
 ) : HttpHandler {
     private val objectMapper = jacksonObjectMapper()
@@ -54,42 +56,19 @@ class PositionController(
     }
 
     private fun calculatePositions(): List<Position> {
-        val orders = orderController.getAllOrders()
-
-        // 銘柄ごとにグループ化して保有数量・平均単価を計算
-        val positionMap = mutableMapOf<String, Pair<Int, Double>>() // symbol -> (quantity, totalCost)
-
-        for (order in orders) {
-            if (order.status != OrderStatus.FILLED) continue
-
-            val symbol = order.symbol
-            val (currentQty, currentCost) = positionMap.getOrDefault(symbol, 0 to 0.0)
-
-            // 約定価格（注文時に記録された価格を使用）
-            val executionPrice = order.price ?: marketDataController.getCurrentPrice(symbol)
-
-            when (order.side) {
-                OrderSide.BUY -> {
-                    positionMap[symbol] = (currentQty + order.quantity) to (currentCost + executionPrice * order.quantity)
-                }
-                OrderSide.SELL -> {
-                    positionMap[symbol] = (currentQty - order.quantity) to (currentCost - executionPrice * order.quantity)
-                }
-            }
-        }
-
-        // 数量が0以外のポジションのみ返す
-        return positionMap
-            .filter { (_, pair) -> pair.first > 0 }
-            .map { (symbol, pair) ->
-                val (qty, totalCost) = pair
-                val avgPrice = if (qty > 0) totalCost / qty else 0.0
-                val currentPrice = marketDataController.getCurrentPrice(symbol)
-                val unrealizedPnL = (currentPrice - avgPrice) * qty
-                val unrealizedPnLPercent = if (avgPrice > 0) (unrealizedPnL / totalCost) * 100 else 0.0
+        val positions = backOfficeClient.fetchPositions()
+        return positions
+            .filter { it.netQty != 0L }
+            .map { pos ->
+                val qty = pos.netQty.toInt()
+                val avgPrice = pos.avgPrice ?: 0.0
+                val currentPrice = marketDataController.getCurrentPrice(pos.symbol)
+                val unrealizedPnL = (currentPrice - avgPrice) * pos.netQty
+                val baseCost = avgPrice * abs(pos.netQty.toDouble())
+                val unrealizedPnLPercent = if (baseCost > 0.0) (unrealizedPnL / baseCost) * 100 else 0.0
 
                 Position(
-                    symbol = symbol,
+                    symbol = pos.symbol,
                     quantity = qty,
                     avgPrice = String.format("%.2f", avgPrice).toDouble(),
                     currentPrice = String.format("%.2f", currentPrice).toDouble(),
