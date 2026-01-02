@@ -2,9 +2,9 @@ package app.http
 
 import app.engine.Engine
 import app.engine.Router
-import app.integration.BackOfficeClient
-import app.integration.GatewayClient
-import app.integration.GatewaySseClient
+import app.clients.backoffice.BackOfficeClient
+import app.clients.gateway.GatewayClient
+import app.clients.gateway.GatewaySseClient
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import app.strategy.StrategyAutoTrader

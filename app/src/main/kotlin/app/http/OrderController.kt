@@ -1,12 +1,12 @@
 package app.http
 
 import app.engine.Router
-import app.integration.GatewayClient
-import app.integration.GatewayExecutionReport
-import app.integration.GatewayOrderRequest
-import app.integration.GatewayOrderSnapshot
-import app.integration.GatewaySseEvent
-import app.integration.GatewaySseListener
+import app.clients.gateway.GatewayClient
+import app.clients.gateway.GatewayExecutionReport
+import app.clients.gateway.GatewayOrderRequest
+import app.clients.gateway.GatewayOrderSnapshot
+import app.clients.gateway.GatewaySseEvent
+import app.clients.gateway.GatewaySseListener
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpExchange

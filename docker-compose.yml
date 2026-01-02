@@ -110,6 +110,17 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # topic-init が作る
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles: ["gateway"]
+    environment:
+      POSTGRES_DB: backoffice
+      POSTGRES_USER: backoffice
+      POSTGRES_PASSWORD: backoffice
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   topic-init:
     <<: *app
     depends_on: [kafka]
@@ -164,13 +175,15 @@ services:
   backoffice:
     <<: *app
     profiles: ["gateway"]
-    depends_on: [kafka, topic-init]
+    depends_on: [kafka, topic-init, postgres]
     command: ["java","-jar","backoffice-all.jar"]
-    ports:
-      - "8082:8082"
     environment:
       BACKOFFICE_PORT: "8082"
       BACKOFFICE_ENABLE: "1"
+      BACKOFFICE_DB_ENABLE: "1"
+      BACKOFFICE_DB_URL: "jdbc:postgresql://postgres:5432/backoffice"
+      BACKOFFICE_DB_USER: "backoffice"
+      BACKOFFICE_DB_PASSWORD: "backoffice"
       JWT_HS256_SECRET: "dev-secret-change-me"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TOPIC: "events"
@@ -223,3 +236,4 @@ services:
 volumes:
   prometheus-data:
   grafana-data:
+  postgres-data:

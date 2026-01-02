@@ -7,7 +7,7 @@ import backoffice.ledger.LedgerOrderAccepted
 import backoffice.metrics.BackOfficeStats
 import backoffice.model.BusEvent
 import backoffice.model.Side
-import backoffice.store.InMemoryBackOfficeStore
+import backoffice.store.BackOfficeStore
 import backoffice.store.OrderMeta
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 class BackOfficeConsumer(
-    private val store: InMemoryBackOfficeStore,
+    private val store: BackOfficeStore,
     private val ledger: FileLedger,
     private val stats: BackOfficeStats? = null,
     bootstrapServers: String = System.getenv("KAFKA_BOOTSTRAP_SERVERS") ?: "localhost:9092",

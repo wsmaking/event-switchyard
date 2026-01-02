@@ -1,6 +1,6 @@
 package app.http
 
-import app.integration.BackOfficeClient
+import app.clients.backoffice.BackOfficeClient
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler

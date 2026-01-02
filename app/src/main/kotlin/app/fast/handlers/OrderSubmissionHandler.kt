@@ -1,8 +1,8 @@
 package app.fast.handlers
 
 import app.events.OrderEvent
-import app.integration.GatewayClient
-import app.integration.GatewayOrderRequest
+import app.clients.gateway.GatewayClient
+import app.clients.gateway.GatewayOrderRequest
 import com.lmax.disruptor.EventHandler
 
 class OrderSubmissionHandler(

@@ -1,13 +1,13 @@
 package backoffice.ledger
 
 import backoffice.model.Side
-import backoffice.store.InMemoryBackOfficeStore
+import backoffice.store.BackOfficeStore
 import java.util.SortedMap
 import java.util.TreeMap
 
 class LedgerReconciler(
     private val ledger: FileLedger,
-    private val store: InMemoryBackOfficeStore
+    private val store: BackOfficeStore
 ) {
     data class ReconResult(
         val accountId: String,
