@@ -8,7 +8,7 @@ env_str="gha|JDK21|G1"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/harness_blackbox.sh --cmd 'echo test | sha256sum >/dev/null' [--case NAME] [--runs N] [--out PATH]
+Usage: scripts/tools/harness_blackbox.sh --cmd 'echo test | sha256sum >/dev/null' [--case NAME] [--runs N] [--out PATH]
 USAGE
   exit 1
 }

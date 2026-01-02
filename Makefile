@@ -87,7 +87,7 @@ health:
 # リアルタイムダッシュボード
 dashboard:
 	@echo "==> Starting Real-time Dashboard (Ctrl+C to exit)"
-	@./scripts/dashboard.sh
+	@./scripts/tools/dashboard.sh
 
 # Grafana起動 (Prometheus + Grafana)
 grafana:
@@ -131,11 +131,11 @@ compose-gateway-down:
 
 # BackOffice復旧チェック
 backoffice-recovery:
-	@scripts/backoffice_recovery_check.sh
+	@scripts/ops/backoffice_recovery_check.sh
 
 # Gateway→BackOffice E2E
 gateway-backoffice-e2e:
-	@scripts/gateway_backoffice_e2e.sh
+	@scripts/ops/gateway_backoffice_e2e.sh
 
 # ビルド
 build:

@@ -1144,13 +1144,13 @@ curl http://localhost:8080/stats | jq '.fast_path_process_p99_us'
 
 ```bash
 # 1分間、50 req/s
-TEST_DURATION_MINUTES=1 REQUEST_RATE_PER_SEC=50 ./scripts/stability_test.sh
+TEST_DURATION_MINUTES=1 REQUEST_RATE_PER_SEC=50 ./scripts/tools/stability_test.sh
 
 # 60分間、100 req/s (デフォルト)
-./scripts/stability_test.sh
+./scripts/tools/stability_test.sh
 
 # カスタム設定: 120分間、200 req/s
-TEST_DURATION_MINUTES=120 REQUEST_RATE_PER_SEC=200 ./scripts/stability_test.sh
+TEST_DURATION_MINUTES=120 REQUEST_RATE_PER_SEC=200 ./scripts/tools/stability_test.sh
 ```
 
 ---
