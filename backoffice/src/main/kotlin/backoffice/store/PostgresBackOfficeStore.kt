@@ -1,11 +1,21 @@
 package backoffice.store
 
+import backoffice.jooq.Tables.BALANCES
+import backoffice.jooq.Tables.FILLS
+import backoffice.jooq.Tables.ORDER_FILLED_TOTAL
+import backoffice.jooq.Tables.ORDER_META
+import backoffice.jooq.Tables.POSITIONS
+import backoffice.jooq.Tables.REALIZED_PNL
 import backoffice.model.Side
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
-import java.sql.Connection
-import java.sql.Timestamp
+import org.jooq.DSLContext
+import org.jooq.Record
+import org.jooq.SQLDialect
+import org.jooq.impl.DSL
 import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 
 class PostgresBackOfficeStore(
     jdbcUrl: String = System.getenv("BACKOFFICE_DB_URL") ?: "jdbc:postgresql://localhost:5432/backoffice",
@@ -31,44 +41,31 @@ class PostgresBackOfficeStore(
     }
 
     override fun upsertOrderMeta(meta: OrderMeta) {
-        dataSource.connection.use { conn ->
-            upsertOrderMeta(conn, meta)
+        withDsl { ctx ->
+            upsertOrderMeta(ctx, meta)
         }
     }
 
     override fun findOrderMeta(orderId: String): OrderMeta? {
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                "SELECT account_id, symbol, side FROM order_meta WHERE order_id = ?"
-            ).use { ps ->
-                ps.setString(1, orderId)
-                ps.executeQuery().use { rs ->
-                    if (!rs.next()) return null
-                    val accountId = rs.getString("account_id")
-                    val symbol = rs.getString("symbol")
-                    val side = Side.valueOf(rs.getString("side"))
-                    return OrderMeta(accountId = accountId, orderId = orderId, symbol = symbol, side = side)
-                }
-            }
+        return withDsl { ctx ->
+            val record =
+                ctx.selectFrom(ORDER_META)
+                    .where(ORDER_META.ORDER_ID.eq(orderId))
+                    .fetchOne()
+                    ?: return@withDsl null
+            mapOrderMeta(record)
         }
     }
 
     override fun lastFilledTotal(orderId: String): Long {
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                "SELECT filled_qty_total FROM order_filled_total WHERE order_id = ?"
-            ).use { ps ->
-                ps.setString(1, orderId)
-                ps.executeQuery().use { rs ->
-                    return if (rs.next()) rs.getLong("filled_qty_total") else 0L
-                }
-            }
+        return withDsl { ctx ->
+            selectLastFilledTotal(ctx, orderId, forUpdate = false)
         }
     }
 
     override fun setLastFilledTotal(orderId: String, filledQtyTotal: Long) {
-        dataSource.connection.use { conn ->
-            upsertLastFilledTotal(conn, orderId, filledQtyTotal)
+        withDsl { ctx ->
+            upsertLastFilledTotal(ctx, orderId, filledQtyTotal)
         }
     }
 
@@ -88,25 +85,26 @@ class PostgresBackOfficeStore(
         if (filledQtyDelta <= 0L) return
         dataSource.connection.use { conn ->
             conn.autoCommit = false
+            val ctx = DSL.using(conn, SQLDialect.POSTGRES)
             try {
-                val lastTotal = selectLastFilledTotal(conn, orderId, forUpdate = true)
+                val lastTotal = selectLastFilledTotal(ctx, orderId, forUpdate = true)
                 if (filledQtyTotal <= lastTotal) {
                     conn.rollback()
                     return
                 }
 
                 val signedQtyDelta = if (side == Side.BUY) filledQtyDelta else -filledQtyDelta
-                val currentPos = selectPosition(conn, accountId, symbol, forUpdate = true)
+                val currentPos = selectPosition(ctx, accountId, symbol, forUpdate = true)
                 val update = PositionMath.applyDelta(currentPos, signedQtyDelta, price?.toDouble())
 
-                upsertPosition(conn, accountId, symbol, update.netQty, update.avgPrice)
+                upsertPosition(ctx, accountId, symbol, update.netQty, update.avgPrice)
                 if (update.realizedDelta != 0L) {
-                    mergeRealizedPnl(conn, accountId, symbol, quoteCcy, update.realizedDelta)
+                    mergeRealizedPnl(ctx, accountId, symbol, quoteCcy, update.realizedDelta)
                 }
-                mergeBalance(conn, accountId, quoteCcy, quoteCashDelta)
-                upsertLastFilledTotal(conn, orderId, filledQtyTotal)
+                mergeBalance(ctx, accountId, quoteCcy, quoteCashDelta)
+                upsertLastFilledTotal(ctx, orderId, filledQtyTotal)
                 insertFill(
-                    conn = conn,
+                    ctx = ctx,
                     at = at,
                     accountId = accountId,
                     orderId = orderId,
@@ -130,250 +128,158 @@ class PostgresBackOfficeStore(
     }
 
     override fun listPositions(accountId: String?): List<Position> {
-        val rows = ArrayList<Position>()
-        dataSource.connection.use { conn ->
-            val (sql, binder) =
-                if (accountId == null) {
-                    "SELECT account_id, symbol, net_qty, avg_price FROM positions ORDER BY account_id, symbol" to null
-                } else {
-                    "SELECT account_id, symbol, net_qty, avg_price FROM positions WHERE account_id = ? ORDER BY account_id, symbol" to accountId
+        return withDsl { ctx ->
+            val query = ctx.selectFrom(POSITIONS)
+            val filtered = if (accountId == null) query else query.where(POSITIONS.ACCOUNT_ID.eq(accountId))
+            filtered
+                .orderBy(POSITIONS.ACCOUNT_ID, POSITIONS.SYMBOL)
+                .fetch()
+                .map { record ->
+                    Position(
+                        accountId = record.get(POSITIONS.ACCOUNT_ID),
+                        symbol = record.get(POSITIONS.SYMBOL),
+                        netQty = record.get(POSITIONS.NET_QTY),
+                        avgPrice = record.get(POSITIONS.AVG_PRICE)
+                    )
                 }
-            conn.prepareStatement(sql).use { ps ->
-                if (binder != null) ps.setString(1, binder)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        rows.add(
-                            Position(
-                                accountId = rs.getString("account_id"),
-                                symbol = rs.getString("symbol"),
-                                netQty = rs.getLong("net_qty"),
-                                avgPrice = rs.getDouble("avg_price").let { if (rs.wasNull()) null else it }
-                            )
-                        )
-                    }
-                }
-            }
         }
-        return rows
     }
 
     override fun listBalances(accountId: String?): List<Balance> {
-        val rows = ArrayList<Balance>()
-        dataSource.connection.use { conn ->
-            val (sql, binder) =
-                if (accountId == null) {
-                    "SELECT account_id, currency, amount FROM balances ORDER BY account_id, currency" to null
-                } else {
-                    "SELECT account_id, currency, amount FROM balances WHERE account_id = ? ORDER BY account_id, currency" to accountId
+        return withDsl { ctx ->
+            val query = ctx.selectFrom(BALANCES)
+            val filtered = if (accountId == null) query else query.where(BALANCES.ACCOUNT_ID.eq(accountId))
+            filtered
+                .orderBy(BALANCES.ACCOUNT_ID, BALANCES.CURRENCY)
+                .fetch()
+                .map { record ->
+                    Balance(
+                        accountId = record.get(BALANCES.ACCOUNT_ID),
+                        currency = record.get(BALANCES.CURRENCY),
+                        amount = record.get(BALANCES.AMOUNT)
+                    )
                 }
-            conn.prepareStatement(sql).use { ps ->
-                if (binder != null) ps.setString(1, binder)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        rows.add(
-                            Balance(
-                                accountId = rs.getString("account_id"),
-                                currency = rs.getString("currency"),
-                                amount = rs.getLong("amount")
-                            )
-                        )
-                    }
-                }
-            }
         }
-        return rows
     }
 
     override fun listFills(accountId: String): List<FillRecord> {
-        val rows = ArrayList<FillRecord>()
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                """
-                SELECT at, account_id, order_id, symbol, side, filled_qty_delta, filled_qty_total, price,
-                       quote_ccy, quote_cash_delta, fee_quote
-                FROM fills
-                WHERE account_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """.trimIndent()
-            ).use { ps ->
-                ps.setString(1, accountId)
-                ps.setInt(2, maxFills)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        rows.add(
-                            FillRecord(
-                                at = rs.getTimestamp("at").toInstant(),
-                                accountId = rs.getString("account_id"),
-                                orderId = rs.getString("order_id"),
-                                symbol = rs.getString("symbol"),
-                                side = Side.valueOf(rs.getString("side")),
-                                filledQtyDelta = rs.getLong("filled_qty_delta"),
-                                filledQtyTotal = rs.getLong("filled_qty_total"),
-                                price = rs.getLong("price").let { if (rs.wasNull()) null else it },
-                                quoteCcy = rs.getString("quote_ccy"),
-                                quoteCashDelta = rs.getLong("quote_cash_delta"),
-                                feeQuote = rs.getLong("fee_quote")
-                            )
+        return withDsl { ctx ->
+            val rows =
+                ctx.selectFrom(FILLS)
+                    .where(FILLS.ACCOUNT_ID.eq(accountId))
+                    .orderBy(FILLS.ID.desc())
+                    .limit(maxFills)
+                    .fetch()
+                    .map { record ->
+                        FillRecord(
+                            at = record.get(FILLS.AT).toInstant(),
+                            accountId = record.get(FILLS.ACCOUNT_ID),
+                            orderId = record.get(FILLS.ORDER_ID),
+                            symbol = record.get(FILLS.SYMBOL),
+                            side = Side.valueOf(record.get(FILLS.SIDE)),
+                            filledQtyDelta = record.get(FILLS.FILLED_QTY_DELTA),
+                            filledQtyTotal = record.get(FILLS.FILLED_QTY_TOTAL),
+                            price = record.get(FILLS.PRICE),
+                            quoteCcy = record.get(FILLS.QUOTE_CCY),
+                            quoteCashDelta = record.get(FILLS.QUOTE_CASH_DELTA),
+                            feeQuote = record.get(FILLS.FEE_QUOTE)
                         )
                     }
-                }
-            }
+                    .toMutableList()
+            rows.reverse()
+            rows
         }
-        rows.reverse()
-        return rows
     }
 
     override fun listRealizedPnl(accountId: String?): List<RealizedPnl> {
-        val rows = ArrayList<RealizedPnl>()
-        dataSource.connection.use { conn ->
-            val (sql, binder) =
-                if (accountId == null) {
-                    """
-                    SELECT account_id, symbol, quote_ccy, realized_pnl
-                    FROM realized_pnl
-                    ORDER BY account_id, symbol, quote_ccy
-                    """.trimIndent() to null
-                } else {
-                    """
-                    SELECT account_id, symbol, quote_ccy, realized_pnl
-                    FROM realized_pnl
-                    WHERE account_id = ?
-                    ORDER BY account_id, symbol, quote_ccy
-                    """.trimIndent() to accountId
+        return withDsl { ctx ->
+            val query = ctx.selectFrom(REALIZED_PNL)
+            val filtered = if (accountId == null) query else query.where(REALIZED_PNL.ACCOUNT_ID.eq(accountId))
+            filtered
+                .orderBy(REALIZED_PNL.ACCOUNT_ID, REALIZED_PNL.SYMBOL, REALIZED_PNL.QUOTE_CCY)
+                .fetch()
+                .map { record ->
+                    RealizedPnl(
+                        accountId = record.get(REALIZED_PNL.ACCOUNT_ID),
+                        symbol = record.get(REALIZED_PNL.SYMBOL),
+                        quoteCcy = record.get(REALIZED_PNL.QUOTE_CCY),
+                        realizedPnl = record.get(REALIZED_PNL.REALIZED_PNL_)
+                    )
                 }
-            conn.prepareStatement(sql).use { ps ->
-                if (binder != null) ps.setString(1, binder)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        rows.add(
-                            RealizedPnl(
-                                accountId = rs.getString("account_id"),
-                                symbol = rs.getString("symbol"),
-                                quoteCcy = rs.getString("quote_ccy"),
-                                realizedPnl = rs.getLong("realized_pnl")
-                            )
-                        )
-                    }
-                }
-            }
         }
-        return rows
     }
 
     override fun snapshotState(): BackOfficeSnapshotState {
-        val orderMeta = ArrayList<OrderMeta>()
-        val lastFilledTotals = HashMap<String, Long>()
-        dataSource.connection.use { conn ->
-            conn.prepareStatement("SELECT order_id, account_id, symbol, side FROM order_meta").use { ps ->
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        orderMeta.add(
-                            OrderMeta(
-                                accountId = rs.getString("account_id"),
-                                orderId = rs.getString("order_id"),
-                                symbol = rs.getString("symbol"),
-                                side = Side.valueOf(rs.getString("side"))
-                            )
+        return withDsl { ctx ->
+            val orderMeta =
+                ctx.selectFrom(ORDER_META)
+                    .fetch()
+                    .map { record -> mapOrderMeta(record) }
+            val lastFilledTotals =
+                ctx.selectFrom(ORDER_FILLED_TOTAL)
+                    .fetch()
+                    .associate { record ->
+                        record.get(ORDER_FILLED_TOTAL.ORDER_ID) to record.get(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL)
+                    }
+            val fillsByAccount =
+                ctx.selectFrom(FILLS)
+                    .orderBy(FILLS.ID.asc())
+                    .fetch()
+                    .groupBy({ record -> record.get(FILLS.ACCOUNT_ID) }) { record ->
+                        FillRecord(
+                            at = record.get(FILLS.AT).toInstant(),
+                            accountId = record.get(FILLS.ACCOUNT_ID),
+                            orderId = record.get(FILLS.ORDER_ID),
+                            symbol = record.get(FILLS.SYMBOL),
+                            side = Side.valueOf(record.get(FILLS.SIDE)),
+                            filledQtyDelta = record.get(FILLS.FILLED_QTY_DELTA),
+                            filledQtyTotal = record.get(FILLS.FILLED_QTY_TOTAL),
+                            price = record.get(FILLS.PRICE),
+                            quoteCcy = record.get(FILLS.QUOTE_CCY),
+                            quoteCashDelta = record.get(FILLS.QUOTE_CASH_DELTA),
+                            feeQuote = record.get(FILLS.FEE_QUOTE)
                         )
                     }
-                }
-            }
-            conn.prepareStatement("SELECT order_id, filled_qty_total FROM order_filled_total").use { ps ->
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        lastFilledTotals[rs.getString("order_id")] = rs.getLong("filled_qty_total")
-                    }
-                }
-            }
+            BackOfficeSnapshotState(
+                orderMeta = orderMeta,
+                lastFilledTotals = lastFilledTotals,
+                positions = listPositions(null),
+                balances = listBalances(null),
+                realizedPnl = listRealizedPnl(null),
+                fillsByAccount = fillsByAccount
+            )
         }
-
-        val fillsByAccount = HashMap<String, List<FillRecord>>()
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                """
-                SELECT at, account_id, order_id, symbol, side, filled_qty_delta, filled_qty_total, price,
-                       quote_ccy, quote_cash_delta, fee_quote
-                FROM fills
-                ORDER BY id ASC
-                """.trimIndent()
-            ).use { ps ->
-                ps.executeQuery().use { rs ->
-                    val temp = HashMap<String, MutableList<FillRecord>>()
-                    while (rs.next()) {
-                        val record =
-                            FillRecord(
-                                at = rs.getTimestamp("at").toInstant(),
-                                accountId = rs.getString("account_id"),
-                                orderId = rs.getString("order_id"),
-                                symbol = rs.getString("symbol"),
-                                side = Side.valueOf(rs.getString("side")),
-                                filledQtyDelta = rs.getLong("filled_qty_delta"),
-                                filledQtyTotal = rs.getLong("filled_qty_total"),
-                                price = rs.getLong("price").let { if (rs.wasNull()) null else it },
-                                quoteCcy = rs.getString("quote_ccy"),
-                                quoteCashDelta = rs.getLong("quote_cash_delta"),
-                                feeQuote = rs.getLong("fee_quote")
-                            )
-                        temp.computeIfAbsent(record.accountId) { ArrayList() }.add(record)
-                    }
-                    for ((accountId, records) in temp) {
-                        fillsByAccount[accountId] = records
-                    }
-                }
-            }
-        }
-
-        return BackOfficeSnapshotState(
-            orderMeta = orderMeta,
-            lastFilledTotals = lastFilledTotals,
-            positions = listPositions(),
-            balances = listBalances(),
-            realizedPnl = listRealizedPnl(),
-            fillsByAccount = fillsByAccount
-        )
     }
 
     override fun restoreState(state: BackOfficeSnapshotState) {
         dataSource.connection.use { conn ->
             conn.autoCommit = false
+            val ctx = DSL.using(conn, SQLDialect.POSTGRES)
             try {
-                conn.prepareStatement("TRUNCATE fills, positions, balances, realized_pnl, order_filled_total, order_meta").use { ps ->
-                    ps.executeUpdate()
-                }
+                ctx.truncate(FILLS, POSITIONS, BALANCES, REALIZED_PNL, ORDER_FILLED_TOTAL, ORDER_META).execute()
 
-                for (meta in state.orderMeta) {
-                    upsertOrderMeta(conn, meta)
+                state.orderMeta.forEach { meta -> upsertOrderMeta(ctx, meta) }
+                state.lastFilledTotals.forEach { (orderId, total) -> upsertLastFilledTotal(ctx, orderId, total) }
+                state.positions.forEach { pos -> upsertPosition(ctx, pos.accountId, pos.symbol, pos.netQty, pos.avgPrice) }
+                state.balances.forEach { bal -> mergeBalance(ctx, bal.accountId, bal.currency, bal.amount) }
+                state.realizedPnl.forEach { pnl ->
+                    mergeRealizedPnl(ctx, pnl.accountId, pnl.symbol, pnl.quoteCcy, pnl.realizedPnl)
                 }
-                for ((orderId, total) in state.lastFilledTotals.entries) {
-                    upsertLastFilledTotal(conn, orderId, total)
-                }
-                for (pos in state.positions) {
-                    upsertPosition(conn, pos.accountId, pos.symbol, pos.netQty, pos.avgPrice)
-                }
-                for (bal in state.balances) {
-                    mergeBalance(conn, bal.accountId, bal.currency, bal.amount)
-                }
-                for (pnl in state.realizedPnl) {
-                    mergeRealizedPnl(conn, pnl.accountId, pnl.symbol, pnl.quoteCcy, pnl.realizedPnl)
-                }
-                for ((_, records) in state.fillsByAccount) {
-                    for (record in records) {
-                        insertFill(
-                            conn = conn,
-                            at = record.at,
-                            accountId = record.accountId,
-                            orderId = record.orderId,
-                            symbol = record.symbol,
-                            side = record.side,
-                            filledQtyDelta = record.filledQtyDelta,
-                            filledQtyTotal = record.filledQtyTotal,
-                            price = record.price,
-                            quoteCcy = record.quoteCcy,
-                            quoteCashDelta = record.quoteCashDelta,
-                            feeQuote = record.feeQuote
-                        )
-                    }
+                state.fillsByAccount.values.flatten().forEach { record ->
+                    insertFill(
+                        ctx = ctx,
+                        at = record.at,
+                        accountId = record.accountId,
+                        orderId = record.orderId,
+                        symbol = record.symbol,
+                        side = record.side,
+                        filledQtyDelta = record.filledQtyDelta,
+                        filledQtyTotal = record.filledQtyTotal,
+                        price = record.price,
+                        quoteCcy = record.quoteCcy,
+                        quoteCashDelta = record.quoteCashDelta,
+                        feeQuote = record.feeQuote
+                    )
                 }
                 conn.commit()
             } catch (ex: Throwable) {
@@ -386,167 +292,140 @@ class PostgresBackOfficeStore(
     }
 
     override fun snapshotBalances(accountId: String): Map<String, Long> {
-        val values = HashMap<String, Long>()
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                "SELECT currency, amount FROM balances WHERE account_id = ?"
-            ).use { ps ->
-                ps.setString(1, accountId)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        values[rs.getString("currency")] = rs.getLong("amount")
-                    }
+        return withDsl { ctx ->
+            ctx.select(BALANCES.CURRENCY, BALANCES.AMOUNT)
+                .from(BALANCES)
+                .where(BALANCES.ACCOUNT_ID.eq(accountId))
+                .fetch()
+                .associate { record ->
+                    record.get(BALANCES.CURRENCY) to record.get(BALANCES.AMOUNT)
                 }
-            }
         }
-        return values
     }
 
     override fun snapshotPositions(accountId: String): Map<String, Long> {
-        val values = HashMap<String, Long>()
-        dataSource.connection.use { conn ->
-            conn.prepareStatement(
-                "SELECT symbol, net_qty FROM positions WHERE account_id = ?"
-            ).use { ps ->
-                ps.setString(1, accountId)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        values[rs.getString("symbol")] = rs.getLong("net_qty")
-                    }
+        return withDsl { ctx ->
+            ctx.select(POSITIONS.SYMBOL, POSITIONS.NET_QTY)
+                .from(POSITIONS)
+                .where(POSITIONS.ACCOUNT_ID.eq(accountId))
+                .fetch()
+                .associate { record ->
+                    record.get(POSITIONS.SYMBOL) to record.get(POSITIONS.NET_QTY)
                 }
-            }
         }
-        return values
     }
 
     override fun close() {
         dataSource.close()
     }
 
-    private fun selectLastFilledTotal(conn: Connection, orderId: String, forUpdate: Boolean): Long {
-        val sql =
-            if (forUpdate) {
-                "SELECT filled_qty_total FROM order_filled_total WHERE order_id = ? FOR UPDATE"
-            } else {
-                "SELECT filled_qty_total FROM order_filled_total WHERE order_id = ?"
-            }
-        conn.prepareStatement(sql).use { ps ->
-            ps.setString(1, orderId)
-            ps.executeQuery().use { rs ->
-                return if (rs.next()) rs.getLong("filled_qty_total") else 0L
-            }
+    private fun <T> withDsl(block: (DSLContext) -> T): T {
+        dataSource.connection.use { conn ->
+            val ctx = DSL.using(conn, SQLDialect.POSTGRES)
+            return block(ctx)
         }
     }
 
-    private fun upsertOrderMeta(conn: Connection, meta: OrderMeta) {
-        conn.prepareStatement(
-            """
-            INSERT INTO order_meta (order_id, account_id, symbol, side)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (order_id) DO UPDATE
-            SET account_id = EXCLUDED.account_id,
-                symbol = EXCLUDED.symbol,
-                side = EXCLUDED.side
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, meta.orderId)
-            ps.setString(2, meta.accountId)
-            ps.setString(3, meta.symbol)
-            ps.setString(4, meta.side.name)
-            ps.executeUpdate()
-        }
+    private fun mapOrderMeta(record: Record): OrderMeta {
+        return OrderMeta(
+            accountId = record.get(ORDER_META.ACCOUNT_ID),
+            orderId = record.get(ORDER_META.ORDER_ID),
+            symbol = record.get(ORDER_META.SYMBOL),
+            side = Side.valueOf(record.get(ORDER_META.SIDE))
+        )
     }
 
-    private fun upsertLastFilledTotal(conn: Connection, orderId: String, filledQtyTotal: Long) {
-        conn.prepareStatement(
-            """
-            INSERT INTO order_filled_total (order_id, filled_qty_total)
-            VALUES (?, ?)
-            ON CONFLICT (order_id) DO UPDATE
-            SET filled_qty_total = GREATEST(order_filled_total.filled_qty_total, EXCLUDED.filled_qty_total)
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, orderId)
-            ps.setLong(2, filledQtyTotal)
-            ps.executeUpdate()
-        }
+    private fun selectLastFilledTotal(ctx: DSLContext, orderId: String, forUpdate: Boolean): Long {
+        val query =
+            ctx.select(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL)
+                .from(ORDER_FILLED_TOTAL)
+                .where(ORDER_FILLED_TOTAL.ORDER_ID.eq(orderId))
+        val record = if (forUpdate) query.forUpdate().fetchOne() else query.fetchOne()
+        return record?.get(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL) ?: 0L
     }
 
-    private fun selectPosition(conn: Connection, accountId: String, symbol: String, forUpdate: Boolean): PositionState {
-        val sql =
-            if (forUpdate) {
-                "SELECT net_qty, avg_price FROM positions WHERE account_id = ? AND symbol = ? FOR UPDATE"
-            } else {
-                "SELECT net_qty, avg_price FROM positions WHERE account_id = ? AND symbol = ?"
-            }
-        conn.prepareStatement(sql).use { ps ->
-            ps.setString(1, accountId)
-            ps.setString(2, symbol)
-            ps.executeQuery().use { rs ->
-                if (!rs.next()) return PositionState(0, null)
-                val avg = rs.getDouble("avg_price").let { if (rs.wasNull()) null else it }
-                return PositionState(rs.getLong("net_qty"), avg)
-            }
-        }
+    private fun upsertOrderMeta(ctx: DSLContext, meta: OrderMeta) {
+        ctx.insertInto(ORDER_META)
+            .set(ORDER_META.ORDER_ID, meta.orderId)
+            .set(ORDER_META.ACCOUNT_ID, meta.accountId)
+            .set(ORDER_META.SYMBOL, meta.symbol)
+            .set(ORDER_META.SIDE, meta.side.name)
+            .onConflict(ORDER_META.ORDER_ID)
+            .doUpdate()
+            .set(ORDER_META.ACCOUNT_ID, meta.accountId)
+            .set(ORDER_META.SYMBOL, meta.symbol)
+            .set(ORDER_META.SIDE, meta.side.name)
+            .execute()
     }
 
-    private fun upsertPosition(conn: Connection, accountId: String, symbol: String, netQty: Long, avgPrice: Double?) {
-        conn.prepareStatement(
-            """
-            INSERT INTO positions (account_id, symbol, net_qty, avg_price)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (account_id, symbol) DO UPDATE
-            SET net_qty = EXCLUDED.net_qty,
-                avg_price = EXCLUDED.avg_price
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, accountId)
-            ps.setString(2, symbol)
-            ps.setLong(3, netQty)
-            if (avgPrice == null) {
-                ps.setNull(4, java.sql.Types.DOUBLE)
-            } else {
-                ps.setDouble(4, avgPrice)
-            }
-            ps.executeUpdate()
-        }
+    private fun upsertLastFilledTotal(ctx: DSLContext, orderId: String, filledQtyTotal: Long) {
+        ctx.insertInto(ORDER_FILLED_TOTAL)
+            .set(ORDER_FILLED_TOTAL.ORDER_ID, orderId)
+            .set(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL, filledQtyTotal)
+            .onConflict(ORDER_FILLED_TOTAL.ORDER_ID)
+            .doUpdate()
+            .set(
+                ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL,
+                DSL.greatest(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL, DSL.excluded(ORDER_FILLED_TOTAL.FILLED_QTY_TOTAL))
+            )
+            .execute()
     }
 
-    private fun mergeBalance(conn: Connection, accountId: String, currency: String, delta: Long) {
-        conn.prepareStatement(
-            """
-            INSERT INTO balances (account_id, currency, amount)
-            VALUES (?, ?, ?)
-            ON CONFLICT (account_id, currency) DO UPDATE
-            SET amount = balances.amount + EXCLUDED.amount
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, accountId)
-            ps.setString(2, currency)
-            ps.setLong(3, delta)
-            ps.executeUpdate()
-        }
+    private fun selectPosition(ctx: DSLContext, accountId: String, symbol: String, forUpdate: Boolean): PositionState {
+        val query =
+            ctx.select(POSITIONS.NET_QTY, POSITIONS.AVG_PRICE)
+                .from(POSITIONS)
+                .where(POSITIONS.ACCOUNT_ID.eq(accountId))
+                .and(POSITIONS.SYMBOL.eq(symbol))
+        val record = if (forUpdate) query.forUpdate().fetchOne() else query.fetchOne()
+        if (record == null) return PositionState(0L, null)
+        return PositionState(
+            netQty = record.get(POSITIONS.NET_QTY),
+            avgPrice = record.get(POSITIONS.AVG_PRICE)
+        )
     }
 
-    private fun mergeRealizedPnl(conn: Connection, accountId: String, symbol: String, quoteCcy: String, delta: Long) {
-        conn.prepareStatement(
-            """
-            INSERT INTO realized_pnl (account_id, symbol, quote_ccy, realized_pnl)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (account_id, symbol, quote_ccy) DO UPDATE
-            SET realized_pnl = realized_pnl.realized_pnl + EXCLUDED.realized_pnl
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, accountId)
-            ps.setString(2, symbol)
-            ps.setString(3, quoteCcy)
-            ps.setLong(4, delta)
-            ps.executeUpdate()
-        }
+    private fun upsertPosition(ctx: DSLContext, accountId: String, symbol: String, netQty: Long, avgPrice: Double?) {
+        ctx.insertInto(POSITIONS)
+            .set(POSITIONS.ACCOUNT_ID, accountId)
+            .set(POSITIONS.SYMBOL, symbol)
+            .set(POSITIONS.NET_QTY, netQty)
+            .set(POSITIONS.AVG_PRICE, avgPrice)
+            .onConflict(POSITIONS.ACCOUNT_ID, POSITIONS.SYMBOL)
+            .doUpdate()
+            .set(POSITIONS.NET_QTY, netQty)
+            .set(POSITIONS.AVG_PRICE, avgPrice)
+            .execute()
+    }
+
+    private fun mergeBalance(ctx: DSLContext, accountId: String, currency: String, delta: Long) {
+        ctx.insertInto(BALANCES)
+            .set(BALANCES.ACCOUNT_ID, accountId)
+            .set(BALANCES.CURRENCY, currency)
+            .set(BALANCES.AMOUNT, delta)
+            .onConflict(BALANCES.ACCOUNT_ID, BALANCES.CURRENCY)
+            .doUpdate()
+            .set(BALANCES.AMOUNT, BALANCES.AMOUNT.add(DSL.excluded(BALANCES.AMOUNT)))
+            .execute()
+    }
+
+    private fun mergeRealizedPnl(ctx: DSLContext, accountId: String, symbol: String, quoteCcy: String, delta: Long) {
+        ctx.insertInto(REALIZED_PNL)
+            .set(REALIZED_PNL.ACCOUNT_ID, accountId)
+            .set(REALIZED_PNL.SYMBOL, symbol)
+            .set(REALIZED_PNL.QUOTE_CCY, quoteCcy)
+            .set(REALIZED_PNL.REALIZED_PNL_, delta)
+            .onConflict(REALIZED_PNL.ACCOUNT_ID, REALIZED_PNL.SYMBOL, REALIZED_PNL.QUOTE_CCY)
+            .doUpdate()
+            .set(
+                REALIZED_PNL.REALIZED_PNL_,
+                REALIZED_PNL.REALIZED_PNL_.add(DSL.excluded(REALIZED_PNL.REALIZED_PNL_))
+            )
+            .execute()
     }
 
     private fun insertFill(
-        conn: Connection,
+        ctx: DSLContext,
         at: Instant,
         accountId: String,
         orderId: String,
@@ -559,32 +438,19 @@ class PostgresBackOfficeStore(
         quoteCashDelta: Long,
         feeQuote: Long
     ) {
-        conn.prepareStatement(
-            """
-            INSERT INTO fills (
-                at, account_id, order_id, symbol, side, filled_qty_delta, filled_qty_total, price,
-                quote_ccy, quote_cash_delta, fee_quote
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """.trimIndent()
-        ).use { ps ->
-            ps.setTimestamp(1, Timestamp.from(at))
-            ps.setString(2, accountId)
-            ps.setString(3, orderId)
-            ps.setString(4, symbol)
-            ps.setString(5, side.name)
-            ps.setLong(6, filledQtyDelta)
-            ps.setLong(7, filledQtyTotal)
-            if (price == null) {
-                ps.setNull(8, java.sql.Types.BIGINT)
-            } else {
-                ps.setLong(8, price)
-            }
-            ps.setString(9, quoteCcy)
-            ps.setLong(10, quoteCashDelta)
-            ps.setLong(11, feeQuote)
-            ps.executeUpdate()
-        }
+        ctx.insertInto(FILLS)
+            .set(FILLS.AT, OffsetDateTime.ofInstant(at, ZoneOffset.UTC))
+            .set(FILLS.ACCOUNT_ID, accountId)
+            .set(FILLS.ORDER_ID, orderId)
+            .set(FILLS.SYMBOL, symbol)
+            .set(FILLS.SIDE, side.name)
+            .set(FILLS.FILLED_QTY_DELTA, filledQtyDelta)
+            .set(FILLS.FILLED_QTY_TOTAL, filledQtyTotal)
+            .set(FILLS.PRICE, price)
+            .set(FILLS.QUOTE_CCY, quoteCcy)
+            .set(FILLS.QUOTE_CASH_DELTA, quoteCashDelta)
+            .set(FILLS.FEE_QUOTE, feeQuote)
+            .execute()
     }
 
     private data class PositionState(
