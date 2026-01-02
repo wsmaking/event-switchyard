@@ -1,13 +1,13 @@
 package backoffice.snapshot
 
 import backoffice.ledger.FileLedger
-import backoffice.store.InMemoryBackOfficeStore
+import backoffice.store.BackOfficeStore
 import java.time.Instant
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class BackOfficeSnapshotter(
-    private val store: InMemoryBackOfficeStore,
+    private val store: BackOfficeStore,
     private val ledger: FileLedger,
     private val snapshotStore: BackOfficeSnapshotStore,
     intervalSec: Long = (System.getenv("BACKOFFICE_SNAPSHOT_SEC") ?: "30").toLong(),

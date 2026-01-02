@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryBackOfficeStore(
     private val maxFills: Int = (System.getenv("BACKOFFICE_MAX_FILLS") ?: "10000").toInt()
-) {
+) : BackOfficeStore {
     private val orderMetaById = ConcurrentHashMap<String, OrderMeta>()
     private val lastFilledTotalByOrderId = ConcurrentHashMap<String, Long>()
 
@@ -15,19 +15,19 @@ class InMemoryBackOfficeStore(
     private val realizedPnl = ConcurrentHashMap<String, Long>() // accountId::symbol::CCY -> pnl
     private val fillsByAccount = ConcurrentHashMap<String, ArrayDeque<FillRecord>>()
 
-    fun upsertOrderMeta(meta: OrderMeta) {
+    override fun upsertOrderMeta(meta: OrderMeta) {
         orderMetaById[meta.orderId] = meta
     }
 
-    fun findOrderMeta(orderId: String): OrderMeta? = orderMetaById[orderId]
+    override fun findOrderMeta(orderId: String): OrderMeta? = orderMetaById[orderId]
 
-    fun lastFilledTotal(orderId: String): Long = lastFilledTotalByOrderId[orderId] ?: 0L
+    override fun lastFilledTotal(orderId: String): Long = lastFilledTotalByOrderId[orderId] ?: 0L
 
-    fun setLastFilledTotal(orderId: String, filledQtyTotal: Long) {
+    override fun setLastFilledTotal(orderId: String, filledQtyTotal: Long) {
         lastFilledTotalByOrderId[orderId] = filledQtyTotal
     }
 
-    fun applyFill(
+    override fun applyFill(
         at: Instant,
         accountId: String,
         orderId: String,
@@ -82,7 +82,7 @@ class InMemoryBackOfficeStore(
         }
     }
 
-    fun listPositions(accountId: String? = null): List<Position> {
+    override fun listPositions(accountId: String?): List<Position> {
         val items = positions.values.toList()
         val filtered = if (accountId == null) items else items.filter { it.accountId == accountId }
         return filtered
@@ -90,7 +90,7 @@ class InMemoryBackOfficeStore(
             .map { it.toPosition() }
     }
 
-    fun listBalances(accountId: String? = null): List<Balance> {
+    override fun listBalances(accountId: String?): List<Balance> {
         val entries = balances.entries.toList()
         val filtered =
             if (accountId == null) {
@@ -107,14 +107,14 @@ class InMemoryBackOfficeStore(
             .sortedWith(compareBy<Balance> { it.accountId }.thenBy { it.currency })
     }
 
-    fun listFills(accountId: String): List<FillRecord> {
+    override fun listFills(accountId: String): List<FillRecord> {
         val q = fillsByAccount[accountId] ?: return emptyList()
         synchronized(q) {
             return q.toList()
         }
     }
 
-    fun listRealizedPnl(accountId: String? = null): List<RealizedPnl> {
+    override fun listRealizedPnl(accountId: String?): List<RealizedPnl> {
         val entries = realizedPnl.entries.toList()
         val filtered =
             if (accountId == null) {
@@ -131,7 +131,7 @@ class InMemoryBackOfficeStore(
             .sortedWith(compareBy<RealizedPnl> { it.accountId }.thenBy { it.symbol }.thenBy { it.quoteCcy })
     }
 
-    fun snapshotState(): BackOfficeSnapshotState {
+    override fun snapshotState(): BackOfficeSnapshotState {
         val fills =
             fillsByAccount.mapValues { (_, q) ->
                 synchronized(q) { q.toList() }
@@ -146,7 +146,7 @@ class InMemoryBackOfficeStore(
         )
     }
 
-    fun restoreState(state: BackOfficeSnapshotState) {
+    override fun restoreState(state: BackOfficeSnapshotState) {
         orderMetaById.clear()
         lastFilledTotalByOrderId.clear()
         positions.clear()
@@ -173,13 +173,13 @@ class InMemoryBackOfficeStore(
         }
     }
 
-    fun snapshotBalances(accountId: String): Map<String, Long> {
+    override fun snapshotBalances(accountId: String): Map<String, Long> {
         return balances
             .filterKeys { it.startsWith("$accountId::") }
             .mapKeys { it.key.substringAfter("::") }
     }
 
-    fun snapshotPositions(accountId: String): Map<String, Long> {
+    override fun snapshotPositions(accountId: String): Map<String, Long> {
         return positions
             .filterValues { it.accountId == accountId }
             .mapValues { it.value.netQty }

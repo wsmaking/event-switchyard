@@ -4,7 +4,7 @@ import app.events.MarketDataEvent
 import app.fast.TradingFastPath
 import app.fast.handlers.OrderSubmissionHandler
 import app.http.MarketDataController
-import app.integration.GatewayClient
+import app.clients.gateway.GatewayClient
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 

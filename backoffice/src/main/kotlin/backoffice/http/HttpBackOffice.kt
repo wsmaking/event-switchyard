@@ -9,7 +9,7 @@ import backoffice.json.Json
 import backoffice.ledger.FileLedger
 import backoffice.ledger.LedgerReconciler
 import backoffice.metrics.BackOfficeStats
-import backoffice.store.InMemoryBackOfficeStore
+import backoffice.store.BackOfficeStore
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
@@ -17,7 +17,7 @@ import java.util.concurrent.Executors
 
 class HttpBackOffice(
     private val port: Int,
-    private val store: InMemoryBackOfficeStore,
+    private val store: BackOfficeStore,
     private val ledger: FileLedger,
     private val stats: BackOfficeStats,
     private val reconciler: LedgerReconciler,

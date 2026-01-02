@@ -10,8 +10,10 @@ import backoffice.metrics.BackOfficeStats
 import backoffice.auth.JwtAuth
 import backoffice.snapshot.BackOfficeSnapshotStore
 import backoffice.snapshot.BackOfficeSnapshotter
+import backoffice.store.BackOfficeStore
 import backoffice.store.InMemoryBackOfficeStore
 import backoffice.store.OrderMeta
+import backoffice.store.PostgresBackOfficeStore
 import java.nio.file.Path
 
 fun main() {
@@ -19,11 +21,15 @@ fun main() {
     val ledgerPath = System.getenv("BACKOFFICE_LEDGER_PATH") ?: "var/backoffice/ledger.log"
     val snapshotPath = System.getenv("BACKOFFICE_SNAPSHOT_PATH") ?: "var/backoffice/snapshot.json"
 
-    val store = InMemoryBackOfficeStore()
+    val dbUrl = System.getenv("BACKOFFICE_DB_URL")?.takeIf { it.isNotBlank() }
+    val dbEnabled =
+        (System.getenv("BACKOFFICE_DB_ENABLE") ?: "0").let { it == "1" || it.equals("true", ignoreCase = true) } ||
+            dbUrl != null
+    val store: BackOfficeStore = if (dbEnabled) PostgresBackOfficeStore() else InMemoryBackOfficeStore()
     val ledgerFile = FileLedger(Path.of(ledgerPath))
     val stats = BackOfficeStats()
     val snapshotStore = BackOfficeSnapshotStore(Path.of(snapshotPath))
-    val snapshot = snapshotStore.load()
+    val snapshot = if (store is InMemoryBackOfficeStore) snapshotStore.load() else null
 
     val replayStats =
         if (snapshot != null && snapshot.ledgerLines <= ledgerFile.currentLineCount()) {
@@ -96,7 +102,12 @@ fun main() {
     val reconciler = LedgerReconciler(ledger = ledgerFile, store = store)
     val consumer = BackOfficeConsumer(store = store, ledger = ledgerFile, stats = stats)
     val jwtAuth = JwtAuth()
-    val snapshotter = BackOfficeSnapshotter(store = store, ledger = ledgerFile, snapshotStore = snapshotStore)
+    val snapshotter =
+        if (store is InMemoryBackOfficeStore) {
+            BackOfficeSnapshotter(store = store, ledger = ledgerFile, snapshotStore = snapshotStore)
+        } else {
+            null
+        }
     val server =
         HttpBackOffice(
             port = port,
@@ -110,11 +121,12 @@ fun main() {
     Runtime.getRuntime().addShutdownHook(Thread {
         server.close()
         consumer.close()
-        snapshotter.close()
+        snapshotter?.close()
         ledgerFile.close()
+        store.close()
     })
 
     consumer.start()
-    snapshotter.start()
+    snapshotter?.start()
     server.start()
 }
