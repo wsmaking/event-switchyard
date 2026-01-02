@@ -20,7 +20,7 @@ help:
 	@echo "  make run-backoffice - BackOffice(consumer)起動 (/positions)"
 	@echo "  make backoffice-recovery - BackOffice復旧チェック"
 	@echo "  make gateway-backoffice-e2e - Gateway→BackOfficeの疎通確認"
-	@echo "  make dev-bench   - 開発用ベンチマーク (10,000 runs)"
+	@echo "  make dev-bench   - 開発用ベンチマーク (/api/orders 10,000 runs)"
 	@echo "  make dashboard   - リアルタイムダッシュボード表示"
 	@echo ""
 	@echo "メトリクス確認:"
@@ -66,8 +66,8 @@ run-backoffice:
 
 # 開発用ベンチマーク実行
 dev-bench:
-	@echo "==> Running development benchmark (10,000 requests)..."
-	@python3 scripts/bench_orderbook.py --runs 10000
+	@echo "==> Running development benchmark (/api/orders, 10,000 requests)..."
+	@python3 scripts/bench_orders.py --runs 10000
 
 # Prometheusメトリクス表示（整形済み）
 metrics:
