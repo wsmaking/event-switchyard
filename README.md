@@ -544,6 +544,25 @@ docker-compose -f docker-compose.monitoring.yml up -d
 
 ---
 
+## フロント配信（MinIOでS3モック）
+
+ローカルでS3配信を模擬する場合は MinIO を使う。
+
+```bash
+# MinIO起動
+docker compose --profile frontend up -d minio
+
+# フロントビルド→MinIOへアップロード
+(cd frontend && npm ci && npm run build)
+scripts/ops/frontend_upload_minio.sh
+```
+
+アクセス:
+- MinIO Console: http://localhost:9001 (minioadmin/minioadmin)
+- S3 API: http://localhost:9000
+
+---
+
 ## Kubernetes
 
 ```bash
