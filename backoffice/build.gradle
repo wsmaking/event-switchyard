@@ -3,6 +3,7 @@ plugins {
     id 'application'
     id 'org.jetbrains.kotlin.jvm'
     id 'com.github.johnrengelman.shadow'
+    id 'nu.studer.jooq' version '9.0'
 }
 
 repositories { mavenCentral() }
@@ -12,6 +13,14 @@ java {
 }
 kotlin {
     jvmToolchain(21)
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir "${buildDir}/generated-src/jooq/main"
+        }
+    }
 }
 
 dependencies {
@@ -30,6 +39,10 @@ dependencies {
     implementation 'org.apache.kafka:kafka-clients:3.5.1'
     implementation 'com.zaxxer:HikariCP:5.1.0'
     implementation 'org.postgresql:postgresql:42.7.3'
+    implementation 'org.jooq:jooq:3.19.10'
+
+    jooqGenerator 'org.jooq:jooq-meta-extensions:3.19.10'
+    jooqGenerator 'com.h2database:h2:2.2.224'
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
@@ -42,6 +55,48 @@ tasks.named('shadowJar') {
     archiveBaseName.set('backoffice')
     archiveClassifier.set('all')
     mergeServiceFiles()
+}
+
+jooq {
+    version = '3.19.10'
+    configurations {
+        main {
+            generationTool {
+                jdbc {
+                    driver = 'org.h2.Driver'
+                    url = 'jdbc:h2:mem:backoffice'
+                }
+                generator {
+                    name = 'org.jooq.codegen.DefaultGenerator'
+                    database {
+                        name = 'org.jooq.meta.extensions.ddl.DDLDatabase'
+                        properties {
+                            property {
+                                key = 'scripts'
+                                value = 'src/main/resources/db/migration/V1__backoffice_schema.sql'
+                            }
+                            property {
+                                key = 'sort'
+                                value = 'semantic'
+                            }
+                            property {
+                                key = 'dialect'
+                                value = 'POSTGRES'
+                            }
+                        }
+                    }
+                    target {
+                        packageName = 'backoffice.jooq'
+                        directory = "${buildDir}/generated-src/jooq/main"
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.named('compileKotlin') {
+    dependsOn tasks.named('generateJooq')
 }
 
 application {
