@@ -33,7 +33,8 @@ make grafana-down
 ```
 
 **アクセス先**:
-- **Operations Dashboard**: http://localhost:8080 （リアルタイム監視・メトリクス・設定管理）
+- **Operations Dashboard**: http://localhost:5173 （フロント開発サーバ）
+- **API**: http://localhost:8080
 - Grafana監視: http://localhost:3000 (admin/admin)
 - Prometheus: http://localhost:9090
 
@@ -536,7 +537,7 @@ python3 scripts/change_risk.py \
 docker-compose -f docker-compose.monitoring.yml up -d
 
 # アクセス
-# - アプリケーション: http://localhost:8080
+# - API: http://localhost:8080
 # - Grafana: http://localhost:3000 (admin/admin)
 # - Prometheus: http://localhost:9090
 ```

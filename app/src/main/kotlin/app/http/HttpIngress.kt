@@ -96,9 +96,6 @@ class HttpIngress : AutoCloseable {
                 createContext("/ws/market-data", webSocketController)
             }
 
-            // フロントエンド静的ファイル配信 (最後に登録してAPI優先)
-            createContext("/", StaticFileController())
-
             executor = Executors.newCachedThreadPool()
             start()
         }
