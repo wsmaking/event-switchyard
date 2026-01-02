@@ -121,6 +121,21 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  backoffice-migrate:
+    image: flyway/flyway:10-alpine
+    restart: "no"
+    profiles: ["gateway"]
+    depends_on: [postgres]
+    command:
+      - "-url=jdbc:postgresql://postgres:5432/backoffice"
+      - "-user=backoffice"
+      - "-password=backoffice"
+      - "-baselineOnMigrate=true"
+      - "-connectRetries=60"
+      - "migrate"
+    volumes:
+      - ./backoffice/src/main/resources/db/migration:/flyway/sql:ro
+
   topic-init:
     <<: *app
     depends_on: [kafka]
