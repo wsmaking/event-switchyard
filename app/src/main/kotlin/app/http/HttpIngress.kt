@@ -91,6 +91,7 @@ class HttpIngress : AutoCloseable {
                 }
 
                 createContext("/api/market-data", marketDataController)
+                createContext("/api/market", marketDataController)
                 createContext("/api/orders", orderController)
                 createContext("/api/positions", positionController)
                 createContext("/ws/market-data", webSocketController)
