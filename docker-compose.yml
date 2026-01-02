@@ -8,6 +8,13 @@ x-app: &app
     dockerfile: Dockerfile
   pull_policy: never    # ローカルを使い、勝手に pull しない
 
+x-java-env: &java_env
+  JAVA_TOOL_OPTIONS: >-
+    --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+    --add-opens=java.base/java.lang=ALL-UNNAMED
+    --add-opens=java.base/java.nio=ALL-UNNAMED
+    --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
 
 services:
   assigner:
@@ -113,7 +120,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    profiles: ["gateway"]
+    profiles: ["gateway", "frontend"]
     environment:
       POSTGRES_DB: backoffice
       POSTGRES_USER: backoffice
@@ -124,7 +131,7 @@ services:
   backoffice-migrate:
     image: flyway/flyway:10-alpine
     restart: "no"
-    profiles: ["gateway"]
+    profiles: ["gateway", "frontend"]
     depends_on: [postgres]
     command:
       - "-url=jdbc:postgresql://postgres:5432/backoffice"
@@ -170,15 +177,32 @@ services:
     volumes:
       - ./logs/:/var/log/
 
+  # --- App (UI API) ---
+  app:
+    <<: *app
+    profiles: ["frontend"]
+    depends_on: [gateway, backoffice]
+    command: ["java","-jar","app-all.jar"]
+    environment:
+      <<: *java_env
+      JWT_HS256_SECRET: "dev-secret-change-me"
+      ACCOUNT_ID: "acct_demo"
+      GATEWAY_BASE_URL: "http://gateway:8081"
+      BACKOFFICE_BASE_URL: "http://backoffice:8082"
+      ETCD_ENDPOINTS: "http://etcd1:2379,http://etcd2:2379,http://etcd3:2379"
+      STRATEGY_AUTO_ENABLE: "${STRATEGY_AUTO_ENABLE:-0}"
+      KAFKA_BRIDGE_ENABLE: "0"
+
   # --- Gateway stack (overview.md の Execution Gateway 側) ---
   gateway:
     <<: *app
-    profiles: ["gateway"]
+    profiles: ["gateway", "frontend"]
     depends_on: [kafka, topic-init]
     command: ["java","-jar","gateway-all.jar"]
     ports:
       - "8081:8081"
     environment:
+      <<: *java_env
       GATEWAY_PORT: "8081"
       JWT_HS256_SECRET: "dev-secret-change-me"
       KAFKA_ENABLE: "1"
@@ -189,10 +213,11 @@ services:
 
   backoffice:
     <<: *app
-    profiles: ["gateway"]
+    profiles: ["gateway", "frontend"]
     depends_on: [kafka, topic-init, postgres]
     command: ["java","-jar","backoffice-all.jar"]
     environment:
+      <<: *java_env
       BACKOFFICE_PORT: "8082"
       BACKOFFICE_ENABLE: "1"
       BACKOFFICE_DB_ENABLE: "1"
@@ -248,7 +273,37 @@ services:
       - prometheus
     restart: unless-stopped
 
+  # --- Frontend static hosting (S3 mock via MinIO) ---
+  minio:
+    image: minio/minio:latest
+    profiles: ["frontend"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-mc:
+    image: minio/mc:latest
+    profiles: ["frontend"]
+    depends_on:
+      - minio
+
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: ["frontend"]
+    depends_on:
+      - minio
+      - app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/nginx/frontend.conf:/etc/nginx/nginx.conf:ro
+
 volumes:
   prometheus-data:
   grafana-data:
   postgres-data:
+  minio-data:
