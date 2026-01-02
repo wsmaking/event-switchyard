@@ -5,8 +5,18 @@ import { OrderSide, OrderType, OrderStatus } from '../types/trading';
 import type { OrderRequest } from '../types/trading';
 
 export function TradingView() {
-  const { data: orders, isLoading: ordersLoading } = useOrders();
-  const { data: positions } = usePositions();
+  const {
+    data: orders,
+    isLoading: ordersLoading,
+    isError: ordersError,
+    error: ordersErrorObj,
+  } = useOrders();
+  const {
+    data: positions,
+    isLoading: positionsLoading,
+    isError: positionsError,
+    error: positionsErrorObj,
+  } = usePositions();
   const submitOrder = useSubmitOrder();
 
   // フォーム状態
@@ -37,10 +47,36 @@ export function TradingView() {
     setPrice(null);
   };
 
+  const handleDemoOrder = () => {
+    const demoRequest: OrderRequest = {
+      symbol: symbol || '7203',
+      side: OrderSide.BUY,
+      type: OrderType.MARKET,
+      quantity: 100,
+      price: null,
+    };
+    submitOrder.mutate(demoRequest);
+  };
+
+  const apiErrors = [ordersErrorObj, positionsErrorObj]
+    .filter(Boolean)
+    .map((err) => (err instanceof Error ? err.message : String(err)))
+    .join(' / ');
+
+  const showEmptyOrders = !ordersLoading && !ordersError && (!orders || orders.length === 0);
+  const showEmptyPositions = !positionsLoading && !positionsError && (!positions || positions.length === 0);
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-900 mb-8">証券取引システム</h1>
+
+        {(ordersError || positionsError) && (
+          <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            APIに接続できません。App/Gateway/BackOffice が起動しているか確認してください。
+            {apiErrors && <div className="mt-1 text-xs text-red-600">詳細: {apiErrors}</div>}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* 注文入力フォーム */}
@@ -180,6 +216,15 @@ export function TradingView() {
                   {submitOrder.isPending ? '送信中...' : '注文を送信'}
                 </button>
 
+                <button
+                  type="button"
+                  onClick={handleDemoOrder}
+                  disabled={submitOrder.isPending}
+                  className="w-full border border-gray-300 text-gray-700 py-2 rounded-md font-semibold hover:bg-gray-50 disabled:bg-gray-100 disabled:text-gray-400 transition"
+                >
+                  デモ注文を1件作成
+                </button>
+
                 {submitOrder.isError && (
                   <div className="text-red-600 text-sm">
                     注文に失敗しました: {submitOrder.error.message}
@@ -195,7 +240,9 @@ export function TradingView() {
             <div className="bg-white rounded-lg shadow p-6">
               <h2 className="text-xl font-semibold text-gray-900 mb-4">保有銘柄</h2>
 
-              {positions && positions.length > 0 ? (
+              {positionsLoading && !positionsError ? (
+                <div className="text-gray-500 text-sm">読み込み中...</div>
+              ) : positions && positions.length > 0 ? (
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
@@ -260,8 +307,12 @@ export function TradingView() {
                     </tbody>
                   </table>
                 </div>
+              ) : showEmptyPositions ? (
+                <div className="text-gray-500 text-sm">
+                  保有銘柄がありません。注文を出すか、自動発注を有効にしてください。
+                </div>
               ) : (
-                <div className="text-gray-500 text-sm">保有銘柄がありません</div>
+                <div className="text-gray-500 text-sm">保有銘柄を取得できませんでした</div>
               )}
             </div>
 
@@ -269,7 +320,7 @@ export function TradingView() {
             <div className="bg-white rounded-lg shadow p-6">
               <h2 className="text-xl font-semibold text-gray-900 mb-4">注文履歴</h2>
 
-              {ordersLoading ? (
+              {ordersLoading && !ordersError ? (
                 <div className="text-gray-500">読み込み中...</div>
               ) : orders && orders.length > 0 ? (
                 <div className="overflow-x-auto">
@@ -356,8 +407,12 @@ export function TradingView() {
                     </tbody>
                   </table>
                 </div>
+              ) : showEmptyOrders ? (
+                <div className="text-gray-500">
+                  注文履歴がありません。右のフォームから注文を作成してください。
+                </div>
               ) : (
-                <div className="text-gray-500">注文履歴がありません</div>
+                <div className="text-gray-500">注文履歴を取得できませんでした</div>
               )}
             </div>
           </div>

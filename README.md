@@ -544,22 +544,25 @@ docker-compose -f docker-compose.monitoring.yml up -d
 
 ---
 
-## フロント配信（MinIOでS3モック）
+## フロント配信（本番寄せ: Nginx + MinIO）
 
-ローカルでS3配信を模擬する場合は MinIO を使う。
+本番寄せの構成は「Nginxが入口 / 静的ファイルはS3(=MinIO) / APIはAppへ同一オリジンで中継」。
 
 ```bash
-# MinIO起動
-docker compose --profile frontend up -d minio
-
 # フロントビルド→MinIOへアップロード
-(cd frontend && npm ci && npm run build)
 scripts/ops/frontend_upload_minio.sh
+
+# Nginx + App + Gateway + BackOffice をまとめて起動
+docker compose --profile frontend up -d nginx
 ```
 
 アクセス:
-- MinIO Console: http://localhost:9001 (minioadmin/minioadmin)
-- S3 API: http://localhost:9000
+- UI: http://localhost:8080/
+
+補足:
+- 直接MinIOを公開しない構成（本番寄せ）。必要なら `docker compose --profile frontend up -d minio` で確認可能。
+- `/api/*` と `/ws/*` は Nginx が App へ転送するため、フロントは同一オリジンで動作。
+- デモデータを自動生成する場合は `STRATEGY_AUTO_ENABLE=1 docker compose --profile frontend up -d nginx`
 
 ---
 
