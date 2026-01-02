@@ -67,4 +67,4 @@ echo "==> BackOffice recovery check"
 BACKOFFICE_URL="$BACKOFFICE_URL" \
 BACKOFFICE_JWT="$token" \
 BACKOFFICE_ACCOUNT_ID="$ACCOUNT_ID" \
-  scripts/backoffice_recovery_check.sh
+  scripts/ops/backoffice_recovery_check.sh

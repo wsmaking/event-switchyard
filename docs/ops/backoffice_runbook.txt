@@ -25,7 +25,7 @@ export BACKOFFICE_PASSFAIL=1
 2) Recovery Check
 - Use the recovery check script (health/stats/positions/balances/ledger/reconcile):
 ```
-BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
+BACKOFFICE_JWT="<jwt>" scripts/ops/backoffice_recovery_check.sh
 ```
 - If BACKOFFICE_JWT is not set, the script will generate a JWT from
   JWT_HS256_SECRET + BACKOFFICE_ACCOUNT_ID.
@@ -34,13 +34,13 @@ BACKOFFICE_JWT="<jwt>" scripts/backoffice_recovery_check.sh
 3) End-to-end Verification (optional)
 - Place an order and check BackOffice state in one shot:
 ```
-scripts/gateway_backoffice_e2e.sh
+scripts/ops/gateway_backoffice_e2e.sh
 ```
 
 3.5) Replay Verification (optional)
 - Start BackOffice with a ledger replay and validate reconcile:
 ```
-scripts/backoffice_replay_verify.sh
+scripts/ops/backoffice_replay_verify.sh
 ```
 
 4) If Data Looks Stale

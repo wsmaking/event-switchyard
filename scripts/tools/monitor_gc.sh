@@ -6,7 +6,7 @@ set -euo pipefail
 # JVMプロセスのGC統計をリアルタイムで監視
 #
 # Usage:
-#   ./scripts/monitor_gc.sh [PID]
+#   ./scripts/tools/monitor_gc.sh [PID]
 #
 
 pid="${1:-$(pgrep -f 'app.MainKt' | head -1)}"
