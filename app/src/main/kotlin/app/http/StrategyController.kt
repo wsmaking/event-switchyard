@@ -13,12 +13,13 @@ class StrategyController(
     private val configService: StrategyConfigService
 ) : HttpHandler {
     private val objectMapper = jacksonObjectMapper()
+    private val adminToken = System.getenv("STRATEGY_ADMIN_TOKEN")?.trim().orEmpty()
 
     override fun handle(exchange: HttpExchange) {
         try {
             exchange.responseHeaders.set("Access-Control-Allow-Origin", "*")
             exchange.responseHeaders.set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
-            exchange.responseHeaders.set("Access-Control-Allow-Headers", "Content-Type")
+            exchange.responseHeaders.set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
             if (exchange.requestMethod == "OPTIONS") {
                 sendResponse(exchange, 204, "")
@@ -27,7 +28,13 @@ class StrategyController(
 
             when (exchange.requestMethod) {
                 "GET" -> handleGet(exchange)
-                "PUT" -> handlePut(exchange)
+                "PUT" -> {
+                    if (!isAuthorized(exchange)) {
+                        sendResponse(exchange, 401, "Unauthorized")
+                        return
+                    }
+                    handlePut(exchange)
+                }
                 else -> sendResponse(exchange, 405, "Method Not Allowed")
             }
         } catch (e: Exception) {
@@ -58,6 +65,14 @@ class StrategyController(
         val bytes = body.toByteArray(StandardCharsets.UTF_8)
         exchange.sendResponseHeaders(status, bytes.size.toLong())
         exchange.responseBody.use { it.write(bytes) }
+    }
+
+    private fun isAuthorized(exchange: HttpExchange): Boolean {
+        if (adminToken.isBlank()) return true
+        val header = exchange.requestHeaders.getFirst("Authorization") ?: return false
+        val prefix = "Bearer "
+        if (!header.startsWith(prefix)) return false
+        return header.substring(prefix.length).trim() == adminToken
     }
 }
 

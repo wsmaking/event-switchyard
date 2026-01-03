@@ -52,6 +52,7 @@ dependencies {
     // --- DB: Strategy設定の保存 ---
     implementation 'com.zaxxer:HikariCP:5.1.0'
     implementation 'org.postgresql:postgresql:42.7.3'
+    implementation 'org.flywaydb:flyway-core:10.17.1'
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {

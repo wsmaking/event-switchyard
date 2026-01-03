@@ -2,6 +2,7 @@ package app.strategy
 
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
+import org.flywaydb.core.Flyway
 
 class StrategyConfigStore(
     jdbcUrl: String = System.getenv("APP_DB_URL") ?: "jdbc:postgresql://localhost:5432/backoffice",
@@ -23,7 +24,7 @@ class StrategyConfigStore(
                 poolName = "app-strategy-db"
             }
         dataSource = HikariDataSource(config)
-        ensureSchema()
+        migrate()
     }
 
     fun load(accountId: String): StrategyConfig? {
@@ -80,24 +81,12 @@ class StrategyConfigStore(
         }
     }
 
-    private fun ensureSchema() {
-        dataSource.connection.use { conn ->
-            conn.createStatement().use { stmt ->
-                stmt.execute("CREATE SCHEMA IF NOT EXISTS app")
-                stmt.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS app.strategy_configs (
-                        account_id TEXT PRIMARY KEY,
-                        enabled BOOLEAN NOT NULL,
-                        symbols TEXT NOT NULL,
-                        tick_ms BIGINT NOT NULL,
-                        max_orders_per_min INTEGER NOT NULL,
-                        cooldown_ms BIGINT NOT NULL,
-                        updated_at_ms BIGINT NOT NULL
-                    )
-                    """.trimIndent()
-                )
-            }
-        }
+    private fun migrate() {
+        Flyway.configure()
+            .dataSource(dataSource)
+            .locations("classpath:db/migration")
+            .baselineOnMigrate(true)
+            .load()
+            .migrate()
     }
 }
