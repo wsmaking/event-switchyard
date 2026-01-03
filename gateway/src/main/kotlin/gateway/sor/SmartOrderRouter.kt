@@ -2,6 +2,7 @@ package gateway.sor
 
 import gateway.exchange.ExchangeClient
 import gateway.exchange.ExchangeSimulator
+import gateway.exchange.TcpExchangeClient
 import gateway.exchange.ExecutionReport
 import gateway.order.OrderSnapshot
 import java.util.concurrent.ConcurrentHashMap
@@ -60,6 +61,11 @@ class SmartOrderRouter(
          * - EXCHANGE_SIM_DELAY_MS_<VENUE>
          * - EXCHANGE_SIM_PARTIAL_STEPS_<VENUE>
          * - EXCHANGE_SIM_REJECT_ALL_<VENUE>  (1/true)
+         *
+         * Transport:
+         * - EXCHANGE_TRANSPORT: "sim" (default) or "tcp"
+         * - EXCHANGE_TCP_HOST / EXCHANGE_TCP_PORT
+         * - EXCHANGE_TCP_HOST_<VENUE> / EXCHANGE_TCP_PORT_<VENUE>
          */
         fun fromEnv(): SmartOrderRouter {
             val venueNames =
@@ -75,13 +81,23 @@ class SmartOrderRouter(
             val globalDelayMs = (System.getenv("EXCHANGE_SIM_DELAY_MS") ?: "50").toLong()
             val globalPartialSteps = (System.getenv("EXCHANGE_SIM_PARTIAL_STEPS") ?: "2").toInt()
             val globalRejectAll = envBool(System.getenv("EXCHANGE_SIM_REJECT_ALL"))
+            val transport = (System.getenv("EXCHANGE_TRANSPORT") ?: "sim").lowercase()
 
             val venues =
                 venueNames.associateWith { venue ->
-                    val delayMs = envLong("EXCHANGE_SIM_DELAY_MS", venue) ?: globalDelayMs
-                    val partialSteps = envInt("EXCHANGE_SIM_PARTIAL_STEPS", venue) ?: globalPartialSteps
-                    val rejectAll = envBool(System.getenv(envKey("EXCHANGE_SIM_REJECT_ALL", venue))) || globalRejectAll
-                    ExchangeSimulator(delayMs = delayMs, partialSteps = partialSteps, rejectAll = rejectAll)
+                    when (transport) {
+                        "tcp" -> {
+                            val host = envString("EXCHANGE_TCP_HOST", venue) ?: (System.getenv("EXCHANGE_TCP_HOST") ?: "127.0.0.1")
+                            val port = envInt("EXCHANGE_TCP_PORT", venue) ?: (System.getenv("EXCHANGE_TCP_PORT")?.toIntOrNull() ?: 9901)
+                            TcpExchangeClient(host = host, port = port)
+                        }
+                        else -> {
+                            val delayMs = envLong("EXCHANGE_SIM_DELAY_MS", venue) ?: globalDelayMs
+                            val partialSteps = envInt("EXCHANGE_SIM_PARTIAL_STEPS", venue) ?: globalPartialSteps
+                            val rejectAll = envBool(System.getenv(envKey("EXCHANGE_SIM_REJECT_ALL", venue))) || globalRejectAll
+                            ExchangeSimulator(delayMs = delayMs, partialSteps = partialSteps, rejectAll = rejectAll)
+                        }
+                    }
                 }
 
             return SmartOrderRouter(venues = venues, defaultVenue = defaultVenue, symbolRoutes = routes)
@@ -110,7 +126,8 @@ class SmartOrderRouter(
 
         private fun envInt(base: String, venue: String): Int? = System.getenv(envKey(base, venue))?.toIntOrNull()
 
+        private fun envString(base: String, venue: String): String? = System.getenv(envKey(base, venue))
+
         private fun envBool(v: String?): Boolean = v?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false
     }
 }
-
