@@ -10,6 +10,7 @@ export function StrategySettings() {
   const [tickMs, setTickMs] = useState(1000);
   const [maxOrdersPerMin, setMaxOrdersPerMin] = useState(0);
   const [cooldownMs, setCooldownMs] = useState(0);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
   useEffect(() => {
     if (!data) return;
@@ -26,6 +27,26 @@ export function StrategySettings() {
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    const errors: string[] = [];
+    if (symbols.length === 0) {
+      errors.push('銘柄は1つ以上指定してください。');
+    }
+    if (symbols.length > 50) {
+      errors.push('銘柄は50件以内にしてください。');
+    }
+    if (tickMs < 100 || tickMs > 60000) {
+      errors.push('Tick Interval は 100〜60000ms にしてください。');
+    }
+    if (maxOrdersPerMin < 0 || maxOrdersPerMin > 10000) {
+      errors.push('Max Orders / Min は 0〜10000 にしてください。');
+    }
+    if (cooldownMs < 0 || cooldownMs > 600000) {
+      errors.push('Cooldown は 0〜600000ms にしてください。');
+    }
+    setValidationErrors(errors);
+    if (errors.length > 0) {
+      return;
+    }
     const payload: StrategyConfigUpdate = {
       enabled,
       symbols,
@@ -137,6 +158,13 @@ export function StrategySettings() {
           {isError && (
             <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
               {error instanceof Error ? error.message : 'Failed to load strategy config.'}
+            </div>
+          )}
+          {validationErrors.length > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+              {validationErrors.map((message) => (
+                <div key={message}>{message}</div>
+              ))}
             </div>
           )}
           {updateConfig.isError && (

@@ -59,6 +59,7 @@ class StrategyController(
         val errors = request.validate()
         if (errors.isNotEmpty()) {
             StrategyMetrics.recordValidationFailed()
+            println("strategy_config: validation failed -> ${errors.joinToString(", ")}")
             val json = objectMapper.writeValueAsString(mapOf("errors" to errors))
             exchange.responseHeaders.set("Content-Type", "application/json")
             sendResponse(exchange, 400, json)

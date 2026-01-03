@@ -33,6 +33,7 @@ class StrategyConfigService(
                 message = "STRATEGY_DB_UNAVAILABLE",
                 lastErrorAtMs = now
             )
+            println("strategy_config: db unavailable at startup, fallback to disabled")
             StrategyMetrics.recordFallback()
         } else {
             store = resolvedStore
@@ -60,6 +61,7 @@ class StrategyConfigService(
                 message = "STRATEGY_DB_UNAVAILABLE",
                 lastErrorAtMs = System.currentTimeMillis()
             )
+            println("strategy_config: update rejected, db unavailable")
             StrategyMetrics.recordUpdateFailed()
             StrategyMetrics.recordFallback()
             throw IllegalStateException("STRATEGY_DB_UNAVAILABLE")
@@ -75,6 +77,7 @@ class StrategyConfigService(
                 lastErrorAtMs = System.currentTimeMillis()
             )
             cached = updated.copy(enabled = false)
+            println("strategy_config: update failed, fallback to disabled")
             StrategyMetrics.recordUpdateFailed()
             StrategyMetrics.recordFallback()
             throw IllegalStateException("STRATEGY_DB_UNAVAILABLE")
@@ -118,6 +121,7 @@ class StrategyConfigService(
                 )
                 cached = cached.copy(enabled = false)
                 lastRefreshAtMs = now
+                println("strategy_config: refresh failed, fallback to disabled")
                 StrategyMetrics.recordFallback()
                 return cached
             }
