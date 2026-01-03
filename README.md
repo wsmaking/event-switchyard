@@ -33,7 +33,8 @@ make grafana-down
 ```
 
 **アクセス先**:
-- **Operations Dashboard**: http://localhost:5173 （フロント開発サーバ）
+- **UI (開発)**: http://localhost:5173 （Vite dev server）
+- **UI (本番寄せ/Nginx)**: http://localhost:8080/ （Nginxが静的配信 + /api を中継）
 - **API**: http://localhost:8080
 - Grafana監視: http://localhost:3000 (admin/admin)
 - Prometheus: http://localhost:9090
@@ -481,6 +482,7 @@ make dev-bench
 
 **マイグレーション**:
 - 起動時にFlywayが `app/src/main/resources/db/migration` のSQLを自動適用する。
+- DB未接続の場合は `fallback` になり、`PUT /api/strategy` は 503 を返す（自動戦略は無効化）。
 
 ### 起動パターン
 

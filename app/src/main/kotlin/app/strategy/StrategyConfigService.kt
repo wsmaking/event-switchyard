@@ -3,7 +3,7 @@ package app.strategy
 import app.metrics.StrategyMetrics
 
 class StrategyConfigService(
-    store: StrategyConfigStore? = null,
+    providedStore: StrategyConfigStore? = null,
     private val accountId: String = System.getenv("ACCOUNT_ID") ?: "acct_demo",
     refreshMs: Long = (System.getenv("STRATEGY_CONFIG_REFRESH_MS") ?: "5000").toLong()
 ) {
@@ -17,15 +17,15 @@ class StrategyConfigService(
     init {
         val now = System.currentTimeMillis()
         val resolvedStore =
-            store ?: run {
+            providedStore ?: run {
                 try {
                     StrategyConfigStore()
                 } catch (ex: Throwable) {
                     null
                 }
             }
+        store = resolvedStore
         if (resolvedStore == null) {
-            store = null
             cached = StrategyConfig.defaultFromEnv(accountId).copy(enabled = false)
             status = StrategyStorageStatus(
                 storage = "fallback",
@@ -36,7 +36,6 @@ class StrategyConfigService(
             println("strategy_config: db unavailable at startup, fallback to disabled")
             StrategyMetrics.recordFallback()
         } else {
-            store = resolvedStore
             val loaded = resolvedStore.load(accountId)
             cached = loaded ?: StrategyConfig.defaultFromEnv(accountId).also { resolvedStore.upsert(it) }
             status = StrategyStorageStatus(storage = "db", healthy = true)
