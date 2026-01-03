@@ -52,6 +52,11 @@ export interface StockInfo {
   volume: number;
 }
 
+export interface PricePoint {
+  timestamp: number;
+  price: number;
+}
+
 export interface Position {
   symbol: string;
   quantity: number;

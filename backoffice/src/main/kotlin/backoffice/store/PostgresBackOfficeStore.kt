@@ -12,6 +12,8 @@ import com.zaxxer.hikari.HikariDataSource
 import org.jooq.DSLContext
 import org.jooq.Record
 import org.jooq.SQLDialect
+import org.jooq.conf.RenderQuotedNames
+import org.jooq.conf.Settings
 import org.jooq.impl.DSL
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -321,7 +323,8 @@ class PostgresBackOfficeStore(
 
     private fun <T> withDsl(block: (DSLContext) -> T): T {
         dataSource.connection.use { conn ->
-            val ctx = DSL.using(conn, SQLDialect.POSTGRES)
+            val settings = Settings().withRenderQuotedNames(RenderQuotedNames.NEVER)
+            val ctx = DSL.using(conn, SQLDialect.POSTGRES, settings)
             return block(ctx)
         }
     }
