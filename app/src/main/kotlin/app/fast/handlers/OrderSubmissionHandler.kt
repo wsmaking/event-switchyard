@@ -1,6 +1,7 @@
 package app.fast.handlers
 
 import app.events.OrderEvent
+import app.metrics.StrategyMetrics
 import app.order.OrderExecutionService
 import app.strategy.StrategyConfig
 import app.strategy.StrategyConfigService
@@ -21,14 +22,17 @@ class OrderSubmissionHandler(
 
         val config = configService.current()
         if (!config.enabled) {
+            StrategyMetrics.recordOrderFiltered("disabled")
             event.eventType = "OrderFiltered"
             return
         }
         if (isCoolingDown(order.symbol, config)) {
+            StrategyMetrics.recordOrderFiltered("cooldown")
             event.eventType = "OrderFiltered"
             return
         }
         if (isRateLimited(config)) {
+            StrategyMetrics.recordOrderFiltered("rate_limit")
             event.eventType = "OrderFiltered"
             return
         }

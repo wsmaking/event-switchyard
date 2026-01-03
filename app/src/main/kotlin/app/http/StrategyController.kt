@@ -1,5 +1,6 @@
 package app.http
 
+import app.metrics.StrategyMetrics
 import app.strategy.StrategyConfigRequest
 import app.strategy.StrategyConfigService
 import app.strategy.StrategyConfigSnapshot
@@ -55,6 +56,14 @@ class StrategyController(
     private fun handlePut(exchange: HttpExchange) {
         val requestBody = exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8)
         val request = objectMapper.readValue<StrategyConfigRequest>(requestBody)
+        val errors = request.validate()
+        if (errors.isNotEmpty()) {
+            StrategyMetrics.recordValidationFailed()
+            val json = objectMapper.writeValueAsString(mapOf("errors" to errors))
+            exchange.responseHeaders.set("Content-Type", "application/json")
+            sendResponse(exchange, 400, json)
+            return
+        }
         val updated = configService.update(request)
         val json = objectMapper.writeValueAsString(updated.toResponse())
         exchange.responseHeaders.set("Content-Type", "application/json")

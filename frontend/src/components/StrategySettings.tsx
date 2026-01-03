@@ -37,6 +37,8 @@ export function StrategySettings() {
   };
 
   const isSaving = updateConfig.isPending;
+  const updateError =
+    updateConfig.error instanceof Error ? updateConfig.error.message : 'Failed to save strategy config.';
   const lastUpdated =
     data?.updatedAtMs ? new Date(data.updatedAtMs).toLocaleString() : '---';
   const storageStatus = data
@@ -135,6 +137,11 @@ export function StrategySettings() {
           {isError && (
             <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
               {error instanceof Error ? error.message : 'Failed to load strategy config.'}
+            </div>
+          )}
+          {updateConfig.isError && (
+            <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+              {updateError}
             </div>
           )}
         </form>

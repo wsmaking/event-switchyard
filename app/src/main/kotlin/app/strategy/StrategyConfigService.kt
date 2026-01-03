@@ -1,5 +1,7 @@
 package app.strategy
 
+import app.metrics.StrategyMetrics
+
 class StrategyConfigService(
     store: StrategyConfigStore? = null,
     private val accountId: String = System.getenv("ACCOUNT_ID") ?: "acct_demo",
@@ -31,6 +33,7 @@ class StrategyConfigService(
                 message = "STRATEGY_DB_UNAVAILABLE",
                 lastErrorAtMs = now
             )
+            StrategyMetrics.recordFallback()
         } else {
             store = resolvedStore
             val loaded = resolvedStore.load(accountId)
@@ -57,6 +60,8 @@ class StrategyConfigService(
                 message = "STRATEGY_DB_UNAVAILABLE",
                 lastErrorAtMs = System.currentTimeMillis()
             )
+            StrategyMetrics.recordUpdateFailed()
+            StrategyMetrics.recordFallback()
             throw IllegalStateException("STRATEGY_DB_UNAVAILABLE")
         }
         val updated = request.toConfig(accountId)
@@ -70,11 +75,14 @@ class StrategyConfigService(
                 lastErrorAtMs = System.currentTimeMillis()
             )
             cached = updated.copy(enabled = false)
+            StrategyMetrics.recordUpdateFailed()
+            StrategyMetrics.recordFallback()
             throw IllegalStateException("STRATEGY_DB_UNAVAILABLE")
         }
         cached = updated
         lastRefreshAtMs = System.currentTimeMillis()
         status = StrategyStorageStatus(storage = "db", healthy = true)
+        StrategyMetrics.recordUpdate()
         return StrategyConfigSnapshot(cached, status)
     }
 
@@ -110,6 +118,7 @@ class StrategyConfigService(
                 )
                 cached = cached.copy(enabled = false)
                 lastRefreshAtMs = now
+                StrategyMetrics.recordFallback()
                 return cached
             }
         if (latest != null) {

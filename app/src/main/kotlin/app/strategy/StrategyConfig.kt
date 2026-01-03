@@ -53,6 +53,27 @@ data class StrategyConfigRequest(
     val maxOrdersPerMin: Int,
     val cooldownMs: Long
 ) {
+    fun validate(): List<String> {
+        val errors = mutableListOf<String>()
+        val sanitizedSymbols = symbols.map { it.trim() }.filter { it.isNotEmpty() }
+        if (sanitizedSymbols.isEmpty()) {
+            errors.add("symbols must not be empty")
+        }
+        if (sanitizedSymbols.size > 50) {
+            errors.add("symbols must be <= 50")
+        }
+        if (tickMs < 100 || tickMs > 60_000) {
+            errors.add("tickMs must be between 100 and 60000")
+        }
+        if (maxOrdersPerMin < 0 || maxOrdersPerMin > 10_000) {
+            errors.add("maxOrdersPerMin must be between 0 and 10000")
+        }
+        if (cooldownMs < 0 || cooldownMs > 600_000) {
+            errors.add("cooldownMs must be between 0 and 600000")
+        }
+        return errors
+    }
+
     fun toConfig(accountId: String): StrategyConfig {
         val sanitizedSymbols = symbols.map { it.trim() }.filter { it.isNotEmpty() }
         return StrategyConfig(
