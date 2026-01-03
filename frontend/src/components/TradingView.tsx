@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useOrders, useSubmitOrder } from '../hooks/useOrders';
 import { useStockInfo, usePositions, usePriceHistory } from '../hooks/useMarketData';
-import { OrderSide, OrderType, OrderStatus } from '../types/trading';
+import { OrderSide, OrderType, OrderStatus, TimeInForce } from '../types/trading';
 import type { OrderRequest, PricePoint } from '../types/trading';
 
 export function TradingView() {
@@ -25,6 +25,8 @@ export function TradingView() {
   const [orderType, setOrderType] = useState<OrderType>(OrderType.MARKET);
   const [quantity, setQuantity] = useState(100);
   const [price, setPrice] = useState<number | null>(null);
+  const [timeInForce, setTimeInForce] = useState<TimeInForce>(TimeInForce.GTC);
+  const [expireAtInput, setExpireAtInput] = useState('');
 
   // 現在の銘柄情報を取得
   const { data: stockInfo } = useStockInfo(symbol);
@@ -36,6 +38,9 @@ export function TradingView() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const parsedExpireAt = expireAtInput ? Date.parse(expireAtInput) : Number.NaN;
+    const expireAtMs =
+      timeInForce === TimeInForce.GTD && !Number.isNaN(parsedExpireAt) ? parsedExpireAt : null;
 
     const request: OrderRequest = {
       symbol,
@@ -43,6 +48,8 @@ export function TradingView() {
       type: orderType,
       quantity,
       price: orderType === OrderType.LIMIT ? price : null,
+      timeInForce,
+      expireAt: expireAtMs,
     };
 
     submitOrder.mutate(request);
@@ -50,6 +57,8 @@ export function TradingView() {
     // フォームリセット（銘柄・数量は保持）
     setOrderType(OrderType.MARKET);
     setPrice(null);
+    setTimeInForce(TimeInForce.GTC);
+    setExpireAtInput('');
   };
 
   const handleDemoOrder = () => {
@@ -59,6 +68,8 @@ export function TradingView() {
       type: OrderType.MARKET,
       quantity: 100,
       price: null,
+      timeInForce: TimeInForce.GTC,
+      expireAt: null,
     };
     submitOrder.mutate(demoRequest);
   };
@@ -347,6 +358,36 @@ export function TradingView() {
                   </p>
                 </div>
 
+                {/* 有効期限 */}
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-300">
+                    有効期限（Time in Force）
+                  </label>
+                  <select
+                    value={timeInForce}
+                    onChange={(e) => {
+                      const next = e.target.value as TimeInForce;
+                      setTimeInForce(next);
+                      if (next !== TimeInForce.GTD) {
+                        setExpireAtInput('');
+                      }
+                    }}
+                    className={inputClass}
+                  >
+                    <option value={TimeInForce.GTC}>GTC（期限なし）</option>
+                    <option value={TimeInForce.GTD}>GTD（期限指定）</option>
+                  </select>
+                  {timeInForce === TimeInForce.GTD && (
+                    <input
+                      type="datetime-local"
+                      value={expireAtInput}
+                      onChange={(e) => setExpireAtInput(e.target.value)}
+                      className={`${inputClass} mt-2`}
+                      required
+                    />
+                  )}
+                </div>
+
                 {/* 数量 */}
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-300">
@@ -513,6 +554,12 @@ export function TradingView() {
                           種別
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                          TIF
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                          期限
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                           数量
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
@@ -548,6 +595,12 @@ export function TradingView() {
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
                             {order.type === OrderType.MARKET ? '成行' : '指値'}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
+                            {order.timeInForce}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
+                            {order.expireAt ? new Date(order.expireAt).toLocaleString('ja-JP') : '-'}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
                             {order.quantity.toLocaleString()}

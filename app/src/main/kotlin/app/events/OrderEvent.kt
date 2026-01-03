@@ -7,7 +7,9 @@ data class OrderEvent(
     val side: Side,
     val price: Double,
     val quantity: Int,
-    val orderType: OrderType
+    val orderType: OrderType,
+    val timeInForce: TimeInForce = TimeInForce.GTC,
+    val expireAt: Long? = null
 ) {
     enum class Side {
         BUY, SELL
@@ -15,5 +17,9 @@ data class OrderEvent(
 
     enum class OrderType {
         MARKET, LIMIT
+    }
+
+    enum class TimeInForce {
+        GTC, GTD
     }
 }
