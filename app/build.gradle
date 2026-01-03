@@ -48,6 +48,10 @@ dependencies {
 
     // --- Market Data: 外部APIクライアント ---
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // --- DB: Strategy設定の保存 ---
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+    implementation 'org.postgresql:postgresql:42.7.3'
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {

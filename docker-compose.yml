@@ -190,7 +190,11 @@ services:
       GATEWAY_BASE_URL: "http://gateway:8081"
       BACKOFFICE_BASE_URL: "http://backoffice:8082"
       ETCD_ENDPOINTS: "http://etcd1:2379,http://etcd2:2379,http://etcd3:2379"
-      STRATEGY_AUTO_ENABLE: "${STRATEGY_AUTO_ENABLE:-0}"
+      APP_DB_URL: "jdbc:postgresql://postgres:5432/backoffice"
+      APP_DB_USER: "backoffice"
+      APP_DB_PASSWORD: "backoffice"
+      APP_DB_POOL: "4"
+      STRATEGY_AUTO_ENABLE: "${STRATEGY_AUTO_ENABLE:-1}"
       KAFKA_BRIDGE_ENABLE: "0"
 
   # --- Gateway stack (overview.md の Execution Gateway 側) ---
