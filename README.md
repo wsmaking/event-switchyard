@@ -33,7 +33,8 @@ make grafana-down
 ```
 
 **アクセス先**:
-- **Operations Dashboard**: http://localhost:5173 （フロント開発サーバ）
+- **UI (開発)**: http://localhost:5173 （Vite dev server）
+- **UI (本番寄せ/Nginx)**: http://localhost:8080/ （Nginxが静的配信 + /api を中継）
 - **API**: http://localhost:8080
 - Grafana監視: http://localhost:3000 (admin/admin)
 - Prometheus: http://localhost:9090
@@ -459,6 +460,29 @@ make dev-bench
 | `ORDER_POOL_ENABLE` | `0` | オブジェクトプール有効化 |
 | `AUDIT_LOG_ENABLE` | `0` | 監査ログ有効化 |
 | `ZGC_ENABLE` | `0` | ZGC有効化 |
+
+### 戦略設定（App / Strategy）
+
+| 変数名 | デフォルト | 説明 |
+|--------|-----------|------|
+| `APP_DB_URL` | `jdbc:postgresql://localhost:5432/backoffice` | Strategy設定のDB接続URL |
+| `APP_DB_USER` | `backoffice` | DBユーザー |
+| `APP_DB_PASSWORD` | `backoffice` | DBパスワード |
+| `APP_DB_POOL` | `4` | DBプールサイズ |
+| `STRATEGY_ADMIN_TOKEN` | (空) | `PUT /api/strategy` のBearerトークン。空なら認可なし |
+| `STRATEGY_CONFIG_REFRESH_MS` | `5000` | Strategy設定の再読込間隔(ms) |
+| `STRATEGY_AUTO_ENABLE` | `1` | 1でStrategyAutoTraderを起動 |
+| `STRATEGY_SYMBOLS` | `7203,6758,9984` | 戦略の初期銘柄(CSV) |
+| `STRATEGY_TICK_MS` | `1000` | 戦略の初期tick間隔(ms) |
+| `STRATEGY_MAX_ORDERS_PER_MIN` | `0` | 初期の発注上限(0=無制限) |
+| `STRATEGY_COOLDOWN_MS` | `0` | 初期のクールダウン(ms) |
+
+**フロントの環境変数**:
+- `VITE_STRATEGY_ADMIN_TOKEN`: Strategy設定更新用のBearerトークン。`STRATEGY_ADMIN_TOKEN` と同じ値にする。
+
+**マイグレーション**:
+- 起動時にFlywayが `app/src/main/resources/db/migration` のSQLを自動適用する。
+- DB未接続の場合は `fallback` になり、`PUT /api/strategy` は 503 を返す（自動戦略は無効化）。
 
 ### 起動パターン
 

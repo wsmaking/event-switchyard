@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Dashboard } from './components/Dashboard';
 import { TradingView } from './components/TradingView';
+import { StrategySettings } from './components/StrategySettings';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -12,7 +13,7 @@ const queryClient = new QueryClient({
 });
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'trading'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'trading' | 'strategy'>('dashboard');
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -50,6 +51,16 @@ function App() {
               >
                 Trading
               </button>
+              <button
+                onClick={() => setActiveTab('strategy')}
+                className={`pb-4 pt-4 border-b-2 transition ${
+                  activeTab === 'strategy'
+                    ? 'border-blue-400 text-blue-200'
+                    : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-600'
+                }`}
+              >
+                Strategy
+              </button>
             </div>
           </div>
         </div>
@@ -57,6 +68,7 @@ function App() {
         {/* Tab Content */}
         {activeTab === 'dashboard' && <Dashboard />}
         {activeTab === 'trading' && <TradingView />}
+        {activeTab === 'strategy' && <StrategySettings />}
       </div>
     </QueryClientProvider>
   );

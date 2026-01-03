@@ -76,3 +76,24 @@ export interface Position {
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
 }
+
+export interface StrategyConfig {
+  enabled: boolean;
+  symbols: string[];
+  tickMs: number;
+  maxOrdersPerMin: number;
+  cooldownMs: number;
+  updatedAtMs: number;
+  storage: string;
+  storageHealthy: boolean;
+  storageMessage: string | null;
+  storageErrorAtMs: number | null;
+}
+
+export interface StrategyConfigUpdate {
+  enabled: boolean;
+  symbols: string[];
+  tickMs: number;
+  maxOrdersPerMin: number;
+  cooldownMs: number;
+}

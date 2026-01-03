@@ -7,6 +7,7 @@ import app.clients.gateway.GatewaySseClient
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import app.strategy.StrategyAutoTrader
+import app.strategy.StrategyConfigService
 import app.order.OrderExecutionService
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -74,18 +75,20 @@ class HttpIngress : AutoCloseable {
                 val marketDataController = MarketDataController()
                 val executionService = OrderExecutionService()
                 val backOfficeClient = BackOfficeClient()
+                val strategyConfigService = StrategyConfigService()
                 val orderController = OrderController(r, executionService)
                 val positionController = PositionController(backOfficeClient, marketDataController)
                 val webSocketController = WebSocketController(marketDataController)
+                val strategyController = StrategyController(strategyConfigService)
 
                 val sseClient = GatewaySseClient()
                 sseClient.start(orderController)
                 gatewaySseClient = sseClient
 
                 val strategyEnabled =
-                    (System.getenv("STRATEGY_AUTO_ENABLE") ?: "0").let { it == "1" || it.equals("true", ignoreCase = true) }
+                    (System.getenv("STRATEGY_AUTO_ENABLE") ?: "1").let { it == "1" || it.equals("true", ignoreCase = true) }
                 if (strategyEnabled) {
-                    val trader = StrategyAutoTrader(marketDataController, executionService)
+                    val trader = StrategyAutoTrader(marketDataController, executionService, strategyConfigService)
                     trader.start()
                     strategyAutoTrader = trader
                 }
@@ -94,6 +97,7 @@ class HttpIngress : AutoCloseable {
                 createContext("/api/market", marketDataController)
                 createContext("/api/orders", orderController)
                 createContext("/api/positions", positionController)
+                createContext("/api/strategy", strategyController)
                 createContext("/ws/market-data", webSocketController)
             }
 

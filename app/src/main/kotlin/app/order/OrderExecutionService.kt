@@ -23,6 +23,8 @@ class OrderExecutionService(
             type = order.orderType.name,
             qty = order.quantity.toLong(),
             price = order.price.takeIf { it > 0.0 }?.toLong(),
+            timeInForce = order.timeInForce.name,
+            expireAt = order.expireAt,
             clientOrderId = order.orderId
         )
         return submitOrder(request, idempotencyKey = order.orderId)
