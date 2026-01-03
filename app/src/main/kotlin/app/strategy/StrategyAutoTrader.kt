@@ -4,13 +4,13 @@ import app.events.MarketDataEvent
 import app.fast.TradingFastPath
 import app.fast.handlers.OrderSubmissionHandler
 import app.http.MarketDataController
-import app.clients.gateway.GatewayClient
+import app.order.OrderExecutionService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class StrategyAutoTrader(
     private val marketData: MarketDataController,
-    private val gatewayClient: GatewayClient,
+    private val executionService: OrderExecutionService,
     symbols: List<String> =
         (System.getenv("STRATEGY_SYMBOLS") ?: "7203,6758,9984")
             .split(',')
@@ -18,7 +18,7 @@ class StrategyAutoTrader(
             .filter { it.isNotEmpty() },
     intervalMs: Long = (System.getenv("STRATEGY_TICK_MS") ?: "1000").toLong()
 ) : AutoCloseable {
-    private val fastPath = TradingFastPath(OrderSubmissionHandler(gatewayClient))
+    private val fastPath = TradingFastPath(OrderSubmissionHandler(executionService))
     private val symbolList = if (symbols.isEmpty()) listOf("7203") else symbols
     private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "strategy-auto-trader").apply { isDaemon = true }
