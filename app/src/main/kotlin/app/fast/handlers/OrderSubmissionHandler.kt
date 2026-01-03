@@ -13,7 +13,18 @@ class OrderSubmissionHandler(
         if (event.eventType != "Order") return
         val order = event.payload as? OrderEvent ?: return
 
-        val result = executionService.submitOrder(order)
+        val request = GatewayOrderRequest(
+            symbol = order.symbol,
+            side = order.side.name,
+            type = order.orderType.name,
+            qty = order.quantity.toLong(),
+            price = order.price.takeIf { it > 0.0 }?.toLong(),
+            timeInForce = order.timeInForce.name,
+            expireAt = order.expireAt,
+            clientOrderId = order.orderId
+        )
+
+        val result = gatewayClient.submitOrder(request, idempotencyKey = order.orderId)
         event.eventType = if (result.accepted) "OrderSubmitted" else "OrderRejected"
     }
 }

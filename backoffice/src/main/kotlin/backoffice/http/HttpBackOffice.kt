@@ -42,8 +42,8 @@ class HttpBackOffice(
                     val accountId = resolveAccountId(ex, principal) ?: return@createContext
                     val positions = store.listPositions(accountId)
                     sendJson(ex, 200, mapOf("positions" to positions))
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/positions", err)
                 } finally {
                     ex.close()
                 }
@@ -56,8 +56,8 @@ class HttpBackOffice(
                     val accountId = resolveAccountId(ex, principal) ?: return@createContext
                     val balances = store.listBalances(accountId)
                     sendJson(ex, 200, mapOf("balances" to balances))
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/balances", err)
                 } finally {
                     ex.close()
                 }
@@ -70,8 +70,8 @@ class HttpBackOffice(
                     val accountId = resolveAccountId(ex, principal) ?: return@createContext
                     val fills = store.listFills(accountId)
                     sendJson(ex, 200, mapOf("fills" to fills))
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/fills", err)
                 } finally {
                     ex.close()
                 }
@@ -84,8 +84,8 @@ class HttpBackOffice(
                     val accountId = resolveAccountId(ex, principal) ?: return@createContext
                     val pnl = store.listRealizedPnl(accountId)
                     sendJson(ex, 200, mapOf("pnl" to pnl))
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/pnl", err)
                 } finally {
                     ex.close()
                 }
@@ -127,8 +127,8 @@ class HttpBackOffice(
                             types = types
                         )
                     sendJson(ex, 200, mapOf("accountId" to accountId, "entries" to entries))
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/ledger", err)
                 } finally {
                     ex.close()
                 }
@@ -140,8 +140,8 @@ class HttpBackOffice(
                     val principal = requirePrincipal(ex) ?: return@createContext
                     resolveAccountId(ex, principal) ?: return@createContext
                     sendJson(ex, 200, stats.snapshot())
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/stats", err)
                 } finally {
                     ex.close()
                 }
@@ -163,8 +163,8 @@ class HttpBackOffice(
                     val quoteCcy = params["quoteCcy"]?.trim()?.takeIf { it.isNotEmpty() } ?: "JPY"
                     val result = reconciler.reconcile(accountId = accountId, limit = limit, quoteCcy = quoteCcy)
                     sendJson(ex, 200, result)
-                } catch (_: Throwable) {
-                    sendText(ex, 500, "ERROR")
+                } catch (err: Throwable) {
+                    logAndRespondError(ex, "/reconcile", err)
                 } finally {
                     ex.close()
                 }
@@ -256,6 +256,12 @@ class HttpBackOffice(
         val allowed = setOf("orderaccepted", "fill")
         if (types.any { it !in allowed }) return null
         return types.toSet()
+    }
+
+    private fun logAndRespondError(ex: HttpExchange, route: String, err: Throwable) {
+        System.err.println("BackOffice $route failed: ${err.message}")
+        err.printStackTrace(System.err)
+        sendText(ex, 500, "ERROR")
     }
 
     private fun sendJson(ex: HttpExchange, status: Int, body: Any) {

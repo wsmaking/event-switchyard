@@ -33,7 +33,8 @@ make grafana-down
 ```
 
 **アクセス先**:
-- **Operations Dashboard**: http://localhost:8080 （リアルタイム監視・メトリクス・設定管理）
+- **Operations Dashboard**: http://localhost:5173 （フロント開発サーバ）
+- **API**: http://localhost:8080
 - Grafana監視: http://localhost:3000 (admin/admin)
 - Prometheus: http://localhost:9090
 
@@ -536,10 +537,32 @@ python3 scripts/change_risk.py \
 docker-compose -f docker-compose.monitoring.yml up -d
 
 # アクセス
-# - アプリケーション: http://localhost:8080
+# - API: http://localhost:8080
 # - Grafana: http://localhost:3000 (admin/admin)
 # - Prometheus: http://localhost:9090
 ```
+
+---
+
+## フロント配信（本番寄せ: Nginx + MinIO）
+
+本番寄せの構成は「Nginxが入口 / 静的ファイルはS3(=MinIO) / APIはAppへ同一オリジンで中継」。
+
+```bash
+# フロントビルド→MinIOへアップロード
+scripts/ops/frontend_upload_minio.sh
+
+# Nginx + App + Gateway + BackOffice をまとめて起動
+docker compose --profile frontend up -d nginx
+```
+
+アクセス:
+- UI: http://localhost:8080/
+
+補足:
+- 直接MinIOを公開しない構成（本番寄せ）。必要なら `docker compose --profile frontend up -d minio` で確認可能。
+- `/api/*` と `/ws/*` は Nginx が App へ転送するため、フロントは同一オリジンで動作。
+- デモデータを自動生成する場合は `STRATEGY_AUTO_ENABLE=1 docker compose --profile frontend up -d nginx`
 
 ---
 

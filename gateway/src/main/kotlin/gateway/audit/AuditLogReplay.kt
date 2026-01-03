@@ -9,6 +9,7 @@ import gateway.order.OrderSide
 import gateway.order.OrderSnapshot
 import gateway.order.OrderStatus
 import gateway.order.OrderType
+import gateway.order.TimeInForce
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -95,6 +96,15 @@ class AuditLogReplay(
                     val orderType = data.text("type")?.let { OrderType.valueOf(it) } ?: return false
                     val qty = data.long("qty") ?: return false
                     val price = data.long("price")
+                    val timeInForce =
+                        data.text("timeInForce")?.let {
+                            try {
+                                TimeInForce.valueOf(it)
+                            } catch (_: IllegalArgumentException) {
+                                TimeInForce.GTC
+                            }
+                        } ?: TimeInForce.GTC
+                    val expireAt = data.long("expireAt")
                     val clientOrderId = data.text("clientOrderId")
                     val idempotencyKey = data.text("idempotencyKey")
 
@@ -107,6 +117,8 @@ class AuditLogReplay(
                         type = orderType,
                         qty = qty,
                         price = price,
+                        timeInForce = timeInForce,
+                        expireAt = expireAt,
                         status = OrderStatus.ACCEPTED,
                         acceptedAt = at,
                         lastUpdateAt = at,

@@ -5,12 +5,14 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import java.nio.charset.StandardCharsets
+import java.net.URLDecoder
+import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.abs
 import kotlin.random.Random
+import kotlin.math.roundToInt
 
 data class StockInfo(
     val symbol: String,
@@ -21,6 +23,11 @@ data class StockInfo(
     val high: Double,
     val low: Double,
     val volume: Long
+)
+
+data class PricePoint(
+    val timestamp: Long,
+    val price: Double
 )
 
 data class PriceLevel(
@@ -34,6 +41,15 @@ data class OrderBookDepth(
     val timestamp: Long,
     val bids: List<PriceLevel>,  // 買い板（価格降順）
     val asks: List<PriceLevel>   // 売り板（価格昇順）
+)
+
+data class MarketSpec(
+    val basePrice: Double,
+    val tickSize: Double,
+    val volatilityBps: Double,
+    val meanReversionBps: Double,
+    val maxMovePercent: Double,
+    val volumeStepRange: LongRange
 )
 
 /**
@@ -52,18 +68,55 @@ class MarketDataController : HttpHandler, AutoCloseable {
         "8306" to "三菱UFJフィナンシャル・グループ"
     )
 
-    // 基準価格（模擬）
-    private val basePrices = mapOf(
-        "7203" to 2500.0,
-        "6758" to 13500.0,
-        "9984" to 6200.0,
-        "6861" to 52000.0,
-        "8306" to 1200.0
+    // 銘柄ごとの価格特性（ティック・ボラ・最大変動・出来高）
+    private val marketSpecs = mapOf(
+        "7203" to MarketSpec(
+            basePrice = 2500.0,
+            tickSize = 1.0,
+            volatilityBps = 4.0,
+            meanReversionBps = 3.0,
+            maxMovePercent = 10.0,
+            volumeStepRange = 500L..4_000L
+        ),
+        "6758" to MarketSpec(
+            basePrice = 13500.0,
+            tickSize = 5.0,
+            volatilityBps = 5.0,
+            meanReversionBps = 3.0,
+            maxMovePercent = 12.0,
+            volumeStepRange = 300L..2_500L
+        ),
+        "9984" to MarketSpec(
+            basePrice = 6200.0,
+            tickSize = 1.0,
+            volatilityBps = 6.0,
+            meanReversionBps = 3.5,
+            maxMovePercent = 12.0,
+            volumeStepRange = 400L..3_500L
+        ),
+        "6861" to MarketSpec(
+            basePrice = 52000.0,
+            tickSize = 10.0,
+            volatilityBps = 6.5,
+            meanReversionBps = 4.0,
+            maxMovePercent = 14.0,
+            volumeStepRange = 80L..800L
+        ),
+        "8306" to MarketSpec(
+            basePrice = 1200.0,
+            tickSize = 0.5,
+            volatilityBps = 3.5,
+            meanReversionBps = 2.5,
+            maxMovePercent = 8.0,
+            volumeStepRange = 900L..6_000L
+        )
     )
 
     // 価格キャッシュ
     private val priceCache = ConcurrentHashMap<String, StockInfo>()
     private val lastUpdateTime = AtomicLong(0)
+    private val priceHistory = ConcurrentHashMap<String, ArrayDeque<PricePoint>>()
+    private val sessionOpen = ConcurrentHashMap<String, Double>()
 
     // OrderBook管理（銘柄ごと）
     private val orderBooks = ConcurrentHashMap<String, OrderBook>()
@@ -75,6 +128,7 @@ class MarketDataController : HttpHandler, AutoCloseable {
 
     companion object {
         private const val UPDATE_INTERVAL_MS = 1000L // 1秒ごとに価格更新
+        private const val HISTORY_LIMIT = 300
     }
 
     init {
@@ -135,6 +189,16 @@ class MarketDataController : HttpHandler, AutoCloseable {
                     }
                     handleOrderBook(exchange, symbol)
                 }
+                path.endsWith("/history") -> {
+                    val symbol = path.split("/").getOrNull(3) ?: ""
+                    if (symbol.isEmpty() || !stockMaster.containsKey(symbol)) {
+                        sendResponse(exchange, 404, "Symbol not found")
+                        return
+                    }
+                    val params = parseQuery(exchange.requestURI.rawQuery ?: "")
+                    val limit = params["limit"]?.toIntOrNull()
+                    handleHistory(exchange, symbol, limit)
+                }
                 else -> {
                     // /api/market-data/7203 の場合（価格情報）
                     val symbol = path.substringAfterLast("/")
@@ -142,7 +206,7 @@ class MarketDataController : HttpHandler, AutoCloseable {
                         sendResponse(exchange, 404, "Symbol not found")
                         return
                     }
-                    val stockInfo = priceCache[symbol] ?: generateStockInfo(symbol)
+                    val stockInfo = priceCache[symbol] ?: generateStockInfo(symbol, priceCache[symbol])
                     val json = objectMapper.writeValueAsString(stockInfo)
                     exchange.responseHeaders.set("Content-Type", "application/json")
                     sendResponse(exchange, 200, json)
@@ -155,22 +219,34 @@ class MarketDataController : HttpHandler, AutoCloseable {
         }
     }
 
-    private fun generateStockInfo(symbol: String): StockInfo {
-        val basePrice = basePrices[symbol] ?: 1000.0
+    private fun generateStockInfo(symbol: String, previous: StockInfo? = priceCache[symbol]): StockInfo {
+        val spec = marketSpecs[symbol] ?: MarketSpec(1000.0, 1.0, 5.0, 2.0, 12.0, 500L..3_000L)
         val name = stockMaster[symbol] ?: "Unknown"
+        val basePrice = spec.basePrice
 
-        // 模擬的な価格変動（±3%以内）
-        val changePercent = (Random.nextDouble() - 0.5) * 6.0
-        val change = basePrice * changePercent / 100.0
-        val currentPrice = basePrice + change
+        sessionOpen.putIfAbsent(symbol, basePrice)
+        val openPrice = sessionOpen[symbol] ?: basePrice
 
-        // 高値・安値（当日レンジ）
-        val range = basePrice * 0.02
-        val high = currentPrice + abs(Random.nextDouble()) * range
-        val low = currentPrice - abs(Random.nextDouble()) * range
+        // 模擬的な価格変動（bpsベースの小刻み揺らぎ + 平均回帰）
+        val lastPrice = previous?.currentPrice ?: basePrice
+        val noiseBps = Random.nextDouble(-spec.volatilityBps, spec.volatilityBps)
+        val reversionBps = ((basePrice - lastPrice) / basePrice) * spec.meanReversionBps
+        val moveBps = noiseBps + reversionBps
+        val unclamped = lastPrice * (1.0 + moveBps / 10_000.0)
+        val cap = spec.maxMovePercent / 100.0
+        val clamped = unclamped.coerceIn(basePrice * (1.0 - cap), basePrice * (1.0 + cap))
+        val currentPrice = applyTick(clamped, spec.tickSize)
 
-        // 出来高（ランダム）
-        val volume = (Random.nextLong(1_000_000, 10_000_000))
+        // 高値・安値は直近の履歴を引き継ぐ
+        val high = maxOf(previous?.high ?: currentPrice, currentPrice)
+        val low = minOf(previous?.low ?: currentPrice, currentPrice)
+
+        val change = currentPrice - openPrice
+        val changePercent = change / openPrice * 100.0
+
+        // 出来高（擬似的に積み上げ）
+        val volumeStep = Random.nextLong(spec.volumeStepRange.first, spec.volumeStepRange.last + 1)
+        val volume = (previous?.volume ?: 0L) + volumeStep
 
         return StockInfo(
             symbol = symbol,
@@ -193,20 +269,29 @@ class MarketDataController : HttpHandler, AutoCloseable {
     // 全銘柄の価格を一斉更新（バッチ処理）
     private fun updateAllPrices() {
         try {
+            val now = System.currentTimeMillis()
             stockMaster.keys.forEach { symbol ->
-                priceCache[symbol] = generateStockInfo(symbol)
+                val info = generateStockInfo(symbol, priceCache[symbol])
+                priceCache[symbol] = info
+                recordHistory(symbol, info.currentPrice, now)
             }
-            lastUpdateTime.set(System.currentTimeMillis())
+            lastUpdateTime.set(now)
         } catch (e: Exception) {
             System.err.println("Error updating prices: ${e.message}")
         }
+    }
+
+    private fun applyTick(price: Double, tickSize: Double): Double {
+        if (tickSize <= 0.0) return price
+        val ticks = (price / tickSize).roundToInt()
+        return ticks * tickSize
     }
 
     // PositionController用の内部メソッド（キャッシュから取得）
     fun getCurrentPrice(symbol: String): Double {
         return priceCache[symbol]?.currentPrice ?: run {
             // キャッシュがない場合は生成して返す
-            val info = generateStockInfo(symbol)
+            val info = generateStockInfo(symbol, priceCache[symbol])
             priceCache[symbol] = info
             info.currentPrice
         }
@@ -239,10 +324,52 @@ class MarketDataController : HttpHandler, AutoCloseable {
         sendResponse(exchange, 200, json)
     }
 
+    private fun handleHistory(exchange: HttpExchange, symbol: String, limit: Int?) {
+        val deque = priceHistory[symbol]
+        val points = if (deque == null) {
+            emptyList()
+        } else {
+            synchronized(deque) { deque.toList() }
+        }
+        val trimmed =
+            if (limit != null && limit > 0 && points.size > limit) {
+                points.takeLast(limit)
+            } else {
+                points
+            }
+        val json = objectMapper.writeValueAsString(trimmed)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+        sendResponse(exchange, 200, json)
+    }
+
+    private fun recordHistory(symbol: String, price: Double, timestamp: Long) {
+        val deque = priceHistory.computeIfAbsent(symbol) { ArrayDeque() }
+        synchronized(deque) {
+            deque.addLast(PricePoint(timestamp = timestamp, price = price))
+            while (deque.size > HISTORY_LIMIT) {
+                deque.removeFirst()
+            }
+        }
+    }
+
+    private fun parseQuery(q: String): Map<String, String> {
+        if (q.isEmpty()) return emptyMap()
+        val pairs = mutableListOf<Pair<String, String>>()
+        for (item in q.split('&')) {
+            if (item.isEmpty()) continue
+            val idx = item.indexOf('=')
+            val k = if (idx >= 0) item.substring(0, idx) else item
+            val v = if (idx >= 0) item.substring(idx + 1) else ""
+            pairs += URLDecoder.decode(k, Charsets.UTF_8) to URLDecoder.decode(v, Charsets.UTF_8)
+        }
+        return pairs.toMap()
+    }
+
     // OrderBookから5レベル板情報を生成
     private fun getOrderBookDepth(symbol: String, orderBook: OrderBook): OrderBookDepth {
-        val basePrice = basePrices[symbol] ?: 1000.0
-        val priceInt = basePrice.toInt()
+        val spec = marketSpecs[symbol] ?: MarketSpec(1000.0, 1.0, 5.0, 2.0, 12.0, 500L..3_000L)
+        val referencePrice = priceCache[symbol]?.currentPrice ?: spec.basePrice
+        val priceInt = referencePrice.roundToInt()
 
         // 模擬的な5レベル板情報を生成
         val bids = (1..5).map { level ->
@@ -273,7 +400,8 @@ class MarketDataController : HttpHandler, AutoCloseable {
     private fun populateInitialOrders() {
         stockMaster.keys.forEach { symbol ->
             val orderBook = orderBooks[symbol] ?: return@forEach
-            val basePrice = basePrices[symbol]?.toInt() ?: 1000
+            val spec = marketSpecs[symbol] ?: MarketSpec(1000.0, 1.0, 5.0, 2.0, 12.0, 500L..3_000L)
+            val basePrice = spec.basePrice.roundToInt()
 
             // 買い注文を投入
             repeat(10) {
@@ -295,7 +423,8 @@ class MarketDataController : HttpHandler, AutoCloseable {
     private fun generateRandomOrders() {
         stockMaster.keys.forEach { symbol ->
             val orderBook = orderBooks[symbol] ?: return@forEach
-            val basePrice = basePrices[symbol]?.toInt() ?: 1000
+            val spec = marketSpecs[symbol] ?: MarketSpec(1000.0, 1.0, 5.0, 2.0, 12.0, 500L..3_000L)
+            val basePrice = (priceCache[symbol]?.currentPrice ?: spec.basePrice).roundToInt()
 
             // 50%の確率で注文を生成
             if (Random.nextBoolean()) {

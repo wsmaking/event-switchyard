@@ -91,13 +91,11 @@ class HttpIngress : AutoCloseable {
                 }
 
                 createContext("/api/market-data", marketDataController)
+                createContext("/api/market", marketDataController)
                 createContext("/api/orders", orderController)
                 createContext("/api/positions", positionController)
                 createContext("/ws/market-data", webSocketController)
             }
-
-            // フロントエンド静的ファイル配信 (最後に登録してAPI優先)
-            createContext("/", StaticFileController())
 
             executor = Executors.newCachedThreadPool()
             start()

@@ -20,6 +20,13 @@ export const OrderStatus = {
 
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
 
+export const TimeInForce = {
+  GTC: 'GTC',
+  GTD: 'GTD',
+} as const;
+
+export type TimeInForce = (typeof TimeInForce)[keyof typeof TimeInForce];
+
 export interface Order {
   id: string;
   symbol: string;
@@ -28,6 +35,8 @@ export interface Order {
   quantity: number;
   price: number | null;
   status: OrderStatus;
+  timeInForce: TimeInForce;
+  expireAt: number | null;
   submittedAt: number;
   filledAt: number | null;
   executionTimeMs: number | null;
@@ -39,6 +48,8 @@ export interface OrderRequest {
   type: OrderType;
   quantity: number;
   price: number | null;
+  timeInForce: TimeInForce;
+  expireAt: number | null;
 }
 
 export interface StockInfo {
@@ -50,6 +61,11 @@ export interface StockInfo {
   high: number;
   low: number;
   volume: number;
+}
+
+export interface PricePoint {
+  timestamp: number;
+  price: number;
 }
 
 export interface Position {

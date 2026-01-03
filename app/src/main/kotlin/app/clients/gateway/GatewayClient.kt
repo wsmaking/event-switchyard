@@ -16,6 +16,8 @@ data class GatewayOrderRequest(
     val type: String,
     val qty: Long,
     val price: Long? = null,
+    val timeInForce: String = "GTC",
+    val expireAt: Long? = null,
     val clientOrderId: String? = null
 )
 
@@ -28,6 +30,8 @@ data class GatewayOrderSnapshot(
     val type: String? = null,
     val qty: Long? = null,
     val price: Long? = null,
+    val timeInForce: String? = null,
+    val expireAt: Long? = null,
     val status: String? = null,
     val acceptedAt: String? = null,
     val lastUpdateAt: String? = null,

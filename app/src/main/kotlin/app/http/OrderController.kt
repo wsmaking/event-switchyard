@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 enum class OrderSide { BUY, SELL }
 enum class OrderType { MARKET, LIMIT }
+enum class TimeInForce { GTC, GTD }
 enum class OrderStatus { PENDING, FILLED, REJECTED }
 
 data class Order(
@@ -27,6 +28,8 @@ data class Order(
     val type: OrderType,
     val quantity: Int,
     val price: Double?,
+    val timeInForce: TimeInForce,
+    val expireAt: Long?,
     val status: OrderStatus,
     val submittedAt: Long,
     val filledAt: Long? = null,
@@ -38,7 +41,9 @@ data class OrderRequest(
     val side: OrderSide,
     val type: OrderType,
     val quantity: Int,
-    val price: Double?
+    val price: Double?,
+    val timeInForce: TimeInForce = TimeInForce.GTC,
+    val expireAt: Long? = null
 )
 
 /**
@@ -80,10 +85,18 @@ class OrderController(
     private fun handleSubmitOrder(exchange: HttpExchange) {
         val requestBody = exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8)
         val request = objectMapper.readValue<OrderRequest>(requestBody)
+        val now = System.currentTimeMillis()
+        if (request.timeInForce == TimeInForce.GTD) {
+            val expireAt = request.expireAt
+            if (expireAt == null || expireAt <= now) {
+                sendResponse(exchange, 422, "INVALID_EXPIRE_AT")
+                return
+            }
+        }
 
         // 注文ID生成
         val orderId = UUID.randomUUID().toString()
-        val submittedAt = System.currentTimeMillis()
+        val submittedAt = now
         val startTime = System.nanoTime()
 
         // まず戦略エンジン側でローカル判定（担当外や抑止は拒否）
@@ -98,6 +111,8 @@ class OrderController(
                 type = request.type.name,
                 qty = request.quantity.toLong(),
                 price = request.price?.toLong(),
+                timeInForce = request.timeInForce.name,
+                expireAt = request.expireAt,
                 clientOrderId = orderId
             )
             val gatewayResult = executionService.submitOrder(gatewayRequest, idempotencyKey = orderId)
@@ -110,6 +125,8 @@ class OrderController(
                     type = request.type,
                     quantity = request.quantity,
                     price = request.price,
+                    timeInForce = request.timeInForce,
+                    expireAt = request.expireAt,
                     status = OrderStatus.PENDING,
                     submittedAt = submittedAt,
                     filledAt = null,
@@ -123,6 +140,8 @@ class OrderController(
                     type = request.type,
                     quantity = request.quantity,
                     price = request.price,
+                    timeInForce = request.timeInForce,
+                    expireAt = request.expireAt,
                     status = OrderStatus.REJECTED,
                     submittedAt = submittedAt,
                     executionTimeMs = executionTimeMs
@@ -136,6 +155,8 @@ class OrderController(
                 type = request.type,
                 quantity = request.quantity,
                 price = request.price,
+                timeInForce = request.timeInForce,
+                expireAt = request.expireAt,
                 status = OrderStatus.REJECTED,
                 submittedAt = submittedAt
             )
@@ -228,6 +249,9 @@ class OrderController(
         val orderId = snapshot.orderId ?: return
         val mapped = mapGatewayStatus(snapshot.status) ?: return
         val existing = orders[orderId]
+        val resolvedTimeInForce =
+            parseTimeInForce(snapshot.timeInForce) ?: existing?.timeInForce ?: TimeInForce.GTC
+        val resolvedExpireAt = snapshot.expireAt ?: existing?.expireAt
 
         val submittedAt =
             snapshot.acceptedAt?.let { parseInstantMillis(it) } ?: existing?.submittedAt ?: System.currentTimeMillis()
@@ -240,6 +264,8 @@ class OrderController(
                     type = parseType(snapshot.type) ?: OrderType.MARKET,
                     quantity = snapshot.qty?.toInt() ?: 0,
                     price = snapshot.price?.toDouble(),
+                    timeInForce = resolvedTimeInForce,
+                    expireAt = resolvedExpireAt,
                     status = mapped,
                     submittedAt = submittedAt,
                     filledAt = updatedFilledAtFromSnapshot(mapped, snapshot),
@@ -249,7 +275,9 @@ class OrderController(
                 existing.copy(
                     status = mapped,
                     price = existing.price ?: snapshot.price?.toDouble(),
-                    filledAt = updatedFilledAt(existing, mapped, snapshot)
+                    filledAt = updatedFilledAt(existing, mapped, snapshot),
+                    timeInForce = resolvedTimeInForce,
+                    expireAt = resolvedExpireAt
                 )
             }
         orders[orderId] = updated
@@ -293,6 +321,15 @@ class OrderController(
         return when (normalized) {
             "MARKET" -> OrderType.MARKET
             "LIMIT" -> OrderType.LIMIT
+            else -> null
+        }
+    }
+
+    private fun parseTimeInForce(raw: String?): TimeInForce? {
+        val normalized = raw?.uppercase() ?: return null
+        return when (normalized) {
+            "GTC" -> TimeInForce.GTC
+            "GTD" -> TimeInForce.GTD
             else -> null
         }
     }

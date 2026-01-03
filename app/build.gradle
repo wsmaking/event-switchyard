@@ -95,26 +95,3 @@ jar {
 }
 
 tasks.named('test') { useJUnitPlatform() }
-
-// フロントエンドビルドタスク
-task buildFrontend(type: Exec) {
-    workingDir '../frontend'
-
-    // npm ci (本番用の依存関係インストール)
-    commandLine 'sh', '-c', 'npm ci && npm run build'
-
-    inputs.dir('../frontend/src')
-    inputs.file('../frontend/package.json')
-    inputs.file('../frontend/package-lock.json')
-    outputs.dir('../frontend/dist')
-}
-
-// processResourcesの前にフロントエンドをビルド
-tasks.named('processResources') {
-    dependsOn buildFrontend
-
-    // frontend/dist を resources にコピー
-    from('../frontend/dist') {
-        into 'static'
-    }
-}
