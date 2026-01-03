@@ -57,6 +57,8 @@ class OrderService(
             type = req.type,
             qty = req.qty,
             price = req.price,
+            timeInForce = req.timeInForce,
+            expireAt = req.expireAt,
             status = OrderStatus.ACCEPTED,
             acceptedAt = now,
             lastUpdateAt = now,
@@ -85,6 +87,8 @@ class OrderService(
                     "type" to req.type.name,
                     "qty" to req.qty,
                     "price" to req.price,
+                    "timeInForce" to req.timeInForce.name,
+                    "expireAt" to req.expireAt,
                     "clientOrderId" to req.clientOrderId,
                     "idempotencyKey" to idempotencyKey
                 )
@@ -102,6 +106,8 @@ class OrderService(
                     "type" to req.type.name,
                     "qty" to req.qty,
                     "price" to req.price,
+                    "timeInForce" to req.timeInForce.name,
+                    "expireAt" to req.expireAt,
                     "clientOrderId" to req.clientOrderId
                 )
             )
@@ -151,6 +157,10 @@ class OrderService(
     private fun validate(req: CreateOrderRequest): String? {
         if (req.symbol.isBlank()) return "INVALID_SYMBOL"
         if (req.qty <= 0) return "INVALID_QTY"
+        if (req.timeInForce == TimeInForce.GTD) {
+            val expireAt = req.expireAt ?: return "MISSING_EXPIRE_AT"
+            if (expireAt <= Instant.now().toEpochMilli()) return "EXPIRE_AT_IN_PAST"
+        }
         return when (req.type) {
             OrderType.MARKET -> null
             OrderType.LIMIT -> {

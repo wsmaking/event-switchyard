@@ -47,7 +47,8 @@ class RiskManagementHandler : EventHandler<RingBufferEvent> {
             },
             price = 0.0,
             quantity = quantity,
-            orderType = OrderEvent.OrderType.MARKET
+            orderType = OrderEvent.OrderType.MARKET,
+            timeInForce = OrderEvent.TimeInForce.GTC
         )
 
         when (signal.signal) {
