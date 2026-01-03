@@ -3,11 +3,11 @@ package app.http
 import app.engine.Engine
 import app.engine.Router
 import app.clients.backoffice.BackOfficeClient
-import app.clients.gateway.GatewayClient
 import app.clients.gateway.GatewaySseClient
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import app.strategy.StrategyAutoTrader
+import app.order.OrderExecutionService
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
@@ -72,9 +72,9 @@ class HttpIngress : AutoCloseable {
 
                 // Trading API endpoints (依存関係に注意)
                 val marketDataController = MarketDataController()
-                val gatewayClient = GatewayClient()
+                val executionService = OrderExecutionService()
                 val backOfficeClient = BackOfficeClient()
-                val orderController = OrderController(r, gatewayClient)
+                val orderController = OrderController(r, executionService)
                 val positionController = PositionController(backOfficeClient, marketDataController)
                 val webSocketController = WebSocketController(marketDataController)
 
@@ -85,7 +85,7 @@ class HttpIngress : AutoCloseable {
                 val strategyEnabled =
                     (System.getenv("STRATEGY_AUTO_ENABLE") ?: "0").let { it == "1" || it.equals("true", ignoreCase = true) }
                 if (strategyEnabled) {
-                    val trader = StrategyAutoTrader(marketDataController, gatewayClient)
+                    val trader = StrategyAutoTrader(marketDataController, executionService)
                     trader.start()
                     strategyAutoTrader = trader
                 }

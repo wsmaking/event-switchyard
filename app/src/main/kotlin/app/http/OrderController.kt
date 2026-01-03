@@ -1,12 +1,12 @@
 package app.http
 
 import app.engine.Router
-import app.clients.gateway.GatewayClient
 import app.clients.gateway.GatewayExecutionReport
 import app.clients.gateway.GatewayOrderRequest
 import app.clients.gateway.GatewayOrderSnapshot
 import app.clients.gateway.GatewaySseEvent
 import app.clients.gateway.GatewaySseListener
+import app.order.OrderExecutionService
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpExchange
@@ -47,7 +47,7 @@ data class OrderRequest(
  */
 class OrderController(
     private val router: Router,
-    private val gatewayClient: GatewayClient
+    private val executionService: OrderExecutionService
 ) : HttpHandler, GatewaySseListener {
     private val objectMapper = jacksonObjectMapper()
     private val orders = ConcurrentHashMap<String, Order>()
@@ -100,7 +100,7 @@ class OrderController(
                 price = request.price?.toLong(),
                 clientOrderId = orderId
             )
-            val gatewayResult = gatewayClient.submitOrder(gatewayRequest, idempotencyKey = orderId)
+            val gatewayResult = executionService.submitOrder(gatewayRequest, idempotencyKey = orderId)
             val executionTimeMs = (System.nanoTime() - startTime) / 1_000_000.0
             if (gatewayResult.accepted) {
                 Order(
@@ -169,7 +169,7 @@ class OrderController(
         val pending = orders.values.filter { it.status == OrderStatus.PENDING }
         if (pending.isEmpty()) return
         for (order in pending) {
-            val snapshot = gatewayClient.fetchOrder(order.id) ?: continue
+            val snapshot = executionService.fetchOrder(order.id) ?: continue
             val mapped = mapGatewayStatus(snapshot.status) ?: continue
             if (mapped == order.status) continue
             val updated = order.copy(
