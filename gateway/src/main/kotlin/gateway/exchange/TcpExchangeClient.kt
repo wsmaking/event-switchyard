@@ -13,6 +13,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+// Gatewayから外部取引所をTCPで叩くためのシンプルなクライアント。
+// 1行JSONを送信し、ExecutionReportを受けてコールバックへ返す。
 class TcpExchangeClient(
     private val host: String,
     private val port: Int,
@@ -68,6 +70,7 @@ class TcpExchangeClient(
         }
     }
 
+    // TCPストリームに1行JSONとして送る（JSONL形式）。
     private fun send(request: TcpExchangeRequest) {
         val line = mapper.writeValueAsString(request)
         synchronized(writerLock) {
@@ -77,6 +80,7 @@ class TcpExchangeClient(
         }
     }
 
+    // 受信したExecutionReportをorderId単位でコールバックに流す。
     private fun readLoop() {
         val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
         while (running.get()) {

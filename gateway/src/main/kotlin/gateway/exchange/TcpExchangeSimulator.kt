@@ -19,6 +19,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+// TCPで注文を受け取り、ExecutionReportを返す疑似取引所サーバ。
+// 受信した注文は ExchangeSimulator に渡し、結果だけをTCPで返す。
 class TcpExchangeSimulator(
     private val bindHost: String = System.getenv("EXCHANGE_TCP_BIND") ?: "0.0.0.0",
     private val port: Int = (System.getenv("EXCHANGE_TCP_PORT") ?: "9901").toInt(),
@@ -61,6 +63,7 @@ class TcpExchangeSimulator(
         val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
         val writerLock = Any()
 
+        // 1行1JSONでExecutionReportを返す。
         fun sendReport(report: ExecutionReport) {
             val line = mapper.writeValueAsString(report)
             synchronized(writerLock) {
@@ -89,6 +92,7 @@ class TcpExchangeSimulator(
         }
     }
 
+    // 受信した注文を疑似取引所に渡し、返ってきた結果をそのまま返信。
     private fun handleNewOrder(request: TcpExchangeRequest, onReport: (ExecutionReport) -> Unit) {
         val symbol = request.symbol ?: return reject(request.orderId, onReport)
         val side = request.side ?: OrderSide.BUY

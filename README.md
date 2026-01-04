@@ -58,6 +58,35 @@ make grafana-down
 
 ---
 
+## TCP取引所シミュレータ（体感差比較）
+
+HTTP/Simulator と TCP で「受理→約定レイテンシ」の体感差を比べる最小セット。
+
+### 1) TCP取引所シミュレータを起動
+
+```bash
+./gradlew :gateway:run -PmainClass=gateway.exchange.TcpExchangeSimulatorMainKt
+```
+
+### 2) Gateway を TCP で起動
+
+```bash
+EXCHANGE_TRANSPORT=tcp ./gradlew :gateway:run
+```
+
+### 3) 比較スモーク（metricsの差を確認）
+
+```bash
+scripts/ops/exchange_transport_smoke.sh tcp
+scripts/ops/exchange_transport_smoke.sh sim
+```
+
+**補足**:
+- 既定のTCPポートは `EXCHANGE_TCP_PORT=9901`
+- `EXCHANGE_TRANSPORT=sim` は従来の ExchangeSimulator を使用
+
+---
+
 ## ユースケース別コマンド
 
 ### 開発
