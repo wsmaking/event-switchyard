@@ -1,9 +1,9 @@
-# Event Switchyard 設計図（差し替え後・完全版）
+# Event Switchyard 設計図
 
 ## 1. このシステムの立ち位置（前提）
 
 Event Switchyard は **取引所（Exchange）ではない**。  
-本プロジェクトは **Strategy(App) + Execution Gateway/SOR(Gateway) + BackOffice** の3層構成で、  
+ **Strategy(App) + Execution Gateway/SOR(Gateway) + BackOffice** の3層構成で、  
 **Gateway が Execution Gateway / Smart Order Router（SOR）** として動作する。
 
 - App（手動 or 自動）から注文を受信
