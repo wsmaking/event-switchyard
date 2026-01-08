@@ -5,6 +5,11 @@ edition = "2024"
 description = "Ultra-low latency order gateway core in Rust"
 authors = ["wsmaking"]
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+# cdylib: 共有ライブラリ (.dylib/.so) を生成（JNI用）
+# rlib: Rustライブラリ（テスト・ベンチマーク用）
+
 [dependencies]
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"

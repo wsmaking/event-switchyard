@@ -18,6 +18,7 @@
 //! cargo bench
 //! ```
 
+pub mod ffi;
 pub mod metrics;
 pub mod queue;
 pub mod risk;

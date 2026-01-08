@@ -30,6 +30,9 @@ dependencies {
     implementation 'ch.qos.logback:logback-classic:1.5.6'
 
     implementation 'org.apache.kafka:kafka-clients:3.5.1'
+
+    // JNA - Rustネイティブライブラリ呼び出し用
+    implementation 'net.java.dev.jna:jna:5.14.0'
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
@@ -53,4 +56,65 @@ jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-tasks.named('test') { useJUnitPlatform() }
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        showStandardStreams = true
+        events "passed", "skipped", "failed"
+    }
+    // Panama (Foreign Function & Memory API) 用のJVMオプション
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+
+// =====================================================
+// Rust ネイティブライブラリ ビルドタスク
+// =====================================================
+
+def rustProjectDir = file("${rootDir}/gateway-core")
+def rustTargetDir = file("${rustProjectDir}/target/release")
+
+// プラットフォーム別のライブラリ名
+def nativeLibName = {
+    def os = System.getProperty('os.name').toLowerCase()
+    if (os.contains('mac')) return 'libgateway_core.dylib'
+    if (os.contains('linux')) return 'libgateway_core.so'
+    if (os.contains('win')) return 'gateway_core.dll'
+    throw new GradleException("Unsupported OS: ${os}")
+}()
+
+task buildRust(type: Exec) {
+    description = 'Build Rust gateway-core library'
+    group = 'build'
+    workingDir rustProjectDir
+    commandLine 'cargo', 'build', '--release'
+
+    // cargo がなければスキップ
+    onlyIf {
+        try {
+            def result = ['which', 'cargo'].execute()
+            result.waitFor()
+            return result.exitValue() == 0
+        } catch (Exception e) {
+            return false
+        }
+    }
+}
+
+task copyRustLib(type: Copy) {
+    description = 'Copy Rust library to resources'
+    group = 'build'
+    dependsOn buildRust
+
+    from(rustTargetDir) {
+        include nativeLibName
+    }
+    into("${projectDir}/src/main/resources/native")
+
+    onlyIf {
+        def libFile = new File(rustTargetDir, nativeLibName)
+        libFile.exists()
+    }
+}
+
+// processResources の前に Rust ライブラリをコピー
+processResources.dependsOn copyRustLib
