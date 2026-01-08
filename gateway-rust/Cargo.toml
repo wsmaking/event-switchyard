@@ -1,0 +1,41 @@
+[package]
+name = "gateway-rust"
+version = "0.1.0"
+edition = "2024"
+description = "Full Rust implementation of the order gateway"
+authors = ["wsmaking"]
+
+[dependencies]
+# コアライブラリ（queue, risk, metrics）
+gateway-core = { path = "../gateway-core" }
+
+# 非同期ランタイム
+tokio = { version = "1", features = ["full"] }
+
+# HTTP サーバー
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# シリアライゼーション
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ロギング
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 設定
+dotenvy = "0.15"
+
+# エラー処理
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[[bin]]
+name = "gateway-rust"
+path = "src/main.rs"

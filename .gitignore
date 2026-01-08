@@ -59,3 +59,6 @@ docs/arch/system_design_interview_questions.txt
 
 # --- Rust build artifacts
 gateway-core/target/
+gateway/src/main/resources/native/
+tools/async-profiler/
+gateway-rust/target/
