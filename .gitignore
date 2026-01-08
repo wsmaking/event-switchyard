@@ -56,3 +56,6 @@ var/run/
 
 # --- Local notes (not tracked)
 docs/arch/system_design_interview_questions.txt
+
+# --- Rust build artifacts
+gateway-core/target/
