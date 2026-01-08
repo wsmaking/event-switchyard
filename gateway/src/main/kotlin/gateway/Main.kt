@@ -16,6 +16,7 @@ import gateway.order.OrderService
 import gateway.risk.SimplePreTradeRisk
 import gateway.queue.BlockingFastPathQueue
 import gateway.sor.SmartOrderRouter
+import gateway.rate.RateLimiter
 import java.nio.file.Path
 
 fun main() {
@@ -39,6 +40,10 @@ fun main() {
     val exchange: ExchangeClient = SmartOrderRouter.fromEnv()
     val jwtAuth = JwtAuth()
     val metrics = GatewayMetrics(queue = fastPathQueue, sseHub = sseHub, kafka = (eventPublisher as? KafkaEventPublisher))
+    val rateLimiter = System.getenv("GATEWAY_RATE_LIMIT_PER_SEC")
+        ?.toLongOrNull()
+        ?.takeIf { it > 0 }
+        ?.let { RateLimiter(it) }
     val fastPathEngine = FastPathEngine(
         queue = fastPathQueue,
         orderStore = orderStore,
@@ -55,7 +60,8 @@ fun main() {
         eventPublisher = eventPublisher,
         metrics = metrics,
         risk = risk,
-        fastPathQueue = fastPathQueue
+        fastPathQueue = fastPathQueue,
+        rateLimiter = rateLimiter
     )
 
     val server = HttpGateway(

@@ -203,8 +203,6 @@ services:
     profiles: ["gateway", "frontend"]
     depends_on: [kafka, topic-init]
     command: ["java","-jar","gateway-all.jar"]
-    ports:
-      - "8081:8081"
     environment:
       <<: *java_env
       GATEWAY_PORT: "8081"
@@ -302,7 +300,7 @@ services:
       - minio
       - app
     ports:
-      - "8080:8080"
+      - "80:80"
     volumes:
       - ./infra/nginx/frontend.conf:/etc/nginx/nginx.conf:ro
 

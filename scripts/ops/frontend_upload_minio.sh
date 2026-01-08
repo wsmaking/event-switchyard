@@ -37,4 +37,4 @@ docker compose --profile frontend run --rm \
 
 echo "==> Done. Start Nginx with:"
 echo "==>   docker compose --profile frontend up -d nginx"
-echo "==> Frontend URL: http://localhost:8080/"
+echo "==> Frontend URL: http://localhost/"

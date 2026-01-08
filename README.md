@@ -34,10 +34,15 @@ make grafana-down
 
 **アクセス先**:
 - **UI (開発)**: http://localhost:5173 （Vite dev server）
-- **UI (本番寄せ/Nginx)**: http://localhost:8080/ （Nginxが静的配信 + /api を中継）
-- **API**: http://localhost:8080
+- **UI (本番寄せ/Nginx)**: http://localhost/ （Nginxが静的配信 + /api を中継）
+- **API (外部)**: http://localhost/api （Nginx経由）
 - Grafana監視: http://localhost:3000 (admin/admin)
 - Prometheus: http://localhost:9090
+
+ポートの考え方（実務寄せ）
+- 外部公開は **Nginx(80/443)** のみ（UIと/apiはNginx経由）。
+- Appは **8080固定**（コード直指定）で内部専用。変更する場合はコード修正が必要。
+- Gatewayは `GATEWAY_PORT`（デフォルト8081）、BackOfficeは `BACKOFFICE_PORT`（デフォルト8082）。
 
 ### 3. ワンコマンドで全実行
 
@@ -322,7 +327,7 @@ curl "http://localhost:8080/events?key=BTC" \
 統計情報取得 (JSON)
 
 ```bash
-curl http://localhost:8080/stats
+curl http://localhost/stats
 ```
 
 **レスポンス例**:
@@ -346,7 +351,7 @@ curl http://localhost:8080/stats
 Prometheusメトリクス
 
 ```bash
-curl http://localhost:8080/metrics
+curl http://localhost/metrics
 ```
 
 **主要メトリクス**:
@@ -367,7 +372,7 @@ curl http://localhost:8080/metrics
 ヘルスチェック
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost/health
 ```
 
 **レスポンス例**:
@@ -541,9 +546,9 @@ FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run
 python3 scripts/bench_orderbook.py --runs 10000
 
 # 4. 統計確認
-curl http://localhost:8080/stats
-curl http://localhost:8080/metrics  # Prometheus形式
-curl http://localhost:8080/health
+curl http://localhost/stats
+curl http://localhost/metrics  # Prometheus形式
+curl http://localhost/health
 ```
 
 ---
@@ -556,7 +561,7 @@ FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew run
 
 # クイックカナリー実行
 python3 scripts/quick_canary.py \
-  --url http://localhost:8080 \
+  --url http://localhost \
   --events 1000 \
   --out var/results/canary.json
 
@@ -590,7 +595,7 @@ python3 scripts/change_risk.py \
 docker-compose -f docker-compose.monitoring.yml up -d
 
 # アクセス
-# - API: http://localhost:8080
+# - API: http://localhost/api
 # - Grafana: http://localhost:3000 (admin/admin)
 # - Prometheus: http://localhost:9090
 ```
@@ -610,7 +615,7 @@ docker compose --profile frontend up -d nginx
 ```
 
 アクセス:
-- UI: http://localhost:8080/
+- UI: http://localhost/
 
 補足:
 - 直接MinIOを公開しない構成（本番寄せ）。必要なら `docker compose --profile frontend up -d minio` で確認可能。
@@ -742,7 +747,7 @@ bench/profiles/
   1. 環境変数読み込み (`FAST_PATH_ENABLE`, `FAST_PATH_METRICS`, `KAFKA_BRIDGE_ENABLE`)
   2. Fast Path有効時: `FastPathEngine` + `PersistenceQueue` + `ChronicleQueueWriter` + `KafkaBridge` 起動
   3. Fast Path無効時: 旧 `Engine` 起動
-  4. HTTPサーバー起動 (8080ポート)
+  4. HTTPサーバー起動（外部公開はNginxの80/443、内部はApp:8080）
   5. シャットダウンフック登録
 
 #### [Router.kt](app/src/main/kotlin/app/engine/Router.kt)
@@ -993,7 +998,7 @@ sleep 15 && docker ps --filter "name=hft-grafana"
 **解決方法**:
 ```bash
 # 1. アプリケーションが起動しているか確認
-curl http://localhost:8080/metrics | head -20
+curl http://localhost/metrics | head -20
 # fast_path_process_latency_p99_microseconds などが表示されることを確認
 
 # 2. Prometheusがメトリクスを取得できているか確認
@@ -1028,7 +1033,7 @@ sleep 15
 
 ### アプリケーションが起動しない
 
-#### 問題: ポート8080が既に使用中
+#### 問題: ポート80/8080が既に使用中
 
 **症状**:
 ```
@@ -1038,7 +1043,7 @@ java.net.BindException: Address already in use
 **解決方法**:
 ```bash
 # 既存プロセスをkill
-lsof -ti:8080 | xargs kill -9
+lsof -ti:80 | xargs kill -9
 
 # または
 make stop
@@ -1059,7 +1064,7 @@ ERROR: <urlopen error [Errno 61] Connection refused>
 **解決方法**:
 ```bash
 # 1. アプリケーションが起動しているか確認
-curl http://localhost:8080/health
+curl http://localhost/health
 # {"status": "healthy"} が返ることを確認
 
 # 2. 起動していない場合は起動
@@ -1109,7 +1114,7 @@ docker-compose --profile monitoring up -d
    ```bash
    # 事前に数千イベント送信
    for i in {1..5000}; do
-     curl -s -X POST "http://localhost:8080/events?key=BTC" \
+    curl -s -X POST "http://localhost:8080/events?key=BTC" \
        -H "Content-Type: application/json" \
        -d '{"price": 50000.00, "volume": 1.5}' > /dev/null
    done
@@ -1118,7 +1123,7 @@ docker-compose --profile monitoring up -d
 3. **GCログ確認**
    ```bash
    # GC発生を確認
-   curl http://localhost:8080/health | jq '.jvm.gc'
+  curl http://localhost/health | jq '.jvm.gc'
    ```
 
 ### ドロップが発生
@@ -1154,7 +1159,7 @@ docker-compose --profile monitoring up -d
 
 ```bash
 # すべてのfast_pathメトリクスを表示
-curl -s http://localhost:8080/metrics | grep "^fast_path"
+curl -s http://localhost/metrics | grep "^fast_path"
 
 # 主要メトリクス:
 # fast_path_process_latency_p99_microseconds
@@ -1213,7 +1218,7 @@ for i in {1..100}; do
 done
 
 # メトリクス確認
-curl http://localhost:8080/stats | jq '.fast_path_process_p99_us'
+curl http://localhost/stats | jq '.fast_path_process_p99_us'
 ```
 
 ### 長時間安定性テスト
@@ -1301,7 +1306,7 @@ docker build -t event-switchyard-app .
 docker run -d \
   -e FAST_PATH_ENABLE=1 \
   -e FAST_PATH_METRICS=1 \
-  -p 8080:8080 \
+  -p 80:80 \
   --name hft-app \
   event-switchyard-app
 ```

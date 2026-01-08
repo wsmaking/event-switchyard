@@ -10,6 +10,7 @@ import gateway.risk.PreTradeRisk
 import gateway.queue.FastPathQueue
 import gateway.queue.NewOrderCommand
 import gateway.queue.CancelOrderCommand
+import gateway.rate.RateLimiter
 import java.time.Instant
 import java.util.UUID
 
@@ -29,12 +30,18 @@ class OrderService(
     private val eventPublisher: EventPublisher,
     private val metrics: GatewayMetrics,
     private val risk: PreTradeRisk,
-    private val fastPathQueue: FastPathQueue
+    private val fastPathQueue: FastPathQueue,
+    private val rateLimiter: RateLimiter? = null
 ) {
     fun acceptOrder(principal: Principal, req: CreateOrderRequest, idempotencyKey: String?): AcceptOrderResult {
         if (idempotencyKey != null) {
             val existing = orderStore.findByIdempotencyKey(principal.accountId, idempotencyKey)
             if (existing != null) return AcceptOrderResult.Accepted(existing.orderId)
+        }
+
+        if (rateLimiter != null && !rateLimiter.allow()) {
+            metrics.onOrderRejected()
+            return AcceptOrderResult.Rejected("RATE_LIMIT", 429)
         }
 
         val validationError = validate(req)

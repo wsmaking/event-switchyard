@@ -3,7 +3,7 @@ set -euo pipefail
 
 TRANSPORT="${1:-sim}"
 RUNS="${RUNS:-2000}"
-ENDPOINT="${APP_ORDER_URL:-http://localhost:8080/api/orders}"
+ENDPOINT="${APP_ORDER_URL:-http://localhost/api/orders}"
 METRICS_URL="${GATEWAY_METRICS_URL:-http://localhost:8081/metrics}"
 
 echo "==> Exchange transport smoke"
