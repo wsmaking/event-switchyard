@@ -53,3 +53,6 @@ var/run/
 *.pid
 *.jwt
 .gradle-user-home/
+
+# --- Local notes (not tracked)
+docs/arch/system_design_interview_questions.txt
