@@ -1,22 +1,47 @@
-//! Gateway Core - Ultra-low latency order processing in Rust
+//! Gateway Core - 超低レイテンシ注文処理ライブラリ（Rust）
 //!
-//! This library provides the hot-path components for order processing:
-//! - Lock-free ring buffer queue (queue.rs)
-//! - O(1) risk checks (risk.rs)
-//! - Nanosecond precision latency measurement (metrics.rs)
+//! ## 概要
+//! 注文ゲートウェイの「ホットパス」をRustで実装。
+//! GCを持たない言語でナノ秒レベルの安定したレイテンシを実現する。
 //!
-//! Target: p99 < 1μs for queue + risk check combined
+//! ## 構成
+//! - `queue.rs`: ロックフリー・リングバッファ（crossbeam ArrayQueue）
+//! - `risk.rs`: O(1) リスクチェック（数量・想定元本・口座枠）
+//! - `metrics.rs`: ナノ秒精度レイテンシ計測（ヒストグラム）
+//!
+//! ## 性能目標
+//! - キュー + リスクチェック合計: p99 < 1μs
+//! - スループット: 9M+ ops/sec
+//!
+//! ## ベンチマーク実行
+//! ```bash
+//! cargo bench
+//! ```
 
 pub mod metrics;
 pub mod queue;
 pub mod risk;
 
+// 主要な型を再エクスポート（使いやすさのため）
 pub use metrics::{now_nanos, LatencyGuard, LatencyHistogram, LatencyStats};
 pub use queue::{FastPathQueue, Order};
 pub use risk::{AccountPosition, RiskChecker, RiskResult, SymbolLimits};
 
-/// Process an order through the fast path
-/// Returns the risk check result and elapsed nanoseconds
+/// ホットパス: 注文を処理してレイテンシを記録
+///
+/// ## 処理フロー
+/// 1. 開始時刻を記録
+/// 2. リスクチェック実行
+/// 3. 終了時刻を記録、ヒストグラムに追加
+///
+/// ## 使用例
+/// ```ignore
+/// let result = process_order(&order, &checker, &histogram);
+/// match result {
+///     RiskResult::Accepted => send_to_exchange(&order),
+///     _ => reject_order(&order, result),
+/// }
+/// ```
 #[inline]
 pub fn process_order(
     order: &Order,
@@ -34,17 +59,18 @@ pub fn process_order(
 mod tests {
     use super::*;
 
+    /// 統合テスト: キュー → リスクチェック → 計測
     #[test]
     fn test_fast_path_integration() {
         let queue = FastPathQueue::new(1024);
         let checker = RiskChecker::new();
         let histogram = LatencyHistogram::new();
 
-        // Create and enqueue order
+        // 注文作成 → キュー投入
         let order = Order::new(1, 100, *b"AAPL\0\0\0\0", 1, 100, 15000, now_nanos());
         queue.push(order).unwrap();
 
-        // Dequeue and process
+        // キューから取り出し → 処理
         let dequeued = queue.pop().unwrap();
         let result = process_order(&dequeued, &checker, &histogram);
 
@@ -52,16 +78,16 @@ mod tests {
 
         let stats = histogram.snapshot();
         assert_eq!(stats.count, 1);
-        println!("Fast path latency: {}", stats.summary());
+        println!("ホットパス・レイテンシ: {}", stats.summary());
     }
 
+    /// 高スループットテスト: 10万注文処理
     #[test]
     fn test_high_throughput() {
         let queue = FastPathQueue::new(65536);
         let checker = RiskChecker::new();
         let histogram = LatencyHistogram::new();
 
-        // Process 100k orders
         for i in 0..100_000u64 {
             let order = Order::new(i, 100, *b"AAPL\0\0\0\0", 1, 100, 15000, now_nanos());
             queue.push(order).unwrap();
@@ -73,7 +99,7 @@ mod tests {
         let stats = histogram.snapshot();
         assert_eq!(stats.count, 100_000);
         println!(
-            "100k orders processed - p50: {}ns, p99: {}ns, max: {}ns",
+            "10万注文処理完了 - p50: {}ns, p99: {}ns, max: {}ns",
             stats.percentile(50.0),
             stats.percentile(99.0),
             stats.max_nanos
