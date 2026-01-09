@@ -1,23 +1,60 @@
 //! 注文関連の型定義
 //!
 //! HTTPリクエスト/レスポンスで使用する構造体。
+//! Kotlin Gateway (HttpGateway.kt) と互換性のある形式。
 
 use serde::{Deserialize, Serialize};
 
+/// 注文タイプ
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderType {
+    Limit,
+    Market,
+}
+
+/// TimeInForce
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TimeInForce {
+    Gtc,
+    Gtd,
+}
+
+impl Default for TimeInForce {
+    fn default() -> Self {
+        Self::Gtc
+    }
+}
+
 /// 注文リクエスト（HTTPボディ）
+///
+/// Kotlin Gateway の CreateOrderRequest と互換。
+/// account_id は JWT トークンから取得するため、リクエストボディには含めない。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderRequest {
-    /// 口座ID
-    pub account_id: u64,
     /// 銘柄コード
     pub symbol: String,
     /// 売買方向: "BUY" or "SELL"
     pub side: String,
+    /// 注文タイプ: LIMIT or MARKET
+    #[serde(rename = "type")]
+    pub order_type: OrderType,
     /// 数量
-    pub qty: u32,
-    /// 価格
-    pub price: u64,
+    pub qty: u64,
+    /// 価格（LIMIT注文の場合必須）
+    #[serde(default)]
+    pub price: Option<u64>,
+    /// TimeInForce（デフォルト: GTC）
+    #[serde(default)]
+    pub time_in_force: TimeInForce,
+    /// 期限（GTDの場合必須、ミリ秒エポック）
+    #[serde(default)]
+    pub expire_at: Option<u64>,
+    /// クライアント注文ID
+    #[serde(default)]
+    pub client_order_id: Option<String>,
 }
 
 impl OrderRequest {
@@ -31,53 +68,34 @@ impl OrderRequest {
     }
 }
 
-/// 注文レスポンス
+/// 注文レスポンス（Kotlin Gateway互換）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderResponse {
-    /// 注文ID
-    pub order_id: u64,
-    /// ステータス: "ACCEPTED", "REJECTED", "ERROR"
+    /// 注文ID (文字列形式)
+    pub order_id: String,
+    /// ステータス: "ACCEPTED", "REJECTED"
     pub status: String,
-    /// メッセージ（拒否理由など）
+    /// 拒否理由（REJECTEDの場合のみ）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// 処理時間（ナノ秒）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latency_ns: Option<u64>,
+    pub reason: Option<String>,
 }
 
 impl OrderResponse {
-    pub fn accepted(order_id: u64) -> Self {
+    pub fn accepted(order_id: &str) -> Self {
         Self {
-            order_id,
+            order_id: order_id.to_string(),
             status: "ACCEPTED".into(),
-            message: None,
-            latency_ns: None,
+            reason: None,
         }
     }
 
-    pub fn rejected(order_id: u64, reason: &str) -> Self {
+    pub fn rejected(reason: &str) -> Self {
         Self {
-            order_id,
+            order_id: String::new(),
             status: "REJECTED".into(),
-            message: Some(reason.into()),
-            latency_ns: None,
+            reason: Some(reason.into()),
         }
-    }
-
-    pub fn error(order_id: u64, reason: &str) -> Self {
-        Self {
-            order_id,
-            status: "ERROR".into(),
-            message: Some(reason.into()),
-            latency_ns: None,
-        }
-    }
-
-    pub fn with_latency(mut self, latency_ns: u64) -> Self {
-        self.latency_ns = Some(latency_ns);
-        self
     }
 }
 

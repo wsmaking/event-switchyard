@@ -3,41 +3,68 @@
 //! Kotlin版 HttpGateway と同じAPIを提供。
 //!
 //! ## エンドポイント
-//! - POST /api/orders: 注文受付
+//! - POST /orders: 注文受付 (JWT認証必須)
+//! - GET /orders/:id: 注文詳細取得 (JWT認証必須)
+//! - GET /orders/:id/stream: 注文SSEストリーム (JWT認証必須)
+//! - GET /stream: アカウントSSEストリーム (JWT認証必須)
 //! - GET /health: ヘルスチェック
 //! - GET /metrics: メトリクス
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Path, State},
+    http::{header::AUTHORIZATION, StatusCode},
+    response::sse::{Event, Sse},
     routing::{get, post},
     Json, Router,
 };
+use axum::http::HeaderMap;
+use futures::stream::Stream;
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{HealthResponse, OrderRequest, OrderResponse};
+use crate::sse::SseHub;
+use crate::store::{OrderSnapshot, OrderStore};
 
 /// アプリケーション状態
 #[derive(Clone)]
 struct AppState {
     engine: FastPathEngine,
+    jwt_auth: Arc<JwtAuth>,
+    order_store: Arc<OrderStore>,
+    sse_hub: Arc<SseHub>,
     order_id_seq: Arc<AtomicU64>,
 }
 
 /// HTTPサーバーを起動
-pub async fn run(port: u16, engine: FastPathEngine) -> anyhow::Result<()> {
+pub async fn run(
+    port: u16,
+    engine: FastPathEngine,
+    order_store: Arc<OrderStore>,
+    sse_hub: Arc<SseHub>,
+) -> anyhow::Result<()> {
     let state = AppState {
         engine,
+        jwt_auth: Arc::new(JwtAuth::from_env()),
+        order_store,
+        sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
     };
 
     let app = Router::new()
-        .route("/api/orders", post(handle_order))
+        .route("/orders", post(handle_order))
+        .route("/orders/{order_id}", get(handle_get_order))
+        .route("/orders/{order_id}/stream", get(handle_order_stream))
+        .route("/stream", get(handle_account_stream))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .layer(CorsLayer::permissive())
@@ -52,62 +79,213 @@ pub async fn run(port: u16, engine: FastPathEngine) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 認証エラーレスポンス
+#[derive(serde::Serialize)]
+struct AuthErrorResponse {
+    error: String,
+}
+
 /// 注文受付ハンドラ
 ///
-/// POST /api/orders
+/// POST /orders
 async fn handle_order(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<OrderRequest>,
-) -> (StatusCode, Json<OrderResponse>) {
-    let start = gateway_core::now_nanos();
+) -> Result<(StatusCode, Json<OrderResponse>), (StatusCode, Json<AuthErrorResponse>)> {
+    // JWT 認証
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
 
-    // 注文IDを発番
-    let order_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            let status = match e {
+                AuthError::SecretNotConfigured => StatusCode::INTERNAL_SERVER_ERROR,
+                AuthError::TokenExpired | AuthError::TokenNotYetValid => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            return Err((
+                status,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    // 注文IDを発番（ord_UUID形式）
+    let order_id = format!("ord_{}", uuid::Uuid::new_v4());
 
     // シンボルをバイト配列に変換
     let symbol = FastPathEngine::symbol_to_bytes(&req.symbol);
 
+    // account_id は JWT から取得
+    let account_id = principal.account_id.clone();
+    let account_id_num: u64 = account_id.parse().unwrap_or(0);
+
+    // 価格（LIMIT注文の場合は必須）
+    let price = req.price.unwrap_or(0);
+
+    // 内部order_idはシーケンス番号を使用
+    let internal_order_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
+
     // 注文処理
     let result = state.engine.process_order(
-        order_id,
-        req.account_id,
+        internal_order_id,
+        account_id_num,
         symbol,
         req.side_byte(),
-        req.qty,
-        req.price,
+        req.qty as u32,
+        price,
     );
 
-    let elapsed = gateway_core::now_nanos() - start;
-
-    // レスポンス生成
+    // レスポンス生成（Kotlin Gateway互換）
     let (status, response) = match result {
-        ProcessResult::Accepted => (
-            StatusCode::OK,
-            OrderResponse::accepted(order_id).with_latency(elapsed),
-        ),
+        ProcessResult::Accepted => {
+            // OrderStore に保存
+            let snapshot = OrderSnapshot::new(
+                order_id.clone(),
+                account_id,
+                req.symbol.clone(),
+                req.side.clone(),
+                req.order_type,
+                req.qty,
+                req.price,
+                req.time_in_force,
+                req.expire_at,
+                req.client_order_id.clone(),
+            );
+            state.order_store.put(snapshot, None);
+
+            (StatusCode::ACCEPTED, OrderResponse::accepted(&order_id))
+        }
         ProcessResult::RejectedMaxQty => (
-            StatusCode::BAD_REQUEST,
-            OrderResponse::rejected(order_id, "Quantity exceeds limit").with_latency(elapsed),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            OrderResponse::rejected("INVALID_QTY"),
         ),
         ProcessResult::RejectedMaxNotional => (
-            StatusCode::BAD_REQUEST,
-            OrderResponse::rejected(order_id, "Notional exceeds limit").with_latency(elapsed),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            OrderResponse::rejected("RISK_REJECT"),
         ),
         ProcessResult::RejectedDailyLimit => (
-            StatusCode::BAD_REQUEST,
-            OrderResponse::rejected(order_id, "Daily limit exceeded").with_latency(elapsed),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            OrderResponse::rejected("RISK_REJECT"),
         ),
         ProcessResult::RejectedUnknownSymbol => (
-            StatusCode::BAD_REQUEST,
-            OrderResponse::rejected(order_id, "Unknown symbol").with_latency(elapsed),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            OrderResponse::rejected("INVALID_SYMBOL"),
         ),
         ProcessResult::ErrorQueueFull => (
             StatusCode::SERVICE_UNAVAILABLE,
-            OrderResponse::error(order_id, "Queue full").with_latency(elapsed),
+            OrderResponse::rejected("QUEUE_REJECT"),
         ),
     };
 
-    (status, Json(response))
+    Ok((status, Json(response)))
+}
+
+/// 注文詳細取得ハンドラ
+///
+/// GET /orders/:order_id
+async fn handle_get_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Json<OrderSnapshotResponse>, (StatusCode, Json<AuthErrorResponse>)> {
+    // JWT 認証
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    // 注文を検索
+    let order = match state.order_store.find_by_id(&order_id) {
+        Some(o) => o,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+    };
+
+    // アカウント所有権チェック
+    if order.account_id != principal.account_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    Ok(Json(OrderSnapshotResponse::from(order)))
+}
+
+/// 注文スナップショットレスポンス
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderSnapshotResponse {
+    order_id: String,
+    account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_order_id: Option<String>,
+    symbol: String,
+    side: String,
+    #[serde(rename = "type")]
+    order_type: String,
+    qty: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<u64>,
+    time_in_force: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expire_at: Option<u64>,
+    status: String,
+    accepted_at: u64,
+    last_update_at: u64,
+    filled_qty: u64,
+}
+
+impl From<OrderSnapshot> for OrderSnapshotResponse {
+    fn from(o: OrderSnapshot) -> Self {
+        Self {
+            order_id: o.order_id,
+            account_id: o.account_id,
+            client_order_id: o.client_order_id,
+            symbol: o.symbol,
+            side: o.side,
+            order_type: match o.order_type {
+                crate::order::OrderType::Limit => "LIMIT".into(),
+                crate::order::OrderType::Market => "MARKET".into(),
+            },
+            qty: o.qty,
+            price: o.price,
+            time_in_force: match o.time_in_force {
+                crate::order::TimeInForce::Gtc => "GTC".into(),
+                crate::order::TimeInForce::Gtd => "GTD".into(),
+            },
+            expire_at: o.expire_at,
+            status: o.status.as_str().into(),
+            accepted_at: o.accepted_at,
+            last_update_at: o.last_update_at,
+            filled_qty: o.filled_qty,
+        }
+    }
 }
 
 /// ヘルスチェックハンドラ
@@ -146,4 +324,103 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         state.engine.latency_max(),
     );
     snapshot
+}
+
+/// 注文SSEストリームハンドラ
+///
+/// GET /orders/:order_id/stream
+async fn handle_order_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<AuthErrorResponse>)>
+{
+    // JWT 認証
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    // 注文の所有権チェック
+    if let Some(order) = state.order_store.find_by_id(&order_id) {
+        if order.account_id != principal.account_id {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+    }
+
+    // SSEストリームを作成
+    let rx = state.sse_hub.subscribe_order(&order_id);
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|event| {
+            Ok(Event::default()
+                .id(event.id.to_string())
+                .event(event.event_type)
+                .data(event.data))
+        })
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    ))
+}
+
+/// アカウントSSEストリームハンドラ
+///
+/// GET /stream
+async fn handle_account_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<AuthErrorResponse>)>
+{
+    // JWT 認証
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    // SSEストリームを作成
+    let rx = state.sse_hub.subscribe_account(&principal.account_id);
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|event| {
+            Ok(Event::default()
+                .id(event.id.to_string())
+                .event(event.event_type)
+                .data(event.data))
+        })
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    ))
 }

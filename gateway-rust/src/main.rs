@@ -11,13 +11,17 @@
 //! - `GATEWAY_PORT`: HTTPサーバーのポート（デフォルト: 8081）
 //! - `RUST_LOG`: ログレベル（デフォルト: info）
 
+mod auth;
 mod config;
 mod engine;
 mod exchange;
 mod order;
 mod protocol;
 mod server;
+mod sse;
+mod store;
 
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -35,6 +39,14 @@ async fn main() -> anyhow::Result<()> {
     // 設定読み込み
     let config = config::Config::from_env();
     info!("Gateway Rust starting with config: {:?}", config);
+
+    // OrderStore 初期化
+    let order_store = Arc::new(store::OrderStore::new());
+    info!("OrderStore initialized");
+
+    // SSE Hub 初期化
+    let sse_hub = Arc::new(sse::SseHub::new());
+    info!("SseHub initialized");
 
     // エンジン初期化
     let engine = engine::FastPathEngine::new(config.queue_capacity);
@@ -55,12 +67,14 @@ async fn main() -> anyhow::Result<()> {
     // HTTP と TCP を並行起動
     let http_engine = engine.clone();
     let tcp_engine = engine;
+    let http_order_store = Arc::clone(&order_store);
+    let http_sse_hub = Arc::clone(&sse_hub);
 
     let http_port = config.port;
     let tcp_port = config.tcp_port;
 
     tokio::select! {
-        result = server::http::run(http_port, http_engine) => {
+        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub) => {
             result?;
         }
         result = server::tcp::run(tcp_port, tcp_engine) => {

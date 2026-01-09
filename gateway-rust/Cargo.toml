@@ -34,6 +34,18 @@ dotenvy = "0.15"
 # エラー処理
 anyhow = "1"
 
+# JWT 認証
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# UUID 生成
+uuid = { version = "1", features = ["v4"] }
+
+# SSE / Streaming
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
 [features]
 default = []
 iouring = ["monoio"]
