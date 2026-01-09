@@ -33,14 +33,20 @@ use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{HealthResponse, OrderRequest, OrderResponse};
 use crate::sse::SseHub;
-use crate::store::{OrderSnapshot, OrderStore};
+use crate::store::{OrderIdMap, OrderSnapshot, OrderStore, ShardedOrderStore};
 
 /// アプリケーション状態
 #[derive(Clone)]
 struct AppState {
     engine: FastPathEngine,
     jwt_auth: Arc<JwtAuth>,
+    /// レガシー OrderStore（後方互換用）
+    #[allow(dead_code)]
     order_store: Arc<OrderStore>,
+    /// HFT最適化版 ShardedOrderStore
+    sharded_store: Arc<ShardedOrderStore>,
+    /// 注文IDマッピング（内部ID ↔ 外部ID）
+    order_id_map: Arc<OrderIdMap>,
     sse_hub: Arc<SseHub>,
     order_id_seq: Arc<AtomicU64>,
 }
@@ -56,6 +62,8 @@ pub async fn run(
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
         order_store,
+        sharded_store: Arc::new(ShardedOrderStore::new()),
+        order_id_map: Arc::new(OrderIdMap::new()),
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
     };
@@ -144,10 +152,10 @@ async fn handle_order(
     // レスポンス生成（Kotlin Gateway互換）
     let (status, response) = match result {
         ProcessResult::Accepted => {
-            // OrderStore に保存
+            // OrderSnapshot を作成
             let snapshot = OrderSnapshot::new(
                 order_id.clone(),
-                account_id,
+                account_id.clone(),
                 req.symbol.clone(),
                 req.side.clone(),
                 req.order_type,
@@ -157,7 +165,16 @@ async fn handle_order(
                 req.expire_at,
                 req.client_order_id.clone(),
             );
-            state.order_store.put(snapshot, None);
+
+            // ShardedOrderStore に保存（HFT最適化）
+            state.sharded_store.put(snapshot, None);
+
+            // ID マッピングを登録
+            state.order_id_map.register_with_internal(
+                internal_order_id,
+                order_id.clone(),
+                account_id,
+            );
 
             (StatusCode::ACCEPTED, OrderResponse::accepted(&order_id))
         }
@@ -211,8 +228,19 @@ async fn handle_get_order(
         }
     };
 
-    // 注文を検索
-    let order = match state.order_store.find_by_id(&order_id) {
+    // ID マッピングから account_id を取得してシャード検索を高速化
+    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
+
+    // 注文を検索（ShardedOrderStore）
+    let order = if let Some(ref acc_id) = account_id_from_map {
+        // 高速パス: account_id が分かっている場合は直接シャードを検索
+        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+    } else {
+        // フォールバック: 全シャード検索
+        state.sharded_store.find_by_id(&order_id)
+    };
+
+    let order = match order {
         Some(o) => o,
         None => {
             return Err((
@@ -352,8 +380,15 @@ async fn handle_order_stream(
         }
     };
 
-    // 注文の所有権チェック
-    if let Some(order) = state.order_store.find_by_id(&order_id) {
+    // 注文の所有権チェック（ShardedOrderStore使用）
+    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
+    let order = if let Some(ref acc_id) = account_id_from_map {
+        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+    } else {
+        state.sharded_store.find_by_id(&order_id)
+    };
+
+    if let Some(order) = order {
         if order.account_id != principal.account_id {
             return Err((
                 StatusCode::NOT_FOUND,

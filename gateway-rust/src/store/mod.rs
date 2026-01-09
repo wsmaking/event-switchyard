@@ -1,6 +1,17 @@
 //! 注文ストア
 //!
 //! 注文状態をメモリ内で管理し、Execution Reportを適用する。
+//!
+//! ## モジュール構成
+//! - `OrderStore`: 基本実装（単一RwLock）
+//! - `ShardedOrderStore`: HFT最適化版（64シャード）
+//! - `OrderIdMap`: Lock-free ID マッピング
+
+mod id_map;
+mod sharded;
+
+pub use id_map::OrderIdMap;
+pub use sharded::ShardedOrderStore;
 
 use std::collections::HashMap;
 use std::sync::RwLock;
