@@ -17,6 +17,10 @@ pub struct Config {
     pub max_order_qty: u32,
     /// 最大想定元本
     pub max_notional: u64,
+    /// Exchange ホスト
+    pub exchange_host: Option<String>,
+    /// Exchange ポート
+    pub exchange_port: u16,
 }
 
 impl Config {
@@ -53,6 +57,11 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1_000_000_000),
+            exchange_host: env::var("EXCHANGE_TCP_HOST").ok(),
+            exchange_port: env::var("EXCHANGE_TCP_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(9901),
         }
     }
 }

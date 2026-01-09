@@ -13,6 +13,7 @@
 
 mod config;
 mod engine;
+mod exchange;
 mod order;
 mod protocol;
 mod server;
@@ -41,6 +42,15 @@ async fn main() -> anyhow::Result<()> {
         "FastPathEngine initialized (queue_capacity: {})",
         config.queue_capacity
     );
+
+    // Exchange Worker 起動（Exchange 接続が設定されている場合）
+    if let Some(ref exchange_host) = config.exchange_host {
+        let queue = engine.queue();
+        let host = exchange_host.clone();
+        let port = config.exchange_port;
+        engine::exchange_worker::start_worker(queue, host, port);
+        info!("Exchange worker started ({}:{})", exchange_host, port);
+    }
 
     // HTTP と TCP を並行起動
     let http_engine = engine.clone();

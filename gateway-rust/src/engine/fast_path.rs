@@ -122,6 +122,11 @@ impl FastPathEngine {
         self.queue.pop()
     }
 
+    /// キューへの参照を取得（Exchange Worker 用）
+    pub fn queue(&self) -> Arc<FastPathQueue> {
+        Arc::clone(&self.queue)
+    }
+
     /// キュー長を取得
     pub fn queue_len(&self) -> usize {
         self.queue.len()

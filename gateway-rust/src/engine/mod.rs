@@ -3,6 +3,7 @@
 //! gateway-core のキュー・リスクチェック・メトリクスを使用して
 //! 注文を処理する。
 
+pub mod exchange_worker;
 mod fast_path;
 
 pub use fast_path::{FastPathEngine, ProcessResult};
