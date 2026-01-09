@@ -12,6 +12,9 @@ gateway-core = { path = "../gateway-core" }
 # 非同期ランタイム
 tokio = { version = "1", features = ["full"] }
 
+# io_uring ランタイム (Linux only)
+monoio = { version = "0.2", optional = true }
+
 # HTTP サーバー
 axum = "0.8"
 tower = "0.5"
@@ -31,6 +34,10 @@ dotenvy = "0.15"
 # エラー処理
 anyhow = "1"
 
+[features]
+default = []
+iouring = ["monoio"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -39,3 +46,8 @@ codegen-units = 1
 [[bin]]
 name = "gateway-rust"
 path = "src/main.rs"
+
+[[bin]]
+name = "gateway-iouring"
+path = "src/bin/iouring.rs"
+required-features = ["iouring"]
