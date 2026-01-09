@@ -9,6 +9,8 @@ use std::env;
 pub struct Config {
     /// HTTPサーバーポート
     pub port: u16,
+    /// TCPサーバーポート
+    pub tcp_port: u16,
     /// キュー容量
     pub queue_capacity: usize,
     /// 最大注文数量
@@ -22,6 +24,7 @@ impl Config {
     ///
     /// Kotlin版と同じ環境変数名を使用:
     /// - GATEWAY_PORT (デフォルト: 8081)
+    /// - GATEWAY_TCP_PORT (デフォルト: 9001)
     /// - QUEUE_CAPACITY (デフォルト: 65536)
     /// - MAX_ORDER_QTY (デフォルト: 10000)
     /// - MAX_NOTIONAL (デフォルト: 1000000000)
@@ -34,6 +37,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8081),
+            tcp_port: env::var("GATEWAY_TCP_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(9001),
             queue_capacity: env::var("QUEUE_CAPACITY")
                 .ok()
                 .and_then(|v| v.parse().ok())

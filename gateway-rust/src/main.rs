@@ -14,6 +14,7 @@
 mod config;
 mod engine;
 mod order;
+mod protocol;
 mod server;
 
 use tracing::info;
@@ -41,8 +42,21 @@ async fn main() -> anyhow::Result<()> {
         config.queue_capacity
     );
 
-    // HTTPサーバー起動
-    server::http::run(config.port, engine).await?;
+    // HTTP と TCP を並行起動
+    let http_engine = engine.clone();
+    let tcp_engine = engine;
+
+    let http_port = config.port;
+    let tcp_port = config.tcp_port;
+
+    tokio::select! {
+        result = server::http::run(http_port, http_engine) => {
+            result?;
+        }
+        result = server::tcp::run(tcp_port, tcp_engine) => {
+            result?;
+        }
+    }
 
     Ok(())
 }
