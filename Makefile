@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -46,6 +46,7 @@ help:
 	@echo "  make gate        - 性能ゲート検証"
 	@echo "  make check       - bench + gate"
 	@echo "  make bless       - ベースライン更新"
+	@echo "  make perf-gate-rust - Rust GatewayのPerf Gate"
 	@echo ""
 	@echo "========================================="
 
@@ -136,6 +137,10 @@ backoffice-recovery:
 # Gateway→BackOffice E2E
 gateway-backoffice-e2e:
 	@scripts/ops/gateway_backoffice_e2e.sh
+
+# Rust Gateway Perf Gate
+perf-gate-rust:
+	@scripts/ops/perf_gate_rust.sh
 
 # ビルド
 build:
