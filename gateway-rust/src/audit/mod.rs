@@ -33,11 +33,13 @@ pub struct AuditLog {
     hash_path: Option<PathBuf>,
     hash_writer: Option<Mutex<BufWriter<File>>>,
     anchor_path: Option<PathBuf>,
+    anchor_export_dir: Option<PathBuf>,
     hmac_keys: HashMap<String, Vec<u8>>,
     active_key_id: Option<String>,
     prev_hash: Mutex<Vec<u8>>,
     seq: Mutex<u64>,
     last_key_id: Mutex<Option<String>>,
+    last_anchor_day: Mutex<Option<u64>>,
 }
 
 impl AuditLog {
@@ -60,17 +62,22 @@ impl AuditLog {
                 s.push_str(".anchor");
                 Some(PathBuf::from(s))
             });
+        let anchor_export_dir = std::env::var("AUDIT_ANCHOR_EXPORT_DIR")
+            .ok()
+            .map(PathBuf::from);
         Ok(Self {
             path,
             writer: Mutex::new(BufWriter::new(file)),
             hash_path,
             hash_writer,
             anchor_path,
+            anchor_export_dir,
             hmac_keys,
             active_key_id,
             prev_hash: Mutex::new(prev_hash),
             seq: Mutex::new(seq),
             last_key_id: Mutex::new(last_key_id),
+            last_anchor_day: Mutex::new(None),
         })
     }
 
@@ -343,6 +350,7 @@ impl AuditLog {
             };
             let _ = write_anchor(anchor_path, &anchor);
         }
+        self.export_anchor_if_needed(*seq, entry.at, key_id, hash_b64);
         *prev_hash = hash_bytes;
     }
 }
@@ -487,6 +495,61 @@ fn write_anchor(path: &Path, anchor: &AuditAnchor) -> std::io::Result<()> {
         if let Ok(dir) = File::open(parent) {
             let _ = dir.sync_all();
         }
+    }
+    Ok(())
+}
+
+fn days_since_epoch(ms: u64) -> u64 {
+    ms / 1000 / 86400
+}
+
+fn anchor_filename(day: u64) -> String {
+    format!("audit.anchor.{day}")
+}
+
+impl AuditLog {
+    fn export_anchor_if_needed(&self, seq: u64, at_ms: u64, key_id: &str, hash: String) {
+        let export_dir = match &self.anchor_export_dir {
+            Some(d) => d,
+            None => return,
+        };
+        let day = days_since_epoch(at_ms);
+        let mut last_day = match self.last_anchor_day.lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last_day.is_some_and(|d| d == day) {
+            return;
+        }
+        let anchor = AuditAnchor {
+            seq,
+            at: at_ms,
+            key_id: key_id.to_string(),
+            hash,
+        };
+        if let Ok(()) = write_anchor_export(export_dir, day, &anchor) {
+            *last_day = Some(day);
+        }
+    }
+}
+
+fn write_anchor_export(dir: &Path, day: u64, anchor: &AuditAnchor) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(anchor_filename(day));
+    let tmp_path = temp_anchor_path(&path);
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp_path)?;
+    let line = serde_json::to_string(anchor)?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    f.flush()?;
+    f.sync_all()?;
+    std::fs::rename(&tmp_path, &path)?;
+    if let Ok(dir) = File::open(dir) {
+        let _ = dir.sync_all();
     }
     Ok(())
 }
