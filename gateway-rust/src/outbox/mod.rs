@@ -60,11 +60,15 @@ impl OutboxWorker {
 
     fn run(self) {
         let mut offset = read_offset(&self.offset_path);
+        let base_sleep_ms = 200u64;
+        let max_sleep_ms = 5000u64;
+        let mut backoff_ms = base_sleep_ms;
         loop {
             let file = match File::open(&self.audit_path) {
                 Ok(f) => f,
                 Err(_) => {
-                    thread::sleep(Duration::from_millis(200));
+                    backoff_ms = (backoff_ms * 2).min(max_sleep_ms);
+                    thread::sleep(Duration::from_millis(backoff_ms));
                     continue;
                 }
             };
@@ -87,6 +91,7 @@ impl OutboxWorker {
             }
 
             let mut progressed = false;
+            let mut had_error = false;
             let mut line = String::new();
             loop {
                 line.clear();
@@ -104,6 +109,7 @@ impl OutboxWorker {
                                     OUTBOX_EVENTS_PUBLISHED.fetch_add(1, Ordering::Relaxed);
                                 } else {
                                     OUTBOX_PUBLISH_ERRORS.fetch_add(1, Ordering::Relaxed);
+                                    had_error = true;
                                     break;
                                 }
                             } else {
@@ -119,6 +125,7 @@ impl OutboxWorker {
                     }
                     Err(_) => {
                         OUTBOX_READ_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        had_error = true;
                         break;
                     }
                 }
@@ -127,7 +134,12 @@ impl OutboxWorker {
             if progressed {
                 write_offset(&self.offset_path, offset);
             }
-            thread::sleep(Duration::from_millis(200));
+            if progressed && !had_error {
+                backoff_ms = base_sleep_ms;
+            } else {
+                backoff_ms = (backoff_ms * 2).min(max_sleep_ms);
+            }
+            thread::sleep(Duration::from_millis(backoff_ms));
         }
     }
 }
