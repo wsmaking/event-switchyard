@@ -39,7 +39,14 @@ fi
 if [[ -z "${CONCURRENCY+x}" ]]; then
   CONCURRENCY="${CONCURRENCY_DEFAULT}"
 fi
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.5}"
+SAMPLE_COUNT="${SAMPLE_COUNT:-10}"
 
+RESULTS_DIR="${ROOT_DIR}/var/results"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+REPORT_PATH="${RESULTS_DIR}/perf_gate_rust_full_${TIMESTAMP}.txt"
+
+mkdir -p "${RESULTS_DIR}"
 cd "${ROOT_DIR}"
 
 echo "==> Building gateway-rust (release)"
@@ -61,7 +68,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Waiting for /health"
 READY=0
 for _ in $(seq 1 50); do
   if curl -s "http://${HOST}:${PORT}/health" >/dev/null 2>&1; then
@@ -75,10 +81,40 @@ if [[ "${READY}" != "1" ]]; then
   exit 1
 fi
 
-echo "==> Running perf gate"
+{
+  echo "perf_gate_rust_full: ${TIMESTAMP}"
+  echo "host=${HOST} port=${PORT} requests=${REQUESTS} duration=${DURATION} concurrency=${CONCURRENCY}"
+  echo ""
+  echo "==> vm_stat (before)"
+  if command -v vm_stat >/dev/null 2>&1; then
+    vm_stat
+  else
+    echo "vm_stat not available"
+  fi
+  echo ""
+  echo "==> ps sample (pid=${SERVER_PID})"
+  for _ in $(seq 1 "${SAMPLE_COUNT}"); do
+    ps -p "${SERVER_PID}" -o pid,ppid,%cpu,%mem,rss,vsz,etime,comm
+    sleep "${SAMPLE_INTERVAL}"
+  done
+} > "${REPORT_PATH}"
+
+echo "==> Running perf gate (logs -> ${REPORT_PATH})"
 python3 scripts/ops/perf_gate.py --run --ci \
   --host "${HOST}" \
   --port "${PORT}" \
   --requests "${REQUESTS}" \
   --duration "${DURATION}" \
-  --concurrency "${CONCURRENCY}"
+  --concurrency "${CONCURRENCY}" | tee -a "${REPORT_PATH}"
+
+{
+  echo ""
+  echo "==> vm_stat (after)"
+  if command -v vm_stat >/dev/null 2>&1; then
+    vm_stat
+  else
+    echo "vm_stat not available"
+  fi
+} >> "${REPORT_PATH}"
+
+echo "==> Report saved: ${REPORT_PATH}"
