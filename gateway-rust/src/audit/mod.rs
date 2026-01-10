@@ -32,10 +32,12 @@ pub struct AuditLog {
     writer: Mutex<BufWriter<File>>,
     hash_path: Option<PathBuf>,
     hash_writer: Option<Mutex<BufWriter<File>>>,
+    anchor_path: Option<PathBuf>,
     hmac_keys: HashMap<String, Vec<u8>>,
     active_key_id: Option<String>,
     prev_hash: Mutex<Vec<u8>>,
     seq: Mutex<u64>,
+    last_key_id: Mutex<Option<String>>,
 }
 
 impl AuditLog {
@@ -49,16 +51,26 @@ impl AuditLog {
             .append(true)
             .write(true)
             .open(&path)?;
-        let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq) = init_hash_chain(&path)?;
+        let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) = init_hash_chain(&path)?;
+        let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                let mut s = path.to_string_lossy().to_string();
+                s.push_str(".anchor");
+                Some(PathBuf::from(s))
+            });
         Ok(Self {
             path,
             writer: Mutex::new(BufWriter::new(file)),
             hash_path,
             hash_writer,
+            anchor_path,
             hmac_keys,
             active_key_id,
             prev_hash: Mutex::new(prev_hash),
             seq: Mutex::new(seq),
+            last_key_id: Mutex::new(last_key_id),
         })
     }
 
@@ -125,6 +137,30 @@ impl AuditLog {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn anchor_snapshot(&self) -> Option<AuditAnchor> {
+        let prev_hash = match self.prev_hash.lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if prev_hash.is_empty() {
+            return None;
+        }
+        let seq = match self.seq.lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let key_id = match self.last_key_id.lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Some(AuditAnchor {
+            seq: *seq,
+            at: now_millis(),
+            key_id: key_id.clone().unwrap_or_else(|| "unknown".into()),
+            hash: base64::engine::general_purpose::STANDARD.encode(&*prev_hash),
+        })
     }
 
     pub fn verify(&self, from_seq: u64, limit: usize) -> AuditVerifyResult {
@@ -295,6 +331,18 @@ impl AuditLog {
                 let _ = writer.flush();
             }
         }
+        if let Ok(mut last_key_id) = self.last_key_id.lock() {
+            *last_key_id = Some(key_id.clone());
+        }
+        if let Some(anchor_path) = &self.anchor_path {
+            let anchor = AuditAnchor {
+                seq: *seq,
+                at: entry.at,
+                key_id: key_id.clone(),
+                hash: hash_b64,
+            };
+            let _ = write_anchor(anchor_path, &anchor);
+        }
         *prev_hash = hash_bytes;
     }
 }
@@ -319,12 +367,21 @@ pub struct AuditVerifyResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditAnchor {
+    pub seq: u64,
+    pub at: u64,
+    pub key_id: String,
+    pub hash: String,
+}
+
 fn init_hash_chain(
     path: &Path
-) -> std::io::Result<(Option<PathBuf>, Option<Mutex<BufWriter<File>>>, HashMap<String, Vec<u8>>, Option<String>, Vec<u8>, u64)> {
+) -> std::io::Result<(Option<PathBuf>, Option<Mutex<BufWriter<File>>>, HashMap<String, Vec<u8>>, Option<String>, Vec<u8>, u64, Option<String>)> {
     let (keys, active_id) = load_audit_keys();
     if keys.is_empty() || active_id.is_none() {
-        return Ok((None, None, HashMap::new(), None, Vec::new(), 0));
+        return Ok((None, None, HashMap::new(), None, Vec::new(), 0, None));
     }
     let hash_path = std::env::var("AUDIT_HASH_PATH")
         .ok()
@@ -342,12 +399,12 @@ fn init_hash_chain(
         .append(true)
         .write(true)
         .open(&hash_path)?;
-    let (prev_hash, seq) = match load_last_hash(&hash_path) {
+    let (prev_hash, seq, last_key_id) = match load_last_hash(&hash_path) {
         Ok(v) => v,
         Err(msg) => {
             let _ = backup_corrupt_hash(&hash_path);
             eprintln!("audit hash invalid: {} (resetting chain)", msg);
-            (Vec::new(), 0)
+            (Vec::new(), 0, None)
         }
     };
     Ok((
@@ -357,14 +414,15 @@ fn init_hash_chain(
         active_id,
         prev_hash,
         seq,
+        last_key_id,
     ))
 }
 
-fn load_last_hash(path: &Path) -> Result<(Vec<u8>, u64), String> {
+fn load_last_hash(path: &Path) -> Result<(Vec<u8>, u64, Option<String>), String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
     if len == 0 {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, None));
     }
     let read_len = len.min(8192);
     file.seek(SeekFrom::End(-(read_len as i64)))
@@ -374,11 +432,11 @@ fn load_last_hash(path: &Path) -> Result<(Vec<u8>, u64), String> {
     let text = String::from_utf8_lossy(&buf);
     let line = match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(l) => l,
-        None => return Ok((Vec::new(), 0)),
+        None => return Ok((Vec::new(), 0, None)),
     };
     let entry: AuditHashEntry = serde_json::from_str(line).map_err(|_| "hash entry parse failed".to_string())?;
     let hash_bytes = decode_hash(&entry.hash).unwrap_or_default();
-    Ok((hash_bytes, entry.seq))
+    Ok((hash_bytes, entry.seq, Some(entry.key_id)))
 }
 
 fn decode_hash(value: &str) -> Option<Vec<u8>> {
@@ -407,6 +465,45 @@ fn compute_hmac(key: &[u8], prev_hash: &[u8], line_bytes: &[u8]) -> Vec<u8> {
     mac.update(prev_hash);
     mac.update(line_bytes);
     mac.finalize().into_bytes().to_vec()
+}
+
+fn write_anchor(path: &Path, anchor: &AuditAnchor) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = temp_anchor_path(path);
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp_path)?;
+    let line = serde_json::to_string(anchor)?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    f.flush()?;
+    f.sync_all()?;
+    std::fs::rename(&tmp_path, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+fn temp_anchor_path(path: &Path) -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audit.anchor");
+    let tmp_name = format!("{file_name}.tmp.{millis}");
+    path.parent()
+        .map(|p| p.join(&tmp_name))
+        .unwrap_or_else(|| PathBuf::from(tmp_name))
 }
 
 fn load_audit_keys() -> (HashMap<String, Vec<u8>>, Option<String>) {

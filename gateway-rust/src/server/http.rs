@@ -30,7 +30,7 @@ use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::audit::{self, AuditEvent, AuditLog, AuditVerifyResult};
+use crate::audit::{self, AuditAnchor, AuditEvent, AuditLog, AuditVerifyResult};
 use crate::bus::{BusEvent, BusPublisher};
 use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
@@ -96,6 +96,7 @@ pub async fn run(
         .route("/orders/{order_id}/stream", get(handle_order_stream))
         .route("/stream", get(handle_account_stream))
         .route("/audit/verify", get(handle_audit_verify))
+        .route("/audit/anchor", get(handle_audit_anchor))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .layer(CorsLayer::permissive())
@@ -810,6 +811,43 @@ async fn handle_audit_verify(
             let result = state.audit_log.verify(from_seq, limit);
             Ok(Json(result))
         }
+        AuthResult::Err(e) => {
+            let status = match e {
+                AuthError::SecretNotConfigured => StatusCode::INTERNAL_SERVER_ERROR,
+                AuthError::TokenExpired | AuthError::TokenNotYetValid => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            Err((
+                status,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ))
+        }
+    }
+}
+
+/// 監査ログの最新アンカー取得
+///
+/// GET /audit/anchor
+async fn handle_audit_anchor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuditAnchor>, (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(_) => match state.audit_log.anchor_snapshot() {
+            Some(anchor) => Ok(Json(anchor)),
+            None => Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "anchor not available".into(),
+                }),
+            )),
+        },
         AuthResult::Err(e) => {
             let status = match e {
                 AuthError::SecretNotConfigured => StatusCode::INTERNAL_SERVER_ERROR,
