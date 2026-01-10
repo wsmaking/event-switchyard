@@ -49,6 +49,9 @@ dashmap = "6"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
+# Kafka (Rust client, uses system librdkafka via pkg-config)
+rdkafka = { version = "0.36", features = ["dynamic-linking"] }
+
 [features]
 default = []
 iouring = ["monoio"]

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use tokio::sync::broadcast;
 
 /// SSE イベント
@@ -85,6 +85,8 @@ impl SseHub {
     }
 
     /// アカウントにイベントを配信
+    #[allow(dead_code)]
+    /// 将来のアカウント通知向けに保持
     pub fn publish_account(&self, account_id: &str, event_type: &str, data: &str) {
         let event = SseEvent {
             id: self.next_event_id.fetch_add(1, Ordering::Relaxed),
@@ -108,6 +110,8 @@ impl SseHub {
     }
 
     /// 注文チャンネルの購読者数
+    #[allow(dead_code)]
+    /// 運用メトリクス向けに保持
     pub fn order_subscriber_count(&self, order_id: &str) -> usize {
         let channels = self.order_channels.read().unwrap();
         channels
@@ -117,6 +121,8 @@ impl SseHub {
     }
 
     /// アカウントチャンネルの購読者数
+    #[allow(dead_code)]
+    /// 運用メトリクス向けに保持
     pub fn account_subscriber_count(&self, account_id: &str) -> usize {
         let channels = self.account_channels.read().unwrap();
         channels
@@ -198,9 +204,6 @@ pub struct ReplayResult {
     pub events: Vec<SseEvent>,
     pub resync_required: Option<ResyncRequired>,
 }
-
-/// SSE Hub を Arc でラップしたもの
-pub type SharedSseHub = Arc<SseHub>;
 
 #[cfg(test)]
 mod tests {

@@ -84,6 +84,8 @@ impl OrderIdMap {
     }
 
     /// 外部IDでマッピングを削除
+    #[allow(dead_code)]
+    /// 外部ID起点の回収処理を想定
     pub fn remove_by_external(&self, external_id: &str) {
         if let Some((_, internal_id)) = self.external_to_internal.remove(external_id) {
             self.internal_to_external.remove(&internal_id);
@@ -97,6 +99,8 @@ impl OrderIdMap {
     }
 
     /// 次のIDをピーク（テスト用）
+    #[allow(dead_code)]
+    /// テスト/運用検証での参照用
     pub fn peek_next_id(&self) -> u64 {
         self.next_id.load(Ordering::Relaxed)
     }

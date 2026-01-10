@@ -13,9 +13,11 @@ pub struct Config {
     pub tcp_port: u16,
     /// キュー容量
     pub queue_capacity: usize,
-    /// 最大注文数量
+    #[allow(dead_code)]
+    /// 最大注文数量（事前リスクチェック実装用に保持）
     pub max_order_qty: u32,
-    /// 最大想定元本
+    #[allow(dead_code)]
+    /// 最大想定元本（事前リスクチェック実装用に保持）
     pub max_notional: u64,
     /// Exchange ホスト
     pub exchange_host: Option<String>,

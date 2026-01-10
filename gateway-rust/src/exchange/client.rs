@@ -69,6 +69,8 @@ impl ExchangeClient {
     }
 
     /// キャンセル送信
+    #[allow(dead_code)]
+    /// Cancel連携を有効化するまでの待機枠
     pub fn send_cancel(&self, order_id: &str, on_report: ReportCallback) -> std::io::Result<()> {
         {
             let mut cbs = self.callbacks.lock().unwrap();

@@ -118,6 +118,8 @@ impl FastPathEngine {
     }
 
     /// キューから注文を取り出す
+    #[allow(dead_code)]
+    /// 交換処理の直結検証用に残す
     pub fn pop_order(&self) -> Option<Order> {
         self.queue.pop()
     }
@@ -148,6 +150,8 @@ impl FastPathEngine {
     }
 
     /// レイテンシ統計をリセット
+    #[allow(dead_code)]
+    /// ベンチマーク/検証時のリセット用途
     pub fn latency_reset(&self) {
         self.histogram.reset();
     }

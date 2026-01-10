@@ -101,6 +101,8 @@ impl ShardedOrderStore {
     }
 
     /// idempotency_key で検索
+    #[allow(dead_code)]
+    /// 個別参照API向けのヘルパー
     pub fn find_by_idempotency_key(&self, account_id: &str, key: &str) -> Option<OrderSnapshot> {
         let idx = Self::shard_index(account_id);
         let idx_key = Self::idempotency_key(account_id, key);
@@ -180,6 +182,8 @@ impl ShardedOrderStore {
     }
 
     /// 注文を削除
+    #[allow(dead_code)]
+    /// 回収処理を実装するまでの保持
     pub fn remove(&self, order_id: &str, account_id: &str, idempotency_key: Option<&str>) {
         let idx = Self::shard_index(account_id);
         let mut guard = self.shards[idx].write().unwrap();

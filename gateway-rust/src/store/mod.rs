@@ -20,6 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::order::{OrderType, TimeInForce};
 
 /// 注文ステータス
+#[allow(dead_code)]
+/// 取引所連携の進行に合わせて利用するステータスを先行定義
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderStatus {
     Accepted,
@@ -110,6 +112,8 @@ impl OrderSnapshot {
 pub struct ExecReport {
     pub order_id: String,
     pub status: OrderStatus,
+    #[allow(dead_code)]
+    /// 将来の差分適用に備えて保持
     pub filled_qty_delta: u64,
     pub filled_qty_total: u64,
     pub at: u64,
@@ -155,6 +159,8 @@ impl OrderStore {
         }
     }
 
+    #[allow(dead_code)]
+    /// 回収処理を導入するまでの保持
     pub fn remove(&self, order_id: &str, idempotency_key: Option<&str>) {
         let order = self.by_id.write().unwrap().remove(order_id);
 
@@ -220,6 +226,8 @@ impl OrderStore {
         format!("{}::{}", account_id, key)
     }
 
+    #[allow(dead_code)]
+    /// 運用検証用の概算件数
     pub fn count(&self) -> usize {
         self.by_id.read().unwrap().len()
     }

@@ -102,6 +102,10 @@ impl AuditLog {
         }
         bucket.into_iter().collect()
     }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 pub fn now_millis() -> u64 {

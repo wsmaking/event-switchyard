@@ -30,6 +30,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::audit::{self, AuditEvent, AuditLog};
+use crate::bus::{BusEvent, BusPublisher};
 use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{HealthResponse, OrderRequest, OrderResponse};
@@ -51,6 +52,8 @@ struct AppState {
     sse_hub: Arc<SseHub>,
     order_id_seq: Arc<AtomicU64>,
     audit_log: Arc<AuditLog>,
+    bus_publisher: Arc<BusPublisher>,
+    bus_mode_outbox: bool,
     idempotency_checked: Arc<AtomicU64>,
     idempotency_hits: Arc<AtomicU64>,
     idempotency_creates: Arc<AtomicU64>,
@@ -63,6 +66,8 @@ pub async fn run(
     order_store: Arc<OrderStore>,
     sse_hub: Arc<SseHub>,
     audit_log: Arc<AuditLog>,
+    bus_publisher: Arc<BusPublisher>,
+    bus_mode_outbox: bool,
     idempotency_ttl_sec: u64,
 ) -> anyhow::Result<()> {
     let state = AppState {
@@ -74,6 +79,8 @@ pub async fn run(
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,
+        bus_publisher,
+        bus_mode_outbox,
         idempotency_checked: Arc::new(AtomicU64::new(0)),
         idempotency_hits: Arc::new(AtomicU64::new(0)),
         idempotency_creates: Arc::new(AtomicU64::new(0)),
@@ -210,6 +217,26 @@ async fn handle_order(
                     snapshot.order_id.clone(),
                     account_id,
                 );
+
+                let bus_account_id = snapshot.account_id.clone();
+                let bus_order_id = snapshot.order_id.clone();
+                let bus_data = serde_json::json!({
+                    "symbol": snapshot.symbol,
+                    "side": snapshot.side,
+                    "type": match snapshot.order_type {
+                        crate::order::OrderType::Limit => "LIMIT",
+                        crate::order::OrderType::Market => "MARKET",
+                    },
+                    "qty": snapshot.qty,
+                    "price": snapshot.price,
+                    "timeInForce": match snapshot.time_in_force {
+                        crate::order::TimeInForce::Gtc => "GTC",
+                        crate::order::TimeInForce::Gtd => "GTD",
+                    },
+                    "expireAt": snapshot.expire_at,
+                    "clientOrderId": snapshot.client_order_id,
+                });
+
                 state.audit_log.append(AuditEvent {
                     event_type: "OrderAccepted".into(),
                     at: audit::now_millis(),
@@ -232,6 +259,15 @@ async fn handle_order(
                         "clientOrderId": snapshot.client_order_id,
                     }),
                 });
+                if !state.bus_mode_outbox {
+                    state.bus_publisher.publish(BusEvent {
+                        event_type: "OrderAccepted".into(),
+                        at: audit::now_millis(),
+                        account_id: bus_account_id,
+                        order_id: Some(bus_order_id),
+                        data: bus_data,
+                    });
+                }
                 Ok((StatusCode::ACCEPTED, Json(OrderResponse::accepted(&snapshot.order_id))))
             }
             crate::store::IdempotencyOutcome::NotCreated => {
@@ -332,10 +368,19 @@ async fn handle_order(
             state.audit_log.append(AuditEvent {
                 event_type: "OrderAccepted".into(),
                 at: audit::now_millis(),
-                account_id: audit_account_id,
-                order_id: Some(audit_order_id),
-                data: audit_data,
+                account_id: audit_account_id.clone(),
+                order_id: Some(audit_order_id.clone()),
+                data: audit_data.clone(),
             });
+            if !state.bus_mode_outbox {
+                state.bus_publisher.publish(BusEvent {
+                    event_type: "OrderAccepted".into(),
+                    at: audit::now_millis(),
+                    account_id: audit_account_id,
+                    order_id: Some(audit_order_id),
+                    data: audit_data,
+                });
+            }
 
             (StatusCode::ACCEPTED, OrderResponse::accepted(&order_id))
         }
@@ -519,6 +564,15 @@ async fn handle_cancel_order(
         order_id: Some(order.order_id.clone()),
         data: serde_json::json!({}),
     });
+    if !state.bus_mode_outbox {
+        state.bus_publisher.publish(BusEvent {
+            event_type: "CancelRequested".into(),
+            at: audit::now_millis(),
+            account_id: order.account_id.clone(),
+            order_id: Some(order.order_id.clone()),
+            data: serde_json::json!({}),
+        });
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -731,6 +785,8 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
 /// GET /metrics
 /// Prometheus形式で出力
 async fn handle_metrics(State(state): State<AppState>) -> String {
+    let bus_metrics = state.bus_publisher.metrics();
+    let outbox_metrics = crate::outbox::metrics();
     let idempotency_hits = state.idempotency_hits.load(Ordering::Relaxed);
     let idempotency_creates = state.idempotency_creates.load(Ordering::Relaxed);
     let idempotency_expired = state.sharded_store.idempotency_expired_total();
@@ -740,11 +796,45 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         if idempotency_checked == 0 { 0.0 } else { idempotency_handled as f64 / idempotency_checked as f64 };
     let idempotency_expired_ratio =
         if idempotency_checked == 0 { 0.0 } else { idempotency_expired as f64 / idempotency_checked as f64 };
+    let bus_enabled = if bus_metrics.enabled { 1 } else { 0 };
 
     let snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
          # TYPE gateway_queue_len gauge\n\
          gateway_queue_len {}\n\
+         # HELP gateway_kafka_enabled Kafka publish enabled (1/0)\n\
+         # TYPE gateway_kafka_enabled gauge\n\
+         gateway_kafka_enabled {}\n\
+         # HELP gateway_kafka_publish_queued_total Total Kafka publish enqueued\n\
+         # TYPE gateway_kafka_publish_queued_total counter\n\
+         gateway_kafka_publish_queued_total {}\n\
+         # HELP gateway_kafka_delivery_ok_total Total Kafka delivery success\n\
+         # TYPE gateway_kafka_delivery_ok_total counter\n\
+         gateway_kafka_delivery_ok_total {}\n\
+         # HELP gateway_kafka_delivery_err_total Total Kafka delivery failures\n\
+         # TYPE gateway_kafka_delivery_err_total counter\n\
+         gateway_kafka_delivery_err_total {}\n\
+         # HELP gateway_kafka_publish_dropped_total Total Kafka publish dropped\n\
+         # TYPE gateway_kafka_publish_dropped_total counter\n\
+         gateway_kafka_publish_dropped_total {}\n\
+         # HELP gateway_outbox_lines_read_total Total audit lines read by outbox\n\
+         # TYPE gateway_outbox_lines_read_total counter\n\
+         gateway_outbox_lines_read_total {}\n\
+         # HELP gateway_outbox_events_published_total Total outbox events published to bus\n\
+         # TYPE gateway_outbox_events_published_total counter\n\
+         gateway_outbox_events_published_total {}\n\
+         # HELP gateway_outbox_events_skipped_total Total outbox events skipped\n\
+         # TYPE gateway_outbox_events_skipped_total counter\n\
+         gateway_outbox_events_skipped_total {}\n\
+         # HELP gateway_outbox_read_errors_total Total outbox read errors\n\
+         # TYPE gateway_outbox_read_errors_total counter\n\
+         gateway_outbox_read_errors_total {}\n\
+         # HELP gateway_outbox_publish_errors_total Total outbox publish errors\n\
+         # TYPE gateway_outbox_publish_errors_total counter\n\
+         gateway_outbox_publish_errors_total {}\n\
+         # HELP gateway_outbox_offset_resets_total Total outbox offset resets\n\
+         # TYPE gateway_outbox_offset_resets_total counter\n\
+         gateway_outbox_offset_resets_total {}\n\
          # HELP gateway_idempotency_checked_total Total idempotency checks (requests with Idempotency-Key)\n\
          # TYPE gateway_idempotency_checked_total counter\n\
          gateway_idempotency_checked_total {}\n\
@@ -773,6 +863,17 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_latency_max_ns gauge\n\
          gateway_latency_max_ns {}\n",
         state.engine.queue_len(),
+        bus_enabled,
+        bus_metrics.publish_queued,
+        bus_metrics.publish_delivery_ok,
+        bus_metrics.publish_delivery_err,
+        bus_metrics.publish_dropped,
+        outbox_metrics.lines_read,
+        outbox_metrics.events_published,
+        outbox_metrics.events_skipped,
+        outbox_metrics.read_errors,
+        outbox_metrics.publish_errors,
+        outbox_metrics.offset_resets,
         idempotency_checked,
         idempotency_hits,
         idempotency_creates,

@@ -6,4 +6,4 @@ mod client;
 mod protocol;
 
 pub use client::ExchangeClient;
-pub use protocol::{ExecutionReport, OrderSide, OrderStatus, TcpExchangeRequest, TcpExchangeRequestType};
+pub use protocol::{ExecutionReport, OrderSide};
