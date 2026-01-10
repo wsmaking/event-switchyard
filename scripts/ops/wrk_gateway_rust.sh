@@ -6,6 +6,7 @@ PORT="${PORT:-8081}"
 DURATION="${DURATION:-10}"
 CONNECTIONS="${CONNECTIONS:-400}"
 THREADS="${THREADS:-8}"
+LATENCY="${LATENCY:-0}"
 ACCOUNT_ID="${ACCOUNT_ID:-12345}"
 JWT_SECRET="${JWT_HS256_SECRET:-secret123}"
 CLIENT_ID_LEN="${CLIENT_ID_LEN:-0}"
@@ -37,11 +38,15 @@ fi
 
 echo "wrk gateway-rust"
 echo "  url=${URL}"
-echo "  duration=${DURATION}s threads=${THREADS} connections=${CONNECTIONS}"
+echo "  duration=${DURATION}s threads=${THREADS} connections=${CONNECTIONS} latency=${LATENCY}"
 echo "  accountId=${ACCOUNT_ID} clientIdLen=${CLIENT_ID_LEN}"
 
 JWT_SECRET="${JWT_SECRET}" \
 ACCOUNT_ID="${ACCOUNT_ID}" \
 JWT_TOKEN="${JWT_TOKEN}" \
 CLIENT_ID_LEN="${CLIENT_ID_LEN}" \
-wrk -t "${THREADS}" -c "${CONNECTIONS}" -d "${DURATION}s" -s "${LUA_SCRIPT}" "${URL}"
+WRK_ARGS=( -t "${THREADS}" -c "${CONNECTIONS}" -d "${DURATION}s" -s "${LUA_SCRIPT}" )
+if [[ "${LATENCY}" == "1" ]]; then
+  WRK_ARGS+=( --latency )
+fi
+wrk "${WRK_ARGS[@]}" "${URL}"

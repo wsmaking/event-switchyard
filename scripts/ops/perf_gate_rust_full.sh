@@ -6,10 +6,14 @@ PORT="${PORT:-8081}"
 HOST="${HOST:-localhost}"
 JWT_SECRET="${JWT_HS256_SECRET:-secret123}"
 MODE="${MODE:-balanced}" # latency | throughput | balanced
+BASELINE_PATH="${BASELINE_PATH:-baseline/perf_gate_rust.json}"
+BASELINE_REGRESSION="${BASELINE_REGRESSION:-0.05}"
+UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
 
 REQUESTS_DEFAULT=2000
 DURATION_DEFAULT=10
 CONCURRENCY_DEFAULT=200
+THREADS_DEFAULT=8
 
 case "${MODE}" in
   latency)
@@ -39,12 +43,16 @@ fi
 if [[ -z "${CONCURRENCY+x}" ]]; then
   CONCURRENCY="${CONCURRENCY_DEFAULT}"
 fi
+if [[ -z "${THREADS+x}" ]]; then
+  THREADS="${THREADS_DEFAULT}"
+fi
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.5}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-10}"
 
 RESULTS_DIR="${ROOT_DIR}/var/results"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REPORT_PATH="${RESULTS_DIR}/perf_gate_rust_full_${TIMESTAMP}.txt"
+WRK_OUTPUT="${RESULTS_DIR}/wrk_${TIMESTAMP}.txt"
 
 mkdir -p "${RESULTS_DIR}"
 cd "${ROOT_DIR}"
@@ -102,12 +110,33 @@ fi
 } > "${REPORT_PATH}"
 
 echo "==> Running perf gate (logs -> ${REPORT_PATH})"
-python3 scripts/ops/perf_gate.py --run --ci \
-  --host "${HOST}" \
-  --port "${PORT}" \
-  --requests "${REQUESTS}" \
-  --duration "${DURATION}" \
-  --concurrency "${CONCURRENCY}" | tee -a "${REPORT_PATH}"
+echo "==> Running wrk (logs -> ${WRK_OUTPUT})"
+HOST="${HOST}" \
+PORT="${PORT}" \
+DURATION="${DURATION}" \
+CONNECTIONS="${CONCURRENCY}" \
+THREADS="${THREADS:-8}" \
+LATENCY="${WRK_LATENCY:-0}" \
+scripts/ops/wrk_gateway_rust.sh | tee "${WRK_OUTPUT}"
+
+PERF_GATE_ARGS=(
+  --run --ci
+  --host "${HOST}"
+  --port "${PORT}"
+  --requests "${REQUESTS}"
+  --duration "${DURATION}"
+  --concurrency "${CONCURRENCY}"
+  --wrk-input "${WRK_OUTPUT}"
+)
+
+if [[ -f "${BASELINE_PATH}" ]]; then
+  PERF_GATE_ARGS+=( --baseline "${BASELINE_PATH}" --baseline-regression "${BASELINE_REGRESSION}" )
+fi
+if [[ "${UPDATE_BASELINE}" == "1" ]]; then
+  PERF_GATE_ARGS+=( --update-baseline "${BASELINE_PATH}" )
+fi
+
+python3 scripts/ops/perf_gate.py "${PERF_GATE_ARGS[@]}" | tee -a "${REPORT_PATH}"
 
 {
   echo ""

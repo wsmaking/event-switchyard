@@ -17,6 +17,15 @@ Usage:
 
     # CI用（失敗時に exit 1）
     python perf_gate.py --run --ci
+
+    # wrk結果を併用（スループット判定はwrk優先）
+    python perf_gate.py --run --wrk-input var/results/wrk_gate_8081.txt
+
+    # ベースライン比較（+5%退行でWARN）
+    python perf_gate.py --run --baseline baseline/perf_gate_rust.json --baseline-regression 0.05
+
+    # ベースライン更新
+    python perf_gate.py --run --update-baseline baseline/perf_gate_rust.json
 """
 
 import argparse
@@ -54,6 +63,67 @@ class Colors:
     BLUE = "\033[94m"
     BOLD = "\033[1m"
     END = "\033[0m"
+
+
+def parse_duration_to_ms(value: str) -> Optional[float]:
+    """Parse duration strings like 10ms/200us/1.5s into milliseconds."""
+    value = value.strip().lower()
+    try:
+        if value.endswith("ms"):
+            return float(value[:-2])
+        if value.endswith("us"):
+            return float(value[:-2]) / 1000.0
+        if value.endswith("s"):
+            return float(value[:-1]) * 1000.0
+    except ValueError:
+        return None
+    return None
+
+
+def parse_wrk_output(text: str) -> Dict[str, float]:
+    """Parse wrk output to extract throughput and optional latency metrics."""
+    metrics: Dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Requests/sec:"):
+            try:
+                metrics["throughput_rps"] = float(line.split(":", 1)[1].strip())
+            except ValueError:
+                continue
+        elif line.startswith("Latency") and "Distribution" not in line:
+            parts = line.split()
+            if len(parts) >= 2:
+                parsed = parse_duration_to_ms(parts[1])
+                if parsed is not None:
+                    metrics["latency_avg_ms"] = parsed
+        elif line.startswith("99%"):
+            parts = line.split()
+            if len(parts) >= 2:
+                parsed = parse_duration_to_ms(parts[1])
+                if parsed is not None:
+                    metrics["latency_p99_ms"] = parsed
+    return metrics
+
+
+def extract_bench_metrics(results: Dict) -> Dict[str, float]:
+    """Extract metrics from bench_gateway.py results."""
+    metrics: Dict[str, float] = {}
+    rtt_metrics = None
+    throughput_metrics = None
+
+    for r in results.get("results", []):
+        if r.get("test_name") == "rtt":
+            rtt_metrics = r.get("metrics", {})
+        elif r.get("test_name") == "throughput":
+            throughput_metrics = r.get("metrics", {})
+
+    if rtt_metrics:
+        for key in ("p50_us", "p99_us", "max_us"):
+            if key in rtt_metrics:
+                metrics[key] = float(rtt_metrics[key])
+    if throughput_metrics and "throughput_rps" in throughput_metrics:
+        metrics["throughput_rps"] = float(throughput_metrics["throughput_rps"])
+    return metrics
 
 
 def run_benchmark(
@@ -122,6 +192,20 @@ def load_results(path: Path) -> Optional[Dict]:
         return json.load(f)
 
 
+def load_wrk_metrics(path: Path) -> Optional[Dict[str, float]]:
+    """Load wrk output text and parse metrics."""
+    if not path.exists():
+        print(f"{Colors.RED}ERROR: File not found: {path}{Colors.END}", file=sys.stderr)
+        return None
+
+    with open(path, 'r') as f:
+        content = f.read()
+    metrics = parse_wrk_output(content)
+    if not metrics:
+        print(f"{Colors.YELLOW}WARN: wrk metrics not found in {path}{Colors.END}")
+    return metrics
+
+
 def check_metric(
     name: str,
     actual: float,
@@ -166,7 +250,12 @@ def check_metric(
     }
 
 
-def run_checks(results: Dict, thresholds: Dict, warn_thresholds: Dict) -> Tuple[str, List[Dict]]:
+def run_checks(
+    results: Dict,
+    thresholds: Dict,
+    warn_thresholds: Dict,
+    wrk_metrics: Optional[Dict[str, float]] = None
+) -> Tuple[str, List[Dict]]:
     """
     全メトリクスをチェック
 
@@ -217,15 +306,24 @@ def run_checks(results: Dict, thresholds: Dict, warn_thresholds: Dict) -> Tuple[
         )
         checks.append(check)
 
-    # スループットチェック
-    if throughput_metrics and "throughput_rps" in throughput_metrics:
+    # スループットチェック（wrk を優先）
+    throughput_source = "bench_gateway.py"
+    throughput_value = None
+    if wrk_metrics and "throughput_rps" in wrk_metrics:
+        throughput_source = "wrk"
+        throughput_value = wrk_metrics["throughput_rps"]
+    elif throughput_metrics and "throughput_rps" in throughput_metrics:
+        throughput_value = throughput_metrics["throughput_rps"]
+
+    if throughput_value is not None:
         status, check = check_metric(
             "Throughput",
-            throughput_metrics["throughput_rps"],
+            throughput_value,
             thresholds.get("throughput_rps", DEFAULT_THRESHOLDS["throughput_rps"]),
             warn_thresholds.get("throughput_rps", WARN_THRESHOLDS["throughput_rps"]),
             ">="
         )
+        check["source"] = throughput_source
         checks.append(check)
 
     # 全体ステータス決定
@@ -238,6 +336,54 @@ def run_checks(results: Dict, thresholds: Dict, warn_thresholds: Dict) -> Tuple[
         overall = "PASS"
 
     return overall, checks
+
+
+def compare_baseline(
+    current: Dict[str, Dict[str, float]],
+    baseline: Dict[str, Dict[str, float]],
+    regression_threshold: float
+) -> List[Dict]:
+    """Compare current metrics against baseline; returns WARN checks on regressions."""
+    checks: List[Dict] = []
+    bench_current = current.get("bench", {})
+    bench_base = baseline.get("bench", {})
+    wrk_current = current.get("wrk", {})
+    wrk_base = baseline.get("wrk", {})
+
+    def add_regression_check(name: str, actual: float, base: float, operator: str, source: str):
+        if base <= 0:
+            return
+        if operator == "<=":
+            regression = (actual - base) / base
+            passed = regression <= regression_threshold
+        else:
+            regression = (base - actual) / base
+            passed = regression <= regression_threshold
+        status = "PASS" if passed else "WARN"
+        checks.append({
+            "name": name,
+            "actual": actual,
+            "threshold": base,
+            "warn_threshold": base,
+            "operator": operator,
+            "status": status,
+            "pct_diff": regression * 100,
+            "source": source,
+            "baseline": True,
+        })
+
+    for metric in ("p50_us", "p99_us", "max_us"):
+        if metric in bench_current and metric in bench_base:
+            label = f"Baseline {metric.replace('_us', '').upper()} Latency"
+            add_regression_check(label, bench_current[metric], bench_base[metric], "<=", "bench_gateway.py")
+
+    # Throughput baseline prefers wrk if available
+    if "throughput_rps" in wrk_current and "throughput_rps" in wrk_base:
+        add_regression_check("Baseline Throughput", wrk_current["throughput_rps"], wrk_base["throughput_rps"], ">=", "wrk")
+    elif "throughput_rps" in bench_current and "throughput_rps" in bench_base:
+        add_regression_check("Baseline Throughput", bench_current["throughput_rps"], bench_base["throughput_rps"], ">=", "bench_gateway.py")
+
+    return checks
 
 
 def print_summary(overall_status: str, checks: List[Dict]):
@@ -270,6 +416,8 @@ def print_summary(overall_status: str, checks: List[Dict]):
         actual = check["actual"]
         threshold = check["threshold"]
         name = check["name"]
+        if check.get("source"):
+            name = f"{name} ({check['source']})"
 
         # 単位を決定
         if "Latency" in name:
@@ -330,7 +478,10 @@ def generate_github_summary(overall_status: str, checks: List[Dict], results: Di
         actual = f"{check['actual']:.0f}{unit}"
         threshold = f"{check['operator']} {check['threshold']:.0f}{unit}"
 
-        lines.append(f"| {status_emoji} | {check['name']} | {actual} | {threshold} | {status} |")
+        name = check["name"]
+        if check.get("source"):
+            name = f"{name} ({check['source']})"
+        lines.append(f"| {status_emoji} | {name} | {actual} | {threshold} | {status} |")
 
     lines.append("")
 
@@ -359,6 +510,8 @@ def main():
                         help="Run benchmark before checking")
     parser.add_argument("--input", "-i", type=Path,
                         help="Input benchmark results JSON file")
+    parser.add_argument("--wrk-input", type=Path,
+                        help="Optional wrk output file for throughput check")
 
     # ベンチマーク設定
     parser.add_argument("--host", default="localhost", help="Gateway host")
@@ -381,6 +534,12 @@ def main():
                         help="CI mode: exit 1 on FAIL, 0 on PASS/WARN")
     parser.add_argument("--strict", action="store_true",
                         help="Strict mode: exit 1 on WARN as well")
+    parser.add_argument("--baseline", type=Path,
+                        help="Baseline JSON for regression check")
+    parser.add_argument("--update-baseline", type=Path,
+                        help="Write current metrics as baseline JSON")
+    parser.add_argument("--baseline-regression", type=float, default=0.05,
+                        help="Allowed regression vs baseline (default: 0.05 = 5%)")
 
     args = parser.parse_args()
 
@@ -406,6 +565,10 @@ def main():
         print(f"{Colors.RED}ERROR: No results to check{Colors.END}", file=sys.stderr)
         sys.exit(1)
 
+    wrk_metrics = None
+    if args.wrk_input:
+        wrk_metrics = load_wrk_metrics(args.wrk_input)
+
     # 閾値設定
     thresholds = DEFAULT_THRESHOLDS.copy()
     if args.p50:
@@ -418,7 +581,37 @@ def main():
         thresholds["throughput_rps"] = args.throughput
 
     # チェック実行
-    overall_status, checks = run_checks(results, thresholds, WARN_THRESHOLDS)
+    overall_status, checks = run_checks(results, thresholds, WARN_THRESHOLDS, wrk_metrics)
+
+    current_metrics = {
+        "bench": extract_bench_metrics(results),
+    }
+    if wrk_metrics:
+        current_metrics["wrk"] = wrk_metrics
+
+    if args.baseline:
+        if not args.baseline.exists():
+            print(f"{Colors.RED}ERROR: Baseline not found: {args.baseline}{Colors.END}", file=sys.stderr)
+            sys.exit(1)
+        with open(args.baseline, "r") as f:
+            baseline = json.load(f)
+        baseline_checks = compare_baseline(current_metrics, baseline, args.baseline_regression)
+        checks.extend(baseline_checks)
+        baseline_statuses = [c["status"] for c in baseline_checks]
+        if "WARN" in baseline_statuses and overall_status == "PASS":
+            overall_status = "WARN"
+
+    if args.update_baseline:
+        baseline_payload = {
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "bench": current_metrics.get("bench", {}),
+        }
+        if "wrk" in current_metrics:
+            baseline_payload["wrk"] = current_metrics["wrk"]
+        args.update_baseline.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.update_baseline, "w") as f:
+            json.dump(baseline_payload, f, indent=2, sort_keys=True)
+        print(f"Baseline updated: {args.update_baseline}")
 
     # 結果表示
     print_summary(overall_status, checks)
