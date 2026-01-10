@@ -1,7 +1,7 @@
 //! ShardedOrderStore - HFT最適化版注文ストア
 //!
-//! account_id % SHARD_COUNT でシャーディングし、ロック競合を軽減。
-//! 64シャードで並列処理時のスループットを最大化。
+//! account_id をハッシュしてシャーディングし、ロック競合を軽減。
+//! デフォルトは64シャード。必要なら環境変数で増減できる。
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -11,8 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{ExecReport, OrderSnapshot, OrderStatus};
 
-/// シャード数（2のべき乗で効率的なmodulo演算）
-const SHARD_COUNT: usize = 64;
+/// シャード数のデフォルト（2のべき乗で効率的なmodulo演算）
+const DEFAULT_SHARD_COUNT: usize = 64;
+const MAX_SHARD_COUNT: usize = 1024;
 
 /// シャード単位のストア
 struct Shard {
@@ -37,7 +38,9 @@ impl Shard {
 /// 同一アカウントの注文は同一シャードに配置されるため、
 /// アカウント単位の操作は一貫性を保つ。
 pub struct ShardedOrderStore {
-    shards: Box<[RwLock<Shard>; SHARD_COUNT]>,
+    shards: Box<[RwLock<Shard>]>,
+    shard_mask: usize,
+    shard_count: usize,
     idempotency_ttl_ms: u64,
     idempotency_expired_total: AtomicU64,
 }
@@ -60,10 +63,19 @@ impl ShardedOrderStore {
     }
 
     pub fn new_with_ttl_ms(idempotency_ttl_ms: u64) -> Self {
-        // 配列を直接初期化
-        let shards: [RwLock<Shard>; SHARD_COUNT] = std::array::from_fn(|_| RwLock::new(Shard::new()));
+        Self::new_with_ttl_and_shards(idempotency_ttl_ms, DEFAULT_SHARD_COUNT)
+    }
+
+    pub fn new_with_ttl_and_shards(idempotency_ttl_ms: u64, shard_count: usize) -> Self {
+        let shard_count = normalize_shard_count(shard_count);
+        let shard_mask = shard_count - 1;
+        let shards: Vec<RwLock<Shard>> = (0..shard_count)
+            .map(|_| RwLock::new(Shard::new()))
+            .collect();
         Self {
-            shards: Box::new(shards),
+            shards: shards.into_boxed_slice(),
+            shard_mask,
+            shard_count,
             idempotency_ttl_ms,
             idempotency_expired_total: AtomicU64::new(0),
         }
@@ -71,10 +83,10 @@ impl ShardedOrderStore {
 
     /// account_id からシャードインデックスを計算
     #[inline]
-    fn shard_index(account_id: &str) -> usize {
+    fn shard_index(&self, account_id: &str) -> usize {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         account_id.hash(&mut hasher);
-        (hasher.finish() as usize) & (SHARD_COUNT - 1)
+        (hasher.finish() as usize) & self.shard_mask
     }
 
     /// 注文IDで検索
@@ -95,7 +107,7 @@ impl ShardedOrderStore {
 
     /// account_id を指定して注文IDで検索（推奨）
     pub fn find_by_id_with_account(&self, order_id: &str, account_id: &str) -> Option<OrderSnapshot> {
-        let idx = Self::shard_index(account_id);
+        let idx = self.shard_index(account_id);
         let guard = self.shards[idx].read().unwrap();
         guard.by_id.get(order_id).cloned()
     }
@@ -104,7 +116,7 @@ impl ShardedOrderStore {
     #[allow(dead_code)]
     /// 個別参照API向けのヘルパー
     pub fn find_by_idempotency_key(&self, account_id: &str, key: &str) -> Option<OrderSnapshot> {
-        let idx = Self::shard_index(account_id);
+        let idx = self.shard_index(account_id);
         let idx_key = Self::idempotency_key(account_id, key);
 
         let now_ms = now_millis();
@@ -127,7 +139,7 @@ impl ShardedOrderStore {
     where
         F: FnOnce() -> Option<OrderSnapshot>,
     {
-        let idx = Self::shard_index(account_id);
+        let idx = self.shard_index(account_id);
         let idx_key = Self::idempotency_key(account_id, key);
         let mut guard = self.shards[idx].write().unwrap();
         let now_ms = now_millis();
@@ -161,7 +173,7 @@ impl ShardedOrderStore {
 
     /// 注文を保存
     pub fn put(&self, order: OrderSnapshot, idempotency_key: Option<&str>) {
-        let idx = Self::shard_index(&order.account_id);
+        let idx = self.shard_index(&order.account_id);
         let order_id = order.order_id.clone();
         let account_id = order.account_id.clone();
         let accepted_at = order.accepted_at;
@@ -185,7 +197,7 @@ impl ShardedOrderStore {
     #[allow(dead_code)]
     /// 回収処理を実装するまでの保持
     pub fn remove(&self, order_id: &str, account_id: &str, idempotency_key: Option<&str>) {
-        let idx = Self::shard_index(account_id);
+        let idx = self.shard_index(account_id);
         let mut guard = self.shards[idx].write().unwrap();
 
         guard.by_id.remove(order_id);
@@ -201,7 +213,7 @@ impl ShardedOrderStore {
     where
         F: FnOnce(&OrderSnapshot) -> OrderSnapshot,
     {
-        let idx = Self::shard_index(account_id);
+        let idx = self.shard_index(account_id);
         let mut guard = self.shards[idx].write().unwrap();
 
         if let Some(order) = guard.by_id.get(order_id) {
@@ -276,6 +288,10 @@ impl ShardedOrderStore {
     pub fn shard_counts(&self) -> Vec<usize> {
         self.shards.iter().map(|s| s.read().unwrap().by_id.len()).collect()
     }
+
+    pub fn shard_count(&self) -> usize {
+        self.shard_count
+    }
 }
 
 fn now_millis() -> u64 {
@@ -287,6 +303,14 @@ fn now_millis() -> u64 {
 
 fn default_idempotency_ttl_ms() -> u64 {
     24 * 60 * 60 * 1000
+}
+
+fn normalize_shard_count(shard_count: usize) -> usize {
+    let mut normalized = shard_count.max(1);
+    if normalized > MAX_SHARD_COUNT {
+        normalized = MAX_SHARD_COUNT;
+    }
+    normalized.next_power_of_two()
 }
 
 impl Default for ShardedOrderStore {

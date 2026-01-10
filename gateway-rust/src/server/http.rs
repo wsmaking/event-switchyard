@@ -75,11 +75,20 @@ pub async fn run(
     bus_mode_outbox: bool,
     idempotency_ttl_sec: u64,
 ) -> anyhow::Result<()> {
+    let shard_count = std::env::var("ORDER_STORE_SHARDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64);
+    info!("ShardedOrderStore configured (shards={})", shard_count);
+
     let state = AppState {
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
         order_store,
-        sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_ms(idempotency_ttl_sec * 1000)),
+        sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_and_shards(
+            idempotency_ttl_sec * 1000,
+            shard_count,
+        )),
         order_id_map: Arc::new(OrderIdMap::new()),
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
@@ -929,6 +938,9 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         "# HELP gateway_queue_len Current queue length\n\
          # TYPE gateway_queue_len gauge\n\
          gateway_queue_len {}\n\
+         # HELP gateway_order_store_shards Sharded order store shard count\n\
+         # TYPE gateway_order_store_shards gauge\n\
+         gateway_order_store_shards {}\n\
          # HELP gateway_kafka_enabled Kafka publish enabled (1/0)\n\
          # TYPE gateway_kafka_enabled gauge\n\
          gateway_kafka_enabled {}\n\
@@ -1023,6 +1035,7 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_latency_max_ns gauge\n\
          gateway_latency_max_ns {}\n",
         state.engine.queue_len(),
+        state.sharded_store.shard_count(),
         bus_enabled,
         bus_metrics.publish_queued,
         bus_metrics.publish_delivery_ok,
