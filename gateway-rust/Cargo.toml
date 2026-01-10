@@ -38,6 +38,8 @@ anyhow = "1"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+aws-config = "1.5"
+aws-sdk-kms = "1.56"
 
 # UUID 生成
 uuid = { version = "1", features = ["v4"] }

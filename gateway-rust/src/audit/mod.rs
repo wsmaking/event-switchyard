@@ -7,7 +7,9 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
-use std::collections::VecDeque;
+use aws_sdk_kms::primitives::Blob;
+use aws_sdk_kms::Client as KmsClient;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -30,8 +32,8 @@ pub struct AuditLog {
     writer: Mutex<BufWriter<File>>,
     hash_path: Option<PathBuf>,
     hash_writer: Option<Mutex<BufWriter<File>>>,
-    hmac_key: Option<Vec<u8>>,
-    key_id: Option<String>,
+    hmac_keys: HashMap<String, Vec<u8>>,
+    active_key_id: Option<String>,
     prev_hash: Mutex<Vec<u8>>,
     seq: Mutex<u64>,
 }
@@ -47,14 +49,14 @@ impl AuditLog {
             .append(true)
             .write(true)
             .open(&path)?;
-        let (hash_path, hash_writer, hmac_key, key_id, prev_hash, seq) = init_hash_chain(&path)?;
+        let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq) = init_hash_chain(&path)?;
         Ok(Self {
             path,
             writer: Mutex::new(BufWriter::new(file)),
             hash_path,
             hash_writer,
-            hmac_key,
-            key_id,
+            hmac_keys,
+            active_key_id,
             prev_hash: Mutex::new(prev_hash),
             seq: Mutex::new(seq),
         })
@@ -126,17 +128,14 @@ impl AuditLog {
     }
 
     pub fn verify(&self, from_seq: u64, limit: usize) -> AuditVerifyResult {
-        let key = match &self.hmac_key {
-            Some(k) => k,
-            None => {
-                return AuditVerifyResult {
-                    ok: false,
-                    checked: 0,
-                    last_seq: 0,
-                    error: Some("AUDIT_HMAC_KEY not configured".into()),
-                };
-            }
-        };
+        if self.hmac_keys.is_empty() {
+            return AuditVerifyResult {
+                ok: false,
+                checked: 0,
+                last_seq: 0,
+                error: Some("AUDIT_HMAC_KEY not configured".into()),
+            };
+        }
         let hash_path = match &self.hash_path {
             Some(p) => p,
             None => {
@@ -220,6 +219,17 @@ impl AuditLog {
             if line_bytes.last() != Some(&b'\n') {
                 line_bytes.push(b'\n');
             }
+            let key = match self.hmac_keys.get(&entry.key_id) {
+                Some(k) => k,
+                None => {
+                    return AuditVerifyResult {
+                        ok: false,
+                        checked,
+                        last_seq: entry.seq,
+                        error: Some(format!("unknown audit key id: {}", entry.key_id)),
+                    };
+                }
+            };
             let expected = compute_hmac(key, &prev_hash, &line_bytes);
             let expected_b64 = base64::engine::general_purpose::STANDARD.encode(expected);
             if expected_b64 != entry.hash {
@@ -247,8 +257,11 @@ impl AuditLog {
     }
 
     fn append_hash_chain(&self, line_bytes: &[u8]) {
-        let (key, writer, key_id) = match (&self.hmac_key, &self.hash_writer, &self.key_id) {
-            (Some(k), Some(w), Some(id)) => (k, w, id),
+        let (key, writer, key_id) = match (&self.active_key_id, &self.hash_writer) {
+            (Some(id), Some(w)) => match self.hmac_keys.get(id) {
+                Some(k) => (k, w, id),
+                None => return,
+            },
             _ => return,
         };
         let mut prev_hash = match self.prev_hash.lock() {
@@ -306,14 +319,13 @@ pub struct AuditVerifyResult {
     pub error: Option<String>,
 }
 
-fn init_hash_chain(path: &Path) -> std::io::Result<(Option<PathBuf>, Option<Mutex<BufWriter<File>>>, Option<Vec<u8>>, Option<String>, Vec<u8>, u64)> {
-    let key = match std::env::var("AUDIT_HMAC_KEY") {
-        Ok(v) if !v.trim().is_empty() => v.into_bytes(),
-        _ => {
-            return Ok((None, None, None, None, Vec::new(), 0));
-        }
-    };
-    let key_id = std::env::var("AUDIT_KEY_ID").unwrap_or_else(|_| "key-1".into());
+fn init_hash_chain(
+    path: &Path
+) -> std::io::Result<(Option<PathBuf>, Option<Mutex<BufWriter<File>>>, HashMap<String, Vec<u8>>, Option<String>, Vec<u8>, u64)> {
+    let (keys, active_id) = load_audit_keys();
+    if keys.is_empty() || active_id.is_none() {
+        return Ok((None, None, HashMap::new(), None, Vec::new(), 0));
+    }
     let hash_path = std::env::var("AUDIT_HASH_PATH")
         .ok()
         .map(PathBuf::from)
@@ -341,8 +353,8 @@ fn init_hash_chain(path: &Path) -> std::io::Result<(Option<PathBuf>, Option<Mute
     Ok((
         Some(hash_path),
         Some(Mutex::new(BufWriter::new(hash_file))),
-        Some(key),
-        Some(key_id),
+        keys,
+        active_id,
         prev_hash,
         seq,
     ))
@@ -395,6 +407,83 @@ fn compute_hmac(key: &[u8], prev_hash: &[u8], line_bytes: &[u8]) -> Vec<u8> {
     mac.update(prev_hash);
     mac.update(line_bytes);
     mac.finalize().into_bytes().to_vec()
+}
+
+fn load_audit_keys() -> (HashMap<String, Vec<u8>>, Option<String>) {
+    let mut keys = HashMap::new();
+    if let Some((key_id, key_bytes)) = load_kms_key() {
+        keys.insert(key_id, key_bytes);
+    }
+    if let Ok(list) = std::env::var("AUDIT_HMAC_KEYS") {
+        for part in list.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut iter = trimmed.splitn(2, ':');
+            let key_id = match iter.next() {
+                Some(v) if !v.is_empty() => v.trim().to_string(),
+                _ => continue,
+            };
+            let raw = match iter.next() {
+                Some(v) if !v.is_empty() => v.trim(),
+                _ => continue,
+            };
+            if let Some(key_bytes) = parse_key_value(raw) {
+                keys.insert(key_id, key_bytes);
+            }
+        }
+    }
+    if keys.is_empty() {
+        if let Ok(value) = std::env::var("AUDIT_HMAC_KEY") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                keys.insert("key-1".to_string(), trimmed.as_bytes().to_vec());
+            }
+        }
+    }
+    let active_id = std::env::var("AUDIT_KEY_ID").ok().filter(|v| !v.trim().is_empty());
+    let active_id = active_id.or_else(|| keys.keys().next().cloned());
+    (keys, active_id)
+}
+
+fn parse_key_value(raw: &str) -> Option<Vec<u8>> {
+    let trimmed = raw.trim();
+    if let Some(value) = trimmed.strip_prefix("base64:") {
+        return base64::engine::general_purpose::STANDARD.decode(value.trim()).ok();
+    }
+    Some(trimmed.as_bytes().to_vec())
+}
+
+fn load_kms_key() -> Option<(String, Vec<u8>)> {
+    let ciphertext_b64 = std::env::var("AUDIT_KMS_CIPHERTEXT_B64").ok()?;
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(ciphertext_b64.trim())
+        .ok()?;
+    let key_id = std::env::var("AUDIT_KMS_KEY_ID").unwrap_or_else(|_| "kms-1".into());
+    let plaintext = decrypt_kms_blocking(ciphertext)?;
+    Some((key_id, plaintext))
+}
+
+fn decrypt_kms_blocking(ciphertext: Vec<u8>) -> Option<Vec<u8>> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return handle.block_on(decrypt_kms(ciphertext));
+    }
+    let runtime = tokio::runtime::Runtime::new().ok()?;
+    runtime.block_on(decrypt_kms(ciphertext))
+}
+
+async fn decrypt_kms(ciphertext: Vec<u8>) -> Option<Vec<u8>> {
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = KmsClient::new(&config);
+    let response = client
+        .decrypt()
+        .ciphertext_blob(Blob::new(ciphertext))
+        .send()
+        .await
+        .ok()?;
+    let plaintext = response.plaintext()?;
+    Some(plaintext.as_ref().to_vec())
 }
 
 pub fn now_millis() -> u64 {
