@@ -7,6 +7,7 @@
 //! - GET /orders/:id: 注文詳細取得 (JWT認証必須)
 //! - GET /orders/:id/stream: 注文SSEストリーム (JWT認証必須)
 //! - GET /stream: アカウントSSEストリーム (JWT認証必須)
+//! - GET /audit/verify: 監査ログ検証 (JWT認証必須)
 //! - GET /health: ヘルスチェック
 //! - GET /metrics: メトリクス
 
@@ -29,7 +30,7 @@ use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::audit::{self, AuditEvent, AuditLog};
+use crate::audit::{self, AuditEvent, AuditLog, AuditVerifyResult};
 use crate::bus::{BusEvent, BusPublisher};
 use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
@@ -94,6 +95,7 @@ pub async fn run(
         .route("/accounts/{account_id}/events", get(handle_account_events))
         .route("/orders/{order_id}/stream", get(handle_order_stream))
         .route("/stream", get(handle_account_stream))
+        .route("/audit/verify", get(handle_audit_verify))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .layer(CorsLayer::permissive())
@@ -121,6 +123,15 @@ struct CancelResponse {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditVerifyQuery {
+    #[serde(default)]
+    from_seq: Option<u64>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// 注文受付ハンドラ
@@ -778,6 +789,41 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         latency_p50_ns: state.engine.latency_p50(),
         latency_p99_ns: state.engine.latency_p99(),
     })
+}
+
+/// 監査ログ検証ハンドラ
+///
+/// GET /audit/verify
+async fn handle_audit_verify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditVerifyQuery>,
+) -> Result<Json<AuditVerifyResult>, (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(_) => {
+            let from_seq = query.from_seq.unwrap_or(0);
+            let limit = query.limit.unwrap_or(1000);
+            let result = state.audit_log.verify(from_seq, limit);
+            Ok(Json(result))
+        }
+        AuthResult::Err(e) => {
+            let status = match e {
+                AuthError::SecretNotConfigured => StatusCode::INTERNAL_SERVER_ERROR,
+                AuthError::TokenExpired | AuthError::TokenNotYetValid => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            Err((
+                status,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ))
+        }
+    }
 }
 
 /// メトリクスハンドラ
