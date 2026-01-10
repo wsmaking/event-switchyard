@@ -139,9 +139,29 @@ impl FastPathEngine {
         self.histogram.snapshot().percentile(50.0)
     }
 
+    /// レイテンシ統計: p95 (ナノ秒)
+    pub fn latency_p95(&self) -> u64 {
+        self.histogram.snapshot().percentile(95.0)
+    }
+
     /// レイテンシ統計: p99 (ナノ秒)
     pub fn latency_p99(&self) -> u64 {
         self.histogram.snapshot().percentile(99.0)
+    }
+
+    /// レイテンシ統計: p999 (ナノ秒)
+    pub fn latency_p999(&self) -> u64 {
+        self.histogram.snapshot().percentile(99.9)
+    }
+
+    /// レイテンシ統計: 平均 (ナノ秒)
+    pub fn latency_mean(&self) -> u64 {
+        self.histogram.snapshot().mean_nanos
+    }
+
+    /// レイテンシ統計: 件数
+    pub fn latency_count(&self) -> u64 {
+        self.histogram.snapshot().count
     }
 
     /// レイテンシ統計: 最大値 (ナノ秒)

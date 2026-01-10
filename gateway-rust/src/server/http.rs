@@ -949,9 +949,21 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_latency_p50_ns Latency p50 in nanoseconds\n\
          # TYPE gateway_latency_p50_ns gauge\n\
          gateway_latency_p50_ns {}\n\
+         # HELP gateway_latency_p95_ns Latency p95 in nanoseconds\n\
+         # TYPE gateway_latency_p95_ns gauge\n\
+         gateway_latency_p95_ns {}\n\
          # HELP gateway_latency_p99_ns Latency p99 in nanoseconds\n\
          # TYPE gateway_latency_p99_ns gauge\n\
          gateway_latency_p99_ns {}\n\
+         # HELP gateway_latency_p999_ns Latency p999 in nanoseconds\n\
+         # TYPE gateway_latency_p999_ns gauge\n\
+         gateway_latency_p999_ns {}\n\
+         # HELP gateway_latency_mean_ns Latency mean in nanoseconds\n\
+         # TYPE gateway_latency_mean_ns gauge\n\
+         gateway_latency_mean_ns {}\n\
+         # HELP gateway_latency_count_total Latency sample count\n\
+         # TYPE gateway_latency_count_total counter\n\
+         gateway_latency_count_total {}\n\
          # HELP gateway_latency_max_ns Latency max in nanoseconds\n\
          # TYPE gateway_latency_max_ns gauge\n\
          gateway_latency_max_ns {}\n",
@@ -977,7 +989,11 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         idempotency_handled_ratio,
         idempotency_expired_ratio,
         state.engine.latency_p50(),
+        state.engine.latency_p95(),
         state.engine.latency_p99(),
+        state.engine.latency_p999(),
+        state.engine.latency_mean(),
+        state.engine.latency_count(),
         state.engine.latency_max(),
     );
     snapshot

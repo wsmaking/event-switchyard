@@ -346,7 +346,7 @@ impl AuditLog {
                 seq: *seq,
                 at: entry.at,
                 key_id: key_id.clone(),
-                hash: hash_b64,
+                hash: hash_b64.clone(),
             };
             let _ = write_anchor(anchor_path, &anchor);
         }
