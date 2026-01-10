@@ -835,6 +835,15 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_outbox_offset_resets_total Total outbox offset resets\n\
          # TYPE gateway_outbox_offset_resets_total counter\n\
          gateway_outbox_offset_resets_total {}\n\
+         # HELP gateway_outbox_backoff_base_ms Outbox backoff base milliseconds\n\
+         # TYPE gateway_outbox_backoff_base_ms gauge\n\
+         gateway_outbox_backoff_base_ms {}\n\
+         # HELP gateway_outbox_backoff_max_ms Outbox backoff max milliseconds\n\
+         # TYPE gateway_outbox_backoff_max_ms gauge\n\
+         gateway_outbox_backoff_max_ms {}\n\
+         # HELP gateway_outbox_backoff_current_ms Outbox current backoff milliseconds\n\
+         # TYPE gateway_outbox_backoff_current_ms gauge\n\
+         gateway_outbox_backoff_current_ms {}\n\
          # HELP gateway_idempotency_checked_total Total idempotency checks (requests with Idempotency-Key)\n\
          # TYPE gateway_idempotency_checked_total counter\n\
          gateway_idempotency_checked_total {}\n\
@@ -874,6 +883,9 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         outbox_metrics.read_errors,
         outbox_metrics.publish_errors,
         outbox_metrics.offset_resets,
+        outbox_metrics.backoff_base_ms,
+        outbox_metrics.backoff_max_ms,
+        outbox_metrics.backoff_current_ms,
         idempotency_checked,
         idempotency_hits,
         idempotency_creates,

@@ -18,6 +18,9 @@ static OUTBOX_EVENTS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static OUTBOX_READ_ERRORS: AtomicU64 = AtomicU64::new(0);
 static OUTBOX_PUBLISH_ERRORS: AtomicU64 = AtomicU64::new(0);
 static OUTBOX_OFFSET_RESETS: AtomicU64 = AtomicU64::new(0);
+static OUTBOX_BACKOFF_BASE_MS: AtomicU64 = AtomicU64::new(0);
+static OUTBOX_BACKOFF_MAX_MS: AtomicU64 = AtomicU64::new(0);
+static OUTBOX_BACKOFF_CURRENT_MS: AtomicU64 = AtomicU64::new(0);
 
 pub struct OutboxMetrics {
     pub lines_read: u64,
@@ -26,6 +29,9 @@ pub struct OutboxMetrics {
     pub read_errors: u64,
     pub publish_errors: u64,
     pub offset_resets: u64,
+    pub backoff_base_ms: u64,
+    pub backoff_max_ms: u64,
+    pub backoff_current_ms: u64,
 }
 
 pub fn metrics() -> OutboxMetrics {
@@ -36,6 +42,9 @@ pub fn metrics() -> OutboxMetrics {
         read_errors: OUTBOX_READ_ERRORS.load(Ordering::Relaxed),
         publish_errors: OUTBOX_PUBLISH_ERRORS.load(Ordering::Relaxed),
         offset_resets: OUTBOX_OFFSET_RESETS.load(Ordering::Relaxed),
+        backoff_base_ms: OUTBOX_BACKOFF_BASE_MS.load(Ordering::Relaxed),
+        backoff_max_ms: OUTBOX_BACKOFF_MAX_MS.load(Ordering::Relaxed),
+        backoff_current_ms: OUTBOX_BACKOFF_CURRENT_MS.load(Ordering::Relaxed),
     }
 }
 
@@ -60,14 +69,17 @@ impl OutboxWorker {
 
     fn run(self) {
         let mut offset = read_offset(&self.offset_path);
-        let base_sleep_ms = 200u64;
-        let max_sleep_ms = 5000u64;
+        let base_sleep_ms = env_u64("OUTBOX_BACKOFF_BASE_MS", 200);
+        let max_sleep_ms = env_u64("OUTBOX_BACKOFF_MAX_MS", 5000);
+        OUTBOX_BACKOFF_BASE_MS.store(base_sleep_ms, Ordering::Relaxed);
+        OUTBOX_BACKOFF_MAX_MS.store(max_sleep_ms, Ordering::Relaxed);
         let mut backoff_ms = base_sleep_ms;
         loop {
             let file = match File::open(&self.audit_path) {
                 Ok(f) => f,
                 Err(_) => {
                     backoff_ms = (backoff_ms * 2).min(max_sleep_ms);
+                    OUTBOX_BACKOFF_CURRENT_MS.store(backoff_ms, Ordering::Relaxed);
                     thread::sleep(Duration::from_millis(backoff_ms));
                     continue;
                 }
@@ -139,9 +151,17 @@ impl OutboxWorker {
             } else {
                 backoff_ms = (backoff_ms * 2).min(max_sleep_ms);
             }
+            OUTBOX_BACKOFF_CURRENT_MS.store(backoff_ms, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(backoff_ms));
         }
     }
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 fn to_bus_event(event: AuditEvent) -> Option<BusEvent> {
