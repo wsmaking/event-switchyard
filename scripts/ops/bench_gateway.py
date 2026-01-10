@@ -81,11 +81,19 @@ def percentile(values: List[float], p: float) -> float:
 class GatewayBenchmark:
     """Gateway ベンチマークツール"""
 
-    def __init__(self, host: str = "localhost", port: int = 8081, jwt_secret: str = "secret123"):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8081,
+        jwt_secret: str = "secret123",
+        reuse_token: bool = True,
+    ):
         self.host = host
         self.port = port
         self.jwt_secret = jwt_secret
         self.base_url = f"http://{host}:{port}"
+        self.reuse_token = reuse_token
+        self.cached_tokens: Dict[str, str] = {}
 
     def _make_connection(self) -> http.client.HTTPConnection:
         return http.client.HTTPConnection(self.host, self.port, timeout=10)
@@ -107,7 +115,13 @@ class GatewayBenchmark:
 
     def _make_headers(self, account_id: str = "12345") -> Dict[str, str]:
         """HTTPヘッダー生成"""
-        token = generate_jwt(self.jwt_secret, account_id)
+        if self.reuse_token:
+            token = self.cached_tokens.get(account_id)
+            if token is None:
+                token = generate_jwt(self.jwt_secret, account_id)
+                self.cached_tokens[account_id] = token
+        else:
+            token = generate_jwt(self.jwt_secret, account_id)
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}"
@@ -545,6 +559,8 @@ def main():
     parser.add_argument("--accounts", type=int, default=10, help="Number of accounts")
     parser.add_argument("--output", default="results", help="Output directory")
     parser.add_argument("--no-save", action="store_true", help="Don't save results to file")
+    parser.add_argument("--disable-jwt-reuse", action="store_true",
+                        help="Generate JWT per request instead of reusing")
 
     # Assertion options (品質ゲート)
     parser.add_argument("--assert-p50", type=float, metavar="US",
@@ -558,7 +574,12 @@ def main():
 
     args = parser.parse_args()
 
-    bench = GatewayBenchmark(host=args.host, port=args.port, jwt_secret=args.secret)
+    bench = GatewayBenchmark(
+        host=args.host,
+        port=args.port,
+        jwt_secret=args.secret,
+        reuse_token=not args.disable_jwt_reuse,
+    )
 
     # ヘルスチェック
     if not bench.check_health():
