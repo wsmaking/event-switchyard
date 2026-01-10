@@ -21,6 +21,8 @@ pub struct Config {
     pub exchange_host: Option<String>,
     /// Exchange ポート
     pub exchange_port: u16,
+    /// Idempotency Key TTL (sec)
+    pub idempotency_ttl_sec: u64,
 }
 
 impl Config {
@@ -62,6 +64,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(9901),
+            idempotency_ttl_sec: env::var("IDEMPOTENCY_TTL_SEC")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86_400),
         }
     }
 }

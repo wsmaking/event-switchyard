@@ -11,7 +11,7 @@ mod id_map;
 mod sharded;
 
 pub use id_map::OrderIdMap;
-pub use sharded::ShardedOrderStore;
+pub use sharded::{IdempotencyOutcome, ShardedOrderStore};
 
 use std::collections::HashMap;
 use std::sync::RwLock;

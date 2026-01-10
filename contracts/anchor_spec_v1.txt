@@ -47,6 +47,9 @@ Event Switchyard — Implementation Anchor Spec v1
           - 503: {"status":"REJECTED","reason":"QUEUE_REJECT"}（FastPath queue）
       - Idempotency:
           - Header: Idempotency-Key を付与すると、同一 accountId + key は同じ orderId を返す（202）。
+          - Rust Gateway でも同じ挙動（HTTPのみ、TCPは対象外）。
+          - 認証（JWT）に成功した後に適用する。
+          - TTL: デフォルト24h（env IDEMPOTENCY_TTL_SEC で上書き可能）。期限切れは新規扱い。
 
   - GET /orders/{orderId}
       - 200: OrderSnapshot（現状の JSON そのまま）

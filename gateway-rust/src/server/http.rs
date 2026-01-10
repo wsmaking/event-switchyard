@@ -11,7 +11,7 @@
 //! - GET /metrics: メトリクス
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State, Query},
     http::{header::AUTHORIZATION, StatusCode},
     response::sse::{Event, Sse},
     routing::{get, post},
@@ -29,6 +29,7 @@ use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::audit::{self, AuditEvent, AuditLog};
 use crate::auth::{AuthError, AuthResult, JwtAuth};
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{HealthResponse, OrderRequest, OrderResponse};
@@ -49,6 +50,10 @@ struct AppState {
     order_id_map: Arc<OrderIdMap>,
     sse_hub: Arc<SseHub>,
     order_id_seq: Arc<AtomicU64>,
+    audit_log: Arc<AuditLog>,
+    idempotency_checked: Arc<AtomicU64>,
+    idempotency_hits: Arc<AtomicU64>,
+    idempotency_creates: Arc<AtomicU64>,
 }
 
 /// HTTPサーバーを起動
@@ -57,20 +62,29 @@ pub async fn run(
     engine: FastPathEngine,
     order_store: Arc<OrderStore>,
     sse_hub: Arc<SseHub>,
+    audit_log: Arc<AuditLog>,
+    idempotency_ttl_sec: u64,
 ) -> anyhow::Result<()> {
     let state = AppState {
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
         order_store,
-        sharded_store: Arc::new(ShardedOrderStore::new()),
+        sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_ms(idempotency_ttl_sec * 1000)),
         order_id_map: Arc::new(OrderIdMap::new()),
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
+        audit_log,
+        idempotency_checked: Arc::new(AtomicU64::new(0)),
+        idempotency_hits: Arc::new(AtomicU64::new(0)),
+        idempotency_creates: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
         .route("/orders", post(handle_order))
         .route("/orders/{order_id}", get(handle_get_order))
+        .route("/orders/{order_id}/cancel", post(handle_cancel_order))
+        .route("/orders/{order_id}/events", get(handle_order_events))
+        .route("/accounts/{account_id}/events", get(handle_account_events))
         .route("/orders/{order_id}/stream", get(handle_order_stream))
         .route("/stream", get(handle_account_stream))
         .route("/health", get(handle_health))
@@ -91,6 +105,15 @@ pub async fn run(
 #[derive(serde::Serialize)]
 struct AuthErrorResponse {
     error: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelResponse {
+    order_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// 注文受付ハンドラ
@@ -123,8 +146,11 @@ async fn handle_order(
         }
     };
 
-    // 注文IDを発番（ord_UUID形式）
-    let order_id = format!("ord_{}", uuid::Uuid::new_v4());
+    let idempotency_key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
 
     // シンボルをバイト配列に変換
     let symbol = FastPathEngine::symbol_to_bytes(&req.symbol);
@@ -135,6 +161,110 @@ async fn handle_order(
 
     // 価格（LIMIT注文の場合は必須）
     let price = req.price.unwrap_or(0);
+
+    if let Some(ref key) = idempotency_key {
+        state.idempotency_checked.fetch_add(1, Ordering::Relaxed);
+        let order_id = format!("ord_{}", uuid::Uuid::new_v4());
+        let internal_order_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
+        let mut process_result = ProcessResult::ErrorQueueFull;
+        let outcome = state.sharded_store.get_or_create_idempotency(&account_id, key, || {
+            let result = state.engine.process_order(
+                internal_order_id,
+                account_id_num,
+                symbol,
+                req.side_byte(),
+                req.qty as u32,
+                price,
+            );
+            process_result = result.clone();
+            if result == ProcessResult::Accepted {
+                Some(OrderSnapshot::new(
+                    order_id.clone(),
+                    account_id.clone(),
+                    req.symbol.clone(),
+                    req.side.clone(),
+                    req.order_type,
+                    req.qty,
+                    req.price,
+                    req.time_in_force,
+                    req.expire_at,
+                    req.client_order_id.clone(),
+                ))
+            } else {
+                None
+            }
+        });
+
+        return match outcome {
+            crate::store::IdempotencyOutcome::Existing(existing) => {
+                state.idempotency_hits.fetch_add(1, Ordering::Relaxed);
+                Ok((
+                    StatusCode::ACCEPTED,
+                    Json(OrderResponse::accepted(&existing.order_id)),
+                ))
+            }
+            crate::store::IdempotencyOutcome::Created(snapshot) => {
+                state.idempotency_creates.fetch_add(1, Ordering::Relaxed);
+                state.order_id_map.register_with_internal(
+                    internal_order_id,
+                    snapshot.order_id.clone(),
+                    account_id,
+                );
+                state.audit_log.append(AuditEvent {
+                    event_type: "OrderAccepted".into(),
+                    at: audit::now_millis(),
+                    account_id: snapshot.account_id.clone(),
+                    order_id: Some(snapshot.order_id.clone()),
+                    data: serde_json::json!({
+                        "symbol": snapshot.symbol,
+                        "side": snapshot.side,
+                        "type": match snapshot.order_type {
+                            crate::order::OrderType::Limit => "LIMIT",
+                            crate::order::OrderType::Market => "MARKET",
+                        },
+                        "qty": snapshot.qty,
+                        "price": snapshot.price,
+                        "timeInForce": match snapshot.time_in_force {
+                            crate::order::TimeInForce::Gtc => "GTC",
+                            crate::order::TimeInForce::Gtd => "GTD",
+                        },
+                        "expireAt": snapshot.expire_at,
+                        "clientOrderId": snapshot.client_order_id,
+                    }),
+                });
+                Ok((StatusCode::ACCEPTED, Json(OrderResponse::accepted(&snapshot.order_id))))
+            }
+            crate::store::IdempotencyOutcome::NotCreated => {
+                let (status, response) = match process_result {
+                    ProcessResult::RejectedMaxQty => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        OrderResponse::rejected("INVALID_QTY"),
+                    ),
+                    ProcessResult::RejectedMaxNotional => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        OrderResponse::rejected("RISK_REJECT"),
+                    ),
+                    ProcessResult::RejectedDailyLimit => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        OrderResponse::rejected("RISK_REJECT"),
+                    ),
+                    ProcessResult::RejectedUnknownSymbol => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        OrderResponse::rejected("INVALID_SYMBOL"),
+                    ),
+                    ProcessResult::ErrorQueueFull => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        OrderResponse::rejected("QUEUE_REJECT"),
+                    ),
+                    ProcessResult::Accepted => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        OrderResponse::rejected("ERROR"),
+                    ),
+                };
+                Ok((status, Json(response)))
+            }
+        };
+    }
 
     // 内部order_idはシーケンス番号を使用
     let internal_order_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
@@ -152,6 +282,8 @@ async fn handle_order(
     // レスポンス生成（Kotlin Gateway互換）
     let (status, response) = match result {
         ProcessResult::Accepted => {
+            // 注文IDを発番（ord_UUID形式）
+            let order_id = format!("ord_{}", uuid::Uuid::new_v4());
             // OrderSnapshot を作成
             let snapshot = OrderSnapshot::new(
                 order_id.clone(),
@@ -166,8 +298,29 @@ async fn handle_order(
                 req.client_order_id.clone(),
             );
 
+            let audit_account_id = snapshot.account_id.clone();
+            let audit_order_id = snapshot.order_id.clone();
+            let audit_data = serde_json::json!({
+                "symbol": snapshot.symbol,
+                "side": snapshot.side,
+                "type": match snapshot.order_type {
+                    crate::order::OrderType::Limit => "LIMIT",
+                    crate::order::OrderType::Market => "MARKET",
+                },
+                "qty": snapshot.qty,
+                "price": snapshot.price,
+                "timeInForce": match snapshot.time_in_force {
+                    crate::order::TimeInForce::Gtc => "GTC",
+                    crate::order::TimeInForce::Gtd => "GTD",
+                },
+                "expireAt": snapshot.expire_at,
+                "clientOrderId": snapshot.client_order_id,
+            });
+
             // ShardedOrderStore に保存（HFT最適化）
-            state.sharded_store.put(snapshot, None);
+            state
+                .sharded_store
+                .put(snapshot, idempotency_key.as_deref());
 
             // ID マッピングを登録
             state.order_id_map.register_with_internal(
@@ -175,6 +328,14 @@ async fn handle_order(
                 order_id.clone(),
                 account_id,
             );
+
+            state.audit_log.append(AuditEvent {
+                event_type: "OrderAccepted".into(),
+                at: audit::now_millis(),
+                account_id: audit_account_id,
+                order_id: Some(audit_order_id),
+                data: audit_data,
+            });
 
             (StatusCode::ACCEPTED, OrderResponse::accepted(&order_id))
         }
@@ -265,6 +426,243 @@ async fn handle_get_order(
     Ok(Json(OrderSnapshotResponse::from(order)))
 }
 
+/// 注文キャンセルハンドラ
+///
+/// POST /orders/:order_id/cancel
+async fn handle_cancel_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<(StatusCode, Json<CancelResponse>), (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
+    let order = if let Some(ref acc_id) = account_id_from_map {
+        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+    } else {
+        state.sharded_store.find_by_id(&order_id)
+    };
+
+    let order = match order {
+        Some(o) => o,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+    };
+
+    if order.account_id != principal.account_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    if order.status.is_terminal() {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(CancelResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some("ORDER_FINAL".into()),
+            }),
+        ));
+    }
+
+    if order.status == crate::store::OrderStatus::CancelRequested {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(CancelResponse {
+                order_id,
+                status: "CANCEL_REQUESTED".into(),
+                reason: None,
+            }),
+        ));
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let _ = state.sharded_store.update(&order.order_id, &order.account_id, |prev| {
+        let mut next = prev.clone();
+        next.status = crate::store::OrderStatus::CancelRequested;
+        next.last_update_at = now_ms;
+        next
+    });
+
+    state.audit_log.append(AuditEvent {
+        event_type: "CancelRequested".into(),
+        at: audit::now_millis(),
+        account_id: order.account_id.clone(),
+        order_id: Some(order.order_id.clone()),
+        data: serde_json::json!({}),
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CancelResponse {
+            order_id,
+            status: "CANCEL_REQUESTED".into(),
+            reason: None,
+        }),
+    ))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventsResponse {
+    order_id: Option<String>,
+    account_id: Option<String>,
+    events: Vec<AuditEvent>,
+}
+
+async fn handle_order_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<AuditEventsResponse>, (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
+    let order = if let Some(ref acc_id) = account_id_from_map {
+        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+    } else {
+        state.sharded_store.find_by_id(&order_id)
+    };
+
+    let order = match order {
+        Some(o) => o,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+    };
+
+    if order.account_id != principal.account_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let since_ms = params.get("since").and_then(|v| audit::parse_time_param(v));
+    let after_ms = params.get("after").and_then(|v| audit::parse_time_param(v));
+
+    let events = state.audit_log.read_events(
+        &order.account_id,
+        Some(&order_id),
+        limit,
+        since_ms,
+        after_ms,
+    );
+    Ok(Json(AuditEventsResponse {
+        order_id: Some(order_id),
+        account_id: None,
+        events,
+    }))
+}
+
+async fn handle_account_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(account_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<AuditEventsResponse>, (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    if account_id != principal.account_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let since_ms = params.get("since").and_then(|v| audit::parse_time_param(v));
+    let after_ms = params.get("after").and_then(|v| audit::parse_time_param(v));
+
+    let events = state.audit_log.read_events(
+        &account_id,
+        None,
+        limit,
+        since_ms,
+        after_ms,
+    );
+    Ok(Json(AuditEventsResponse {
+        order_id: None,
+        account_id: Some(account_id),
+        events,
+    }))
+}
+
 /// 注文スナップショットレスポンス
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,10 +731,38 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
 /// GET /metrics
 /// Prometheus形式で出力
 async fn handle_metrics(State(state): State<AppState>) -> String {
+    let idempotency_hits = state.idempotency_hits.load(Ordering::Relaxed);
+    let idempotency_creates = state.idempotency_creates.load(Ordering::Relaxed);
+    let idempotency_expired = state.sharded_store.idempotency_expired_total();
+    let idempotency_checked = state.idempotency_checked.load(Ordering::Relaxed);
+    let idempotency_handled = idempotency_hits + idempotency_creates + idempotency_expired;
+    let idempotency_handled_ratio =
+        if idempotency_checked == 0 { 0.0 } else { idempotency_handled as f64 / idempotency_checked as f64 };
+    let idempotency_expired_ratio =
+        if idempotency_checked == 0 { 0.0 } else { idempotency_expired as f64 / idempotency_checked as f64 };
+
     let snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
          # TYPE gateway_queue_len gauge\n\
          gateway_queue_len {}\n\
+         # HELP gateway_idempotency_checked_total Total idempotency checks (requests with Idempotency-Key)\n\
+         # TYPE gateway_idempotency_checked_total counter\n\
+         gateway_idempotency_checked_total {}\n\
+         # HELP gateway_idempotency_hits_total Total idempotency replays returning existing order\n\
+         # TYPE gateway_idempotency_hits_total counter\n\
+         gateway_idempotency_hits_total {}\n\
+         # HELP gateway_idempotency_creates_total Total idempotent order creations\n\
+         # TYPE gateway_idempotency_creates_total counter\n\
+         gateway_idempotency_creates_total {}\n\
+         # HELP gateway_idempotency_expired_total Total idempotency entries expired by TTL\n\
+         # TYPE gateway_idempotency_expired_total counter\n\
+         gateway_idempotency_expired_total {}\n\
+         # HELP gateway_idempotency_handled_ratio Ratio of idempotency requests that were handled\n\
+         # TYPE gateway_idempotency_handled_ratio gauge\n\
+         gateway_idempotency_handled_ratio {}\n\
+         # HELP gateway_idempotency_expired_ratio Ratio of expired idempotency entries\n\
+         # TYPE gateway_idempotency_expired_ratio gauge\n\
+         gateway_idempotency_expired_ratio {}\n\
          # HELP gateway_latency_p50_ns Latency p50 in nanoseconds\n\
          # TYPE gateway_latency_p50_ns gauge\n\
          gateway_latency_p50_ns {}\n\
@@ -347,6 +773,12 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_latency_max_ns gauge\n\
          gateway_latency_max_ns {}\n",
         state.engine.queue_len(),
+        idempotency_checked,
+        idempotency_hits,
+        idempotency_creates,
+        idempotency_expired,
+        idempotency_handled_ratio,
+        idempotency_expired_ratio,
         state.engine.latency_p50(),
         state.engine.latency_p99(),
         state.engine.latency_max(),
@@ -399,9 +831,28 @@ async fn handle_order_stream(
         }
     }
 
-    // SSEストリームを作成
+    let last_event_id = parse_last_event_id(&headers);
+    let replay = state.sse_hub.replay_order(&order_id, last_event_id);
+    let mut initial = Vec::new();
+    if let Some(resync) = replay.resync_required {
+        let data = serde_json::json!({
+            "scope": "order",
+            "id": order_id,
+            "lastEventId": resync.last_event_id,
+            "oldestAvailableId": resync.oldest_available_id,
+            "eventsEndpoint": format!("/orders/{}/events", order_id),
+        });
+        initial.push(Event::default().event("resync_required").data(data.to_string()));
+    }
+    for ev in replay.events {
+        initial.push(Event::default()
+            .id(ev.id.to_string())
+            .event(ev.event_type)
+            .data(ev.data));
+    }
+
     let rx = state.sse_hub.subscribe_order(&order_id);
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
+    let live = BroadcastStream::new(rx).filter_map(|result| {
         result.ok().map(|event| {
             Ok(Event::default()
                 .id(event.id.to_string())
@@ -409,6 +860,7 @@ async fn handle_order_stream(
                 .data(event.data))
         })
     });
+    let stream = futures::stream::iter(initial.into_iter().map(Ok)).chain(live);
 
     Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -442,9 +894,28 @@ async fn handle_account_stream(
         }
     };
 
-    // SSEストリームを作成
+    let last_event_id = parse_last_event_id(&headers);
+    let replay = state.sse_hub.replay_account(&principal.account_id, last_event_id);
+    let mut initial = Vec::new();
+    if let Some(resync) = replay.resync_required {
+        let data = serde_json::json!({
+            "scope": "account",
+            "id": principal.account_id,
+            "lastEventId": resync.last_event_id,
+            "oldestAvailableId": resync.oldest_available_id,
+            "eventsEndpoint": format!("/accounts/{}/events", principal.account_id),
+        });
+        initial.push(Event::default().event("resync_required").data(data.to_string()));
+    }
+    for ev in replay.events {
+        initial.push(Event::default()
+            .id(ev.id.to_string())
+            .event(ev.event_type)
+            .data(ev.data));
+    }
+
     let rx = state.sse_hub.subscribe_account(&principal.account_id);
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
+    let live = BroadcastStream::new(rx).filter_map(|result| {
         result.ok().map(|event| {
             Ok(Event::default()
                 .id(event.id.to_string())
@@ -452,10 +923,19 @@ async fn handle_account_stream(
                 .data(event.data))
         })
     });
+    let stream = futures::stream::iter(initial.into_iter().map(Ok)).chain(live);
 
     Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
+    let raw = headers.get("Last-Event-ID")?.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.parse::<u64>().ok()
 }

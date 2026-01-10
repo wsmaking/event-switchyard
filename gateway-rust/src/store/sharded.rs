@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{ExecReport, OrderSnapshot, OrderStatus};
 
@@ -17,7 +19,7 @@ struct Shard {
     /// order_id -> OrderSnapshot
     by_id: HashMap<String, OrderSnapshot>,
     /// idempotency_key -> order_id
-    idempotency_index: HashMap<String, String>,
+    idempotency_index: HashMap<String, IdempotencyEntry>,
 }
 
 impl Shard {
@@ -36,14 +38,34 @@ impl Shard {
 /// アカウント単位の操作は一貫性を保つ。
 pub struct ShardedOrderStore {
     shards: Box<[RwLock<Shard>; SHARD_COUNT]>,
+    idempotency_ttl_ms: u64,
+    idempotency_expired_total: AtomicU64,
+}
+
+pub enum IdempotencyOutcome {
+    Existing(OrderSnapshot),
+    Created(OrderSnapshot),
+    NotCreated,
+}
+
+#[derive(Clone)]
+struct IdempotencyEntry {
+    order_id: String,
+    created_at_ms: u64,
 }
 
 impl ShardedOrderStore {
     pub fn new() -> Self {
+        Self::new_with_ttl_ms(default_idempotency_ttl_ms())
+    }
+
+    pub fn new_with_ttl_ms(idempotency_ttl_ms: u64) -> Self {
         // 配列を直接初期化
         let shards: [RwLock<Shard>; SHARD_COUNT] = std::array::from_fn(|_| RwLock::new(Shard::new()));
         Self {
             shards: Box::new(shards),
+            idempotency_ttl_ms,
+            idempotency_expired_total: AtomicU64::new(0),
         }
     }
 
@@ -83,9 +105,56 @@ impl ShardedOrderStore {
         let idx = Self::shard_index(account_id);
         let idx_key = Self::idempotency_key(account_id, key);
 
-        let guard = self.shards[idx].read().unwrap();
-        let order_id = guard.idempotency_index.get(&idx_key)?;
-        guard.by_id.get(order_id).cloned()
+        let now_ms = now_millis();
+        let mut guard = self.shards[idx].write().unwrap();
+        let entry = guard.idempotency_index.get(&idx_key)?.clone();
+        if self.is_expired(entry.created_at_ms, now_ms) {
+            guard.idempotency_index.remove(&idx_key);
+            self.idempotency_expired_total.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        guard.by_id.get(&entry.order_id).cloned()
+    }
+
+    pub fn get_or_create_idempotency<F>(
+        &self,
+        account_id: &str,
+        key: &str,
+        create: F
+    ) -> IdempotencyOutcome
+    where
+        F: FnOnce() -> Option<OrderSnapshot>,
+    {
+        let idx = Self::shard_index(account_id);
+        let idx_key = Self::idempotency_key(account_id, key);
+        let mut guard = self.shards[idx].write().unwrap();
+        let now_ms = now_millis();
+
+        if let Some(entry) = guard.idempotency_index.get(&idx_key).cloned() {
+            if !self.is_expired(entry.created_at_ms, now_ms) {
+                if let Some(order) = guard.by_id.get(&entry.order_id) {
+                    return IdempotencyOutcome::Existing(order.clone());
+                }
+            } else {
+                guard.idempotency_index.remove(&idx_key);
+                self.idempotency_expired_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let order = match create() {
+            Some(order) => order,
+            None => return IdempotencyOutcome::NotCreated,
+        };
+        let order_id = order.order_id.clone();
+        guard.by_id.insert(order_id.clone(), order.clone());
+        guard.idempotency_index.insert(
+            idx_key,
+            IdempotencyEntry {
+                order_id,
+                created_at_ms: now_ms,
+            },
+        );
+        IdempotencyOutcome::Created(order)
     }
 
     /// 注文を保存
@@ -93,13 +162,20 @@ impl ShardedOrderStore {
         let idx = Self::shard_index(&order.account_id);
         let order_id = order.order_id.clone();
         let account_id = order.account_id.clone();
+        let accepted_at = order.accepted_at;
 
         let mut guard = self.shards[idx].write().unwrap();
         guard.by_id.insert(order_id.clone(), order);
 
         if let Some(key) = idempotency_key {
             let idx_key = Self::idempotency_key(&account_id, key);
-            guard.idempotency_index.entry(idx_key).or_insert(order_id);
+            guard
+                .idempotency_index
+                .entry(idx_key)
+                .or_insert(IdempotencyEntry {
+                    order_id,
+                    created_at_ms: accepted_at,
+                });
         }
     }
 
@@ -176,6 +252,17 @@ impl ShardedOrderStore {
         format!("{}::{}", account_id, key)
     }
 
+    fn is_expired(&self, created_at_ms: u64, now_ms: u64) -> bool {
+        if self.idempotency_ttl_ms == 0 {
+            return false;
+        }
+        now_ms.saturating_sub(created_at_ms) > self.idempotency_ttl_ms
+    }
+
+    pub fn idempotency_expired_total(&self) -> u64 {
+        self.idempotency_expired_total.load(Ordering::Relaxed)
+    }
+
     /// 全注文数を取得
     pub fn count(&self) -> usize {
         self.shards.iter().map(|s| s.read().unwrap().by_id.len()).sum()
@@ -185,6 +272,17 @@ impl ShardedOrderStore {
     pub fn shard_counts(&self) -> Vec<usize> {
         self.shards.iter().map(|s| s.read().unwrap().by_id.len()).collect()
     }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn default_idempotency_ttl_ms() -> u64 {
+    24 * 60 * 60 * 1000
 }
 
 impl Default for ShardedOrderStore {
@@ -197,6 +295,10 @@ impl Default for ShardedOrderStore {
 mod tests {
     use super::*;
     use crate::order::{OrderType, TimeInForce};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_sharding_distribution() {
@@ -314,5 +416,106 @@ mod tests {
         let updated = store.apply_execution_report(&report, "acc_1").unwrap();
         assert_eq!(updated.status, OrderStatus::PartiallyFilled);
         assert_eq!(updated.filled_qty, 50);
+    }
+
+    #[test]
+    fn test_idempotency_concurrent_single_create() {
+        let store = Arc::new(ShardedOrderStore::new());
+        let created = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            let created = Arc::clone(&created);
+            let barrier = Arc::clone(&barrier);
+            let results = Arc::clone(&results);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let outcome = store.get_or_create_idempotency("acc_1", "idem-key", || {
+                    created.fetch_add(1, Ordering::SeqCst);
+                    Some(OrderSnapshot::new(
+                        format!("ord_{}", created.load(Ordering::SeqCst)),
+                        "acc_1".into(),
+                        "AAPL".into(),
+                        "BUY".into(),
+                        OrderType::Limit,
+                        100,
+                        Some(15000),
+                        TimeInForce::Gtc,
+                        None,
+                        None,
+                    ))
+                });
+                let order_id = match outcome {
+                    IdempotencyOutcome::Existing(order) => order.order_id,
+                    IdempotencyOutcome::Created(order) => order.order_id,
+                    IdempotencyOutcome::NotCreated => "none".to_string(),
+                };
+                results.lock().unwrap().push(order_id);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(created.load(Ordering::SeqCst), 1);
+        let results = results.lock().unwrap();
+        let first = results.first().cloned().unwrap();
+        assert!(results.iter().all(|id| id == &first));
+        assert_ne!(first, "none");
+    }
+
+    #[test]
+    fn test_idempotency_ttl_expiry() {
+        let store = ShardedOrderStore::new_with_ttl_ms(1);
+        let created = AtomicUsize::new(0);
+
+        let first = store.get_or_create_idempotency("acc_1", "idem-ttl", || {
+            created.fetch_add(1, Ordering::SeqCst);
+            Some(OrderSnapshot::new(
+                format!("ord_{}", created.load(Ordering::SeqCst)),
+                "acc_1".into(),
+                "AAPL".into(),
+                "BUY".into(),
+                OrderType::Limit,
+                100,
+                Some(15000),
+                TimeInForce::Gtc,
+                None,
+                None,
+            ))
+        });
+        match first {
+            IdempotencyOutcome::Existing(_) | IdempotencyOutcome::NotCreated => panic!("expected create"),
+            IdempotencyOutcome::Created(_) => {}
+        }
+
+        thread::sleep(Duration::from_millis(2));
+
+        let second = store.get_or_create_idempotency("acc_1", "idem-ttl", || {
+            created.fetch_add(1, Ordering::SeqCst);
+            Some(OrderSnapshot::new(
+                format!("ord_{}", created.load(Ordering::SeqCst)),
+                "acc_1".into(),
+                "AAPL".into(),
+                "BUY".into(),
+                OrderType::Limit,
+                100,
+                Some(15000),
+                TimeInForce::Gtc,
+                None,
+                None,
+            ))
+        });
+        match second {
+            IdempotencyOutcome::Created(_) => {}
+            _ => panic!("expected create after ttl expiry"),
+        }
+
+        assert_eq!(created.load(Ordering::SeqCst), 2);
+        assert_eq!(store.idempotency_expired_total(), 1);
     }
 }

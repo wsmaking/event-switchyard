@@ -12,6 +12,7 @@
 //! - `RUST_LOG`: ログレベル（デフォルト: info）
 
 mod auth;
+mod audit;
 mod config;
 mod engine;
 mod exchange;
@@ -44,8 +45,12 @@ async fn main() -> anyhow::Result<()> {
     let order_store = Arc::new(store::OrderStore::new());
     info!("OrderStore initialized");
 
+    let audit_path = std::env::var("GATEWAY_AUDIT_PATH").unwrap_or_else(|_| "var/gateway/audit.log".into());
+    let audit_log = Arc::new(audit::AuditLog::new(audit_path)?);
+    info!("AuditLog initialized");
+
     // SSE Hub 初期化
-    let sse_hub = Arc::new(sse::SseHub::new());
+    let sse_hub = Arc::new(sse::SseHub::from_env());
     info!("SseHub initialized");
 
     // エンジン初期化
@@ -69,12 +74,14 @@ async fn main() -> anyhow::Result<()> {
     let tcp_engine = engine;
     let http_order_store = Arc::clone(&order_store);
     let http_sse_hub = Arc::clone(&sse_hub);
+    let http_audit_log = Arc::clone(&audit_log);
 
     let http_port = config.port;
     let tcp_port = config.tcp_port;
+    let idempotency_ttl_sec = config.idempotency_ttl_sec;
 
     tokio::select! {
-        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub) => {
+        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, idempotency_ttl_sec) => {
             result?;
         }
         result = server::tcp::run(tcp_port, tcp_engine) => {
