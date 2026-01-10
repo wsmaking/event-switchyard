@@ -56,6 +56,8 @@ echo "==> Starting gateway-rust on ${HOST}:${PORT}"
 GATEWAY_PORT="${PORT}" \
 JWT_HS256_SECRET="${JWT_SECRET}" \
 GATEWAY_AUDIT_PATH="var/gateway/audit_perf.log" \
+FASTPATH_DRAIN_ENABLE=1 \
+FASTPATH_DRAIN_WORKERS=4 \
 KAFKA_ENABLE=0 \
 ./gateway-rust/target/release/gateway-rust &
 SERVER_PID=$!

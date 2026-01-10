@@ -77,8 +77,34 @@ async fn main() -> anyhow::Result<()> {
         let queue = engine.queue();
         let host = exchange_host.clone();
         let port = config.exchange_port;
-        engine::exchange_worker::start_worker(queue, host, port);
-        info!("Exchange worker started ({}:{})", exchange_host, port);
+        let workers = std::env::var("EXCHANGE_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        for _ in 0..workers {
+            engine::exchange_worker::start_worker(Arc::clone(&queue), host.clone(), port);
+        }
+        info!(
+            "Exchange worker started ({}:{}) workers={}",
+            exchange_host, port, workers
+        );
+    } else {
+        let drain_enabled = std::env::var("FASTPATH_DRAIN_ENABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if drain_enabled {
+            let queue = engine.queue();
+            let workers = std::env::var("FASTPATH_DRAIN_WORKERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            for i in 0..workers {
+                engine::drain_worker::start_worker(Arc::clone(&queue), i);
+            }
+            info!("FastPath drain workers started (workers={})", workers);
+        }
     }
 
     // HTTP と TCP を並行起動
