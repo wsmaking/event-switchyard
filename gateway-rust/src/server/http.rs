@@ -58,6 +58,10 @@ struct AppState {
     idempotency_checked: Arc<AtomicU64>,
     idempotency_hits: Arc<AtomicU64>,
     idempotency_creates: Arc<AtomicU64>,
+    reject_invalid_qty: Arc<AtomicU64>,
+    reject_risk: Arc<AtomicU64>,
+    reject_invalid_symbol: Arc<AtomicU64>,
+    reject_queue_full: Arc<AtomicU64>,
 }
 
 /// HTTPサーバーを起動
@@ -85,6 +89,10 @@ pub async fn run(
         idempotency_checked: Arc::new(AtomicU64::new(0)),
         idempotency_hits: Arc::new(AtomicU64::new(0)),
         idempotency_creates: Arc::new(AtomicU64::new(0)),
+        reject_invalid_qty: Arc::new(AtomicU64::new(0)),
+        reject_risk: Arc::new(AtomicU64::new(0)),
+        reject_invalid_symbol: Arc::new(AtomicU64::new(0)),
+        reject_queue_full: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
@@ -309,6 +317,21 @@ async fn handle_order(
                         OrderResponse::rejected("ERROR"),
                     ),
                 };
+                match process_result {
+                    ProcessResult::RejectedMaxQty => {
+                        state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ProcessResult::RejectedMaxNotional | ProcessResult::RejectedDailyLimit => {
+                        state.reject_risk.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ProcessResult::RejectedUnknownSymbol => {
+                        state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ProcessResult::ErrorQueueFull => {
+                        state.reject_queue_full.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ProcessResult::Accepted => {}
+                }
                 Ok((status, Json(response)))
             }
         };
@@ -417,6 +440,22 @@ async fn handle_order(
             OrderResponse::rejected("QUEUE_REJECT"),
         ),
     };
+
+    match result {
+        ProcessResult::RejectedMaxQty => {
+            state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+        }
+        ProcessResult::RejectedMaxNotional | ProcessResult::RejectedDailyLimit => {
+            state.reject_risk.fetch_add(1, Ordering::Relaxed);
+        }
+        ProcessResult::RejectedUnknownSymbol => {
+            state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
+        }
+        ProcessResult::ErrorQueueFull => {
+            state.reject_queue_full.fetch_add(1, Ordering::Relaxed);
+        }
+        ProcessResult::Accepted => {}
+    }
 
     Ok((status, Json(response)))
 }
@@ -881,6 +920,10 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
     let idempotency_expired_ratio =
         if idempotency_checked == 0 { 0.0 } else { idempotency_expired as f64 / idempotency_checked as f64 };
     let bus_enabled = if bus_metrics.enabled { 1 } else { 0 };
+    let reject_invalid_qty = state.reject_invalid_qty.load(Ordering::Relaxed);
+    let reject_risk = state.reject_risk.load(Ordering::Relaxed);
+    let reject_invalid_symbol = state.reject_invalid_symbol.load(Ordering::Relaxed);
+    let reject_queue_full = state.reject_queue_full.load(Ordering::Relaxed);
 
     let snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
@@ -946,6 +989,18 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_idempotency_expired_ratio Ratio of expired idempotency entries\n\
          # TYPE gateway_idempotency_expired_ratio gauge\n\
          gateway_idempotency_expired_ratio {}\n\
+         # HELP gateway_reject_invalid_qty_total Total rejects due to invalid quantity\n\
+         # TYPE gateway_reject_invalid_qty_total counter\n\
+         gateway_reject_invalid_qty_total {}\n\
+         # HELP gateway_reject_risk_total Total rejects due to risk limits\n\
+         # TYPE gateway_reject_risk_total counter\n\
+         gateway_reject_risk_total {}\n\
+         # HELP gateway_reject_invalid_symbol_total Total rejects due to invalid symbol\n\
+         # TYPE gateway_reject_invalid_symbol_total counter\n\
+         gateway_reject_invalid_symbol_total {}\n\
+         # HELP gateway_reject_queue_full_total Total rejects due to queue full\n\
+         # TYPE gateway_reject_queue_full_total counter\n\
+         gateway_reject_queue_full_total {}\n\
          # HELP gateway_latency_p50_ns Latency p50 in nanoseconds\n\
          # TYPE gateway_latency_p50_ns gauge\n\
          gateway_latency_p50_ns {}\n\
@@ -988,6 +1043,10 @@ async fn handle_metrics(State(state): State<AppState>) -> String {
         idempotency_expired,
         idempotency_handled_ratio,
         idempotency_expired_ratio,
+        reject_invalid_qty,
+        reject_risk,
+        reject_invalid_symbol,
+        reject_queue_full,
         state.engine.latency_p50(),
         state.engine.latency_p95(),
         state.engine.latency_p99(),
