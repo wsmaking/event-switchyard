@@ -30,7 +30,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -43,13 +43,14 @@ use crate::auth::JwtAuth;
 use crate::backpressure::BackpressureConfig;
 use crate::bus::BusPublisher;
 use crate::engine::FastPathEngine;
+use crate::inflight::InflightControllerHandle;
 use crate::sse::SseHub;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
 use gateway_core::LatencyHistogram;
 
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
-use orders::{handle_cancel_order, handle_get_order, handle_order};
+use orders::{handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_order};
 use sse::{handle_account_stream, handle_order_stream};
 
 /// アプリケーション状態
@@ -70,7 +71,9 @@ pub(super) struct AppState {
     pub(super) bus_publisher: Arc<BusPublisher>,
     pub(super) bus_mode_outbox: bool,
     pub(super) inflight: Arc<AtomicU64>,
+    pub(super) durable_inflight: Arc<AtomicU64>,
     pub(super) backpressure: BackpressureConfig,
+    pub(super) inflight_controller: Option<InflightControllerHandle>,
     pub(super) ack_hist: Arc<LatencyHistogram>,
     pub(super) wal_enqueue_hist: Arc<LatencyHistogram>,
     pub(super) durable_ack_hist: Arc<LatencyHistogram>,
@@ -82,6 +85,11 @@ pub(super) struct AppState {
     pub(super) reject_risk: Arc<AtomicU64>,
     pub(super) reject_invalid_symbol: Arc<AtomicU64>,
     pub(super) reject_queue_full: Arc<AtomicU64>,
+    pub(super) backpressure_soft_wal_age: Arc<AtomicU64>,
+    pub(super) backpressure_inflight: Arc<AtomicU64>,
+    pub(super) backpressure_wal_bytes: Arc<AtomicU64>,
+    pub(super) backpressure_wal_age: Arc<AtomicU64>,
+    pub(super) backpressure_disk_free: Arc<AtomicU64>,
 }
 
 /// 認証エラーレスポンス
@@ -108,6 +116,12 @@ pub async fn run(
         .unwrap_or(64);
     info!("ShardedOrderStore configured (shards={})", shard_count);
 
+    let inflight_controller = crate::inflight::InflightController::spawn_from_env();
+    let mut backpressure = BackpressureConfig::from_env();
+    if inflight_controller.is_some() {
+        backpressure.inflight_max = None;
+    }
+
     let state = AppState {
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
@@ -123,7 +137,9 @@ pub async fn run(
         bus_publisher,
         bus_mode_outbox,
         inflight: Arc::new(AtomicU64::new(0)),
-        backpressure: BackpressureConfig::from_env(),
+        durable_inflight: Arc::new(AtomicU64::new(0)),
+        backpressure,
+        inflight_controller,
         ack_hist: Arc::new(LatencyHistogram::new()),
         wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
         durable_ack_hist: Arc::new(LatencyHistogram::new()),
@@ -135,6 +151,11 @@ pub async fn run(
         reject_risk: Arc::new(AtomicU64::new(0)),
         reject_invalid_symbol: Arc::new(AtomicU64::new(0)),
         reject_queue_full: Arc::new(AtomicU64::new(0)),
+        backpressure_soft_wal_age: Arc::new(AtomicU64::new(0)),
+        backpressure_inflight: Arc::new(AtomicU64::new(0)),
+        backpressure_wal_bytes: Arc::new(AtomicU64::new(0)),
+        backpressure_wal_age: Arc::new(AtomicU64::new(0)),
+        backpressure_disk_free: Arc::new(AtomicU64::new(0)),
     };
 
     if let Some(rx) = durable_rx {
@@ -147,6 +168,7 @@ pub async fn run(
     let app = Router::new()
         .route("/orders", post(handle_order))
         .route("/orders/{order_id}", get(handle_get_order))
+        .route("/orders/client/{client_order_id}", get(handle_get_order_by_client_id))
         .route("/orders/{order_id}/cancel", post(handle_cancel_order))
         .route("/orders/{order_id}/events", get(handle_order_events))
         .route("/accounts/{account_id}/events", get(handle_account_events))
@@ -192,11 +214,28 @@ async fn run_durable_notifier(
         })
         .to_string();
 
-        if let Some(order_id) = note.event.order_id.as_deref() {
-            state.sse_hub.publish_order(order_id, "order_durable", &data);
+        if note.event.event_type == "OrderAccepted" {
+            if let Some(order_id) = note.event.order_id.as_deref() {
+                state
+                    .sharded_store
+                    .mark_durable(order_id, &note.event.account_id, note.event.at);
+                decrement_inflight(&state.durable_inflight);
+                if let Some(controller) = &state.inflight_controller {
+                    controller.record_commit(1);
+                }
+                state.sse_hub.publish_order(order_id, "order_durable", &data);
+            }
+            state
+                .sse_hub
+                .publish_account(&note.event.account_id, "order_durable", &data);
         }
-        state
-            .sse_hub
-            .publish_account(&note.event.account_id, "order_durable", &data);
     }
+}
+
+fn decrement_inflight(counter: &AtomicU64) {
+    let _ = counter.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |value| Some(value.saturating_sub(1)),
+    );
 }

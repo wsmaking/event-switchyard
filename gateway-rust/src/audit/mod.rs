@@ -48,6 +48,7 @@ pub struct AuditLog {
     last_anchor_day: Mutex<Option<u64>>,
     wal_bytes: AtomicU64,
     wal_last_append_ms: AtomicU64,
+    wal_pending_enqueue_ms: Mutex<VecDeque<u64>>,
     fdatasync_enabled: bool,
     async_enabled: bool,
     fdatasync_max_wait_us: u64,
@@ -143,6 +144,7 @@ impl AuditLog {
             last_anchor_day: Mutex::new(None),
             wal_bytes: AtomicU64::new(wal_bytes),
             wal_last_append_ms: AtomicU64::new(wal_last_append_ms),
+            wal_pending_enqueue_ms: Mutex::new(VecDeque::new()),
             fdatasync_enabled,
             async_enabled,
             fdatasync_max_wait_us,
@@ -167,6 +169,9 @@ impl AuditLog {
                     };
                     if tx.send(request).is_ok() {
                         let enqueue_done_ns = now_nanos();
+                        if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
+                            pending.push_back(now_millis());
+                        }
                         return AuditAppendTimings {
                             enqueue_done_ns,
                             durable_done_ns: 0,
@@ -239,12 +244,17 @@ impl AuditLog {
         self.wal_bytes.load(Ordering::Relaxed)
     }
 
+    pub fn async_enabled(&self) -> bool {
+        self.async_enabled
+    }
+
     pub fn wal_age_ms(&self) -> u64 {
-        let last = self.wal_last_append_ms.load(Ordering::Relaxed);
-        if last == 0 {
-            return 0;
+        if let Ok(pending) = self.wal_pending_enqueue_ms.lock() {
+            if let Some(oldest) = pending.front() {
+                return now_millis().saturating_sub(*oldest);
+            }
         }
-        now_millis().saturating_sub(last)
+        0
     }
 
     pub fn disk_free_pct(&self) -> Option<f64> {
@@ -874,6 +884,12 @@ fn run_async_writer(
                         fdatasync_ns,
                     });
                 }
+            }
+        }
+        if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
+            let drain = batch.len().min(pending.len());
+            for _ in 0..drain {
+                let _ = pending.pop_front();
             }
         }
         batch.clear();

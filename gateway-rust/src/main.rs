@@ -21,6 +21,7 @@
 mod auth;
 mod audit;
 mod backpressure;
+mod inflight;
 mod bus;
 mod outbox;
 mod config;

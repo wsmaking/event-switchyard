@@ -762,6 +762,12 @@ bench/profiles/
 
 #### [gateway-rust/src/server/http/orders.rs](gateway-rust/src/server/http/orders.rs)
 - **役割**: 注文受理・取得・キャンセルのHTTPハンドラ
+- **処理**:
+  - POST /orders → FastPathEngine → 202
+  - GET /orders/{id} → 注文状態
+  - GET /orders/client/{client_order_id} → PENDING/DURABLE/REJECTED/UNKNOWN
+  - POST /orders/{id}/cancel → キャンセル要求
+  - Idempotency-Key もしくは client_order_id を必須にして再送可能にする
 
 #### [gateway-rust/src/server/http/audit.rs](gateway-rust/src/server/http/audit.rs)
 - **役割**: 監査イベント取得 / 監査ログ検証 / アンカー取得
@@ -817,7 +823,18 @@ bench/profiles/
   - `gateway_wal_enqueue_p50_us` / `gateway_wal_enqueue_p99_us` / `gateway_wal_enqueue_p999_us`
   - `gateway_durable_ack_p50_us` / `gateway_durable_ack_p99_us` / `gateway_durable_ack_p999_us`
   - `gateway_fdatasync_p50_us` / `gateway_fdatasync_p99_us` / `gateway_fdatasync_p999_us`
+  - `gateway_fast_path_processing_p50_us` / `gateway_fast_path_processing_p99_us` / `gateway_fast_path_processing_p999_us`
   - `gateway_inflight`
+  - `gateway_durable_inflight`
+  - `gateway_inflight_dynamic_enabled`
+  - `gateway_inflight_limit_dynamic`
+  - `gateway_durable_commit_rate_ewma`
+  - `gateway_wal_age_ms`
+  - `gateway_backpressure_soft_wal_age_total`
+  - `gateway_backpressure_inflight_total`
+  - `gateway_backpressure_wal_bytes_total`
+  - `gateway_backpressure_wal_age_total`
+  - `gateway_backpressure_disk_free_total`
 - **durable通知**:
   - SSE `event: order_durable` を注文/アカウントストリームへ送信
 - **関連環境変数**:
@@ -826,6 +843,17 @@ bench/profiles/
   - `AUDIT_FDATASYNC_MAX_WAIT_US` (default: 200)
   - `AUDIT_FDATASYNC_MAX_BATCH` (default: 64)
   - `BACKPRESSURE_INFLIGHT_MAX`
+  - `BACKPRESSURE_INFLIGHT_DYNAMIC`
+  - `BACKPRESSURE_INFLIGHT_TARGET_WAL_AGE_SEC`
+  - `BACKPRESSURE_INFLIGHT_ALPHA`
+  - `BACKPRESSURE_INFLIGHT_BETA`
+  - `BACKPRESSURE_INFLIGHT_MIN`
+  - `BACKPRESSURE_INFLIGHT_CAP`
+  - `BACKPRESSURE_INFLIGHT_TICK_MS`
+  - `BACKPRESSURE_INFLIGHT_SLEW_RATIO`
+  - `BACKPRESSURE_INFLIGHT_HYSTERESIS_OFF_RATIO`
+  - `BACKPRESSURE_INFLIGHT_INITIAL`
+  - `BACKPRESSURE_SOFT_WAL_AGE_MS_MAX`
   - `BACKPRESSURE_WAL_BYTES_MAX`
   - `BACKPRESSURE_WAL_AGE_MS_MAX`
   - `BACKPRESSURE_DISK_FREE_PCT_MIN`
@@ -844,6 +872,30 @@ bench/profiles/
    - 100us/64: durable p99 **~6.5ms** / p999 **~13.8ms**（RTT/throughputも悪化）
    - 傾向: wait/batchを締めると durable p999 が改善（p99は誤差範囲）
    - 採用値: **200us/64（デフォルト化）**
+ - **動的 inflight（Soft Reject）: 実行手順**
+   ```bash
+   cd gateway-rust
+   BACKPRESSURE_INFLIGHT_DYNAMIC=1 \
+   BACKPRESSURE_INFLIGHT_TARGET_WAL_AGE_SEC=1.0 \
+   BACKPRESSURE_INFLIGHT_ALPHA=0.8 \
+   BACKPRESSURE_INFLIGHT_BETA=0.2 \
+   BACKPRESSURE_INFLIGHT_MIN=256 \
+   BACKPRESSURE_INFLIGHT_CAP=10000 \
+   BACKPRESSURE_INFLIGHT_TICK_MS=250 \
+   BACKPRESSURE_INFLIGHT_SLEW_RATIO=0.2 \
+   BACKPRESSURE_INFLIGHT_HYSTERESIS_OFF_RATIO=0.9 \
+   BACKPRESSURE_INFLIGHT_INITIAL=2000 \
+   GATEWAY_PORT=8081 GATEWAY_TCP_PORT=0 \
+   AUDIT_ASYNC_WAL=1 AUDIT_FDATASYNC=1 \
+   JWT_HS256_SECRET=secret123 \
+   cargo run --bin gateway-rust
+   ```
+   ```bash
+   curl -s http://127.0.0.1:8081/metrics | rg "gateway_fast_path_processing_p(50|99|999)_us|gateway_inflight_dynamic_enabled|gateway_inflight_limit_dynamic|gateway_durable_commit_rate_ewma"
+   ```
+ - **Backpressure確認**:
+   - Soft: `BACKPRESSURE_SOFT_WAL_AGE_MS_MAX=1000` → 429 (`BACKPRESSURE_SOFT_WAL_AGE`)
+   - Hard: `BACKPRESSURE_INFLIGHT_MAX=5` + 5s/20c で 244件拒否（`gateway_backpressure_inflight_total=244`）
  - **注記**: ヒストグラムはHDRで精密化済み（µs単位の上限近似ではない）。
 
 #### [Main.kt](app/src/main/kotlin/app/Main.kt)

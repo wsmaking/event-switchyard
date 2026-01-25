@@ -5,6 +5,7 @@
 #[derive(Debug, Clone, Copy)]
 pub struct BackpressureConfig {
     pub inflight_max: Option<u64>,
+    pub soft_wal_age_ms_max: Option<u64>,
     pub wal_bytes_max: Option<u64>,
     pub wal_age_ms_max: Option<u64>,
     pub disk_free_pct_min: Option<f64>,
@@ -14,6 +15,7 @@ impl BackpressureConfig {
     pub fn from_env() -> Self {
         Self {
             inflight_max: parse_u64_env("BACKPRESSURE_INFLIGHT_MAX"),
+            soft_wal_age_ms_max: parse_u64_env("BACKPRESSURE_SOFT_WAL_AGE_MS_MAX"),
             wal_bytes_max: parse_u64_env("BACKPRESSURE_WAL_BYTES_MAX"),
             wal_age_ms_max: parse_u64_env("BACKPRESSURE_WAL_AGE_MS_MAX"),
             disk_free_pct_min: parse_f64_env("BACKPRESSURE_DISK_FREE_PCT_MIN"),
@@ -32,14 +34,22 @@ pub struct BackpressureMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackpressureReason {
     Inflight,
+    SoftWalAge,
     WalBytes,
     WalAge,
     DiskFree,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressureLevel {
+    Soft,
+    Hard,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BackpressureDecision {
     pub reason: BackpressureReason,
+    pub level: BackpressureLevel,
 }
 
 pub fn evaluate(
@@ -50,6 +60,7 @@ pub fn evaluate(
         if metrics.inflight > max {
             return Some(BackpressureDecision {
                 reason: BackpressureReason::Inflight,
+                level: BackpressureLevel::Hard,
             });
         }
     }
@@ -57,6 +68,7 @@ pub fn evaluate(
         if metrics.wal_bytes > max {
             return Some(BackpressureDecision {
                 reason: BackpressureReason::WalBytes,
+                level: BackpressureLevel::Hard,
             });
         }
     }
@@ -64,6 +76,7 @@ pub fn evaluate(
         if metrics.wal_age_ms > max {
             return Some(BackpressureDecision {
                 reason: BackpressureReason::WalAge,
+                level: BackpressureLevel::Hard,
             });
         }
     }
@@ -72,8 +85,17 @@ pub fn evaluate(
             if pct < min_pct {
                 return Some(BackpressureDecision {
                     reason: BackpressureReason::DiskFree,
+                    level: BackpressureLevel::Hard,
                 });
             }
+        }
+    }
+    if let Some(max) = config.soft_wal_age_ms_max {
+        if metrics.wal_age_ms > max {
+            return Some(BackpressureDecision {
+                reason: BackpressureReason::SoftWalAge,
+                level: BackpressureLevel::Soft,
+            });
         }
     }
     None
@@ -95,6 +117,7 @@ mod tests {
     fn backpressure_inflight() {
         let cfg = BackpressureConfig {
             inflight_max: Some(10),
+            soft_wal_age_ms_max: None,
             wal_bytes_max: None,
             wal_age_ms_max: None,
             disk_free_pct_min: None,
@@ -113,6 +136,7 @@ mod tests {
     fn backpressure_wal_bytes() {
         let cfg = BackpressureConfig {
             inflight_max: None,
+            soft_wal_age_ms_max: None,
             wal_bytes_max: Some(100),
             wal_age_ms_max: None,
             disk_free_pct_min: None,

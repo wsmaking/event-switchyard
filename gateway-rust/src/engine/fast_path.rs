@@ -44,6 +44,7 @@ pub struct FastPathEngine {
     queue: Arc<FastPathQueue>,
     risk_checker: Arc<RiskChecker>,
     histogram: Arc<LatencyHistogram>,
+    processing_histogram: Arc<LatencyHistogram>,
 }
 
 impl FastPathEngine {
@@ -56,6 +57,7 @@ impl FastPathEngine {
             queue: Arc::new(FastPathQueue::new(queue_capacity)),
             risk_checker: Arc::new(RiskChecker::new()),
             histogram: Arc::new(LatencyHistogram::new()),
+            processing_histogram: Arc::new(LatencyHistogram::new()),
         }
     }
 
@@ -87,6 +89,8 @@ impl FastPathEngine {
 
         // リスクチェック
         let risk_result = self.risk_checker.check_simple(&order);
+        let risk_end = now_nanos();
+        self.processing_histogram.record(risk_end - start);
 
         let result = match risk_result {
             RiskResult::Accepted => {
@@ -169,6 +173,21 @@ impl FastPathEngine {
         self.histogram.snapshot().max_nanos
     }
 
+    /// リスク処理レイテンシ: p50 (ナノ秒)
+    pub fn processing_p50(&self) -> u64 {
+        self.processing_histogram.snapshot().percentile(50.0)
+    }
+
+    /// リスク処理レイテンシ: p99 (ナノ秒)
+    pub fn processing_p99(&self) -> u64 {
+        self.processing_histogram.snapshot().percentile(99.0)
+    }
+
+    /// リスク処理レイテンシ: p999 (ナノ秒)
+    pub fn processing_p999(&self) -> u64 {
+        self.processing_histogram.snapshot().percentile(99.9)
+    }
+
     /// レイテンシ統計をリセット
     #[allow(dead_code)]
     /// ベンチマーク/検証時のリセット用途
@@ -184,6 +203,7 @@ impl Clone for FastPathEngine {
             queue: Arc::clone(&self.queue),
             risk_checker: Arc::clone(&self.risk_checker),
             histogram: Arc::clone(&self.histogram),
+            processing_histogram: Arc::clone(&self.processing_histogram),
         }
     }
 }

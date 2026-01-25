@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::audit::{self, AuditEvent};
 use crate::auth::{AuthError, AuthResult};
-use crate::backpressure::{BackpressureMetrics, BackpressureReason};
+use crate::backpressure::{BackpressureLevel, BackpressureMetrics, BackpressureReason};
 use crate::bus::BusEvent;
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{OrderRequest, OrderResponse};
@@ -83,8 +83,34 @@ pub(super) async fn handle_order(
         }
     };
 
+    let client_order_id = req.client_order_id.clone();
+    let idempotency_key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| client_order_id.clone());
+
+    if idempotency_key.is_none() {
+        record_ack(&state, t0);
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(OrderResponse::rejected("IDEMPOTENCY_REQUIRED")),
+        ));
+    }
+
     let inflight = state.inflight.fetch_add(1, Ordering::Relaxed) + 1;
     let _guard = InflightGuard::new(Arc::clone(&state.inflight));
+    if let Some(controller) = &state.inflight_controller {
+        if controller.should_soft_reject(inflight) {
+            state.backpressure_inflight.fetch_add(1, Ordering::Relaxed);
+            record_ack(&state, t0);
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(OrderResponse::rejected("BACKPRESSURE_INFLIGHT_SOFT")),
+            ));
+        }
+    }
     let metrics = BackpressureMetrics {
         inflight,
         wal_bytes: state.audit_log.wal_bytes(),
@@ -92,21 +118,35 @@ pub(super) async fn handle_order(
         disk_free_pct: state.audit_log.disk_free_pct(),
     };
     if let Some(decision) = crate::backpressure::evaluate(&state.backpressure, &metrics) {
-        let (status, reason) = match decision.reason {
-            BackpressureReason::Inflight => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE_INFLIGHT"),
-            BackpressureReason::WalBytes => (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_WAL_BYTES"),
-            BackpressureReason::WalAge => (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_WAL_AGE"),
-            BackpressureReason::DiskFree => (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_DISK_FREE"),
+        let (status, reason) = match (decision.level, decision.reason) {
+            (BackpressureLevel::Soft, BackpressureReason::SoftWalAge) => {
+                state.backpressure_soft_wal_age.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE_SOFT_WAL_AGE")
+            }
+            (_, BackpressureReason::Inflight) => {
+                state.backpressure_inflight.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_INFLIGHT")
+            }
+            (_, BackpressureReason::WalBytes) => {
+                state.backpressure_wal_bytes.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_WAL_BYTES")
+            }
+            (_, BackpressureReason::WalAge) => {
+                state.backpressure_wal_age.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_WAL_AGE")
+            }
+            (_, BackpressureReason::DiskFree) => {
+                state.backpressure_disk_free.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::SERVICE_UNAVAILABLE, "BACKPRESSURE_DISK_FREE")
+            }
+            (_, BackpressureReason::SoftWalAge) => {
+                state.backpressure_soft_wal_age.fetch_add(1, Ordering::Relaxed);
+                (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE_SOFT_WAL_AGE")
+            }
         };
         record_ack(&state, t0);
         return Ok((status, Json(OrderResponse::rejected(reason))));
     }
-
-    let idempotency_key = headers
-        .get("Idempotency-Key")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
 
     let symbol = FastPathEngine::symbol_to_bytes(&req.symbol);
 
@@ -206,6 +246,9 @@ pub(super) async fn handle_order(
                     }),
                 }, t0);
                 record_wal_enqueue(&state, t0, timings);
+                if state.audit_log.async_enabled() {
+                    state.durable_inflight.fetch_add(1, Ordering::Relaxed);
+                }
                 if !state.bus_mode_outbox {
                     state.bus_publisher.publish(BusEvent {
                         event_type: "OrderAccepted".into(),
@@ -259,6 +302,13 @@ pub(super) async fn handle_order(
                         state.reject_queue_full.fetch_add(1, Ordering::Relaxed);
                     }
                     ProcessResult::Accepted => {}
+                }
+                if let Some(ref client_order_id) = client_order_id {
+                    if process_result != ProcessResult::Accepted {
+                        state
+                            .sharded_store
+                            .mark_rejected_client_order(&principal.account_id, client_order_id);
+                    }
                 }
                 record_ack(&state, t0);
                 Ok((status, Json(response)))
@@ -330,6 +380,9 @@ pub(super) async fn handle_order(
                 data: audit_data.clone(),
             }, t0);
             record_wal_enqueue(&state, t0, timings);
+            if state.audit_log.async_enabled() {
+                state.durable_inflight.fetch_add(1, Ordering::Relaxed);
+            }
             if !state.bus_mode_outbox {
                 state.bus_publisher.publish(BusEvent {
                     event_type: "OrderAccepted".into(),
@@ -379,6 +432,13 @@ pub(super) async fn handle_order(
         }
         ProcessResult::Accepted => {}
     }
+    if let Some(ref client_order_id) = client_order_id {
+        if result != ProcessResult::Accepted {
+            state
+                .sharded_store
+                .mark_rejected_client_order(&principal.account_id, client_order_id);
+        }
+    }
 
     record_ack(&state, t0);
     Ok((status, Json(response)))
@@ -411,7 +471,10 @@ pub(super) async fn handle_get_order(
     let order = if let Some(ref acc_id) = account_id_from_map {
         state.sharded_store.find_by_id_with_account(&order_id, acc_id)
     } else {
-        state.sharded_store.find_by_id(&order_id)
+        state
+            .sharded_store
+            .find_by_client_order_id(&principal.account_id, &order_id)
+            .or_else(|| state.sharded_store.find_by_id(&order_id))
     };
 
     let order = match order {
@@ -436,6 +499,72 @@ pub(super) async fn handle_get_order(
     }
 
     Ok(Json(OrderSnapshotResponse::from(order)))
+}
+
+/// クライアント注文ID照会（GET /orders/client/{client_order_id}）
+/// - PENDING/DURABLE/REJECTED/UNKNOWN を返す
+pub(super) async fn handle_get_order_by_client_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_order_id): Path<String>,
+) -> Result<Json<ClientOrderStatusResponse>, (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    if state
+        .sharded_store
+        .is_rejected_client_order(&principal.account_id, &client_order_id)
+    {
+        let response = ClientOrderStatusResponse {
+            client_order_id,
+            order_id: None,
+            status: "REJECTED".into(),
+        };
+        return Ok(Json(response));
+    }
+
+    let order = state
+        .sharded_store
+        .find_by_client_order_id(&principal.account_id, &client_order_id);
+
+    let response = if let Some(order) = order {
+        let status = if order.status == crate::store::OrderStatus::Rejected {
+            "REJECTED"
+        } else if state
+            .sharded_store
+            .is_durable(&order.order_id, &order.account_id)
+        {
+            "DURABLE"
+        } else {
+            "PENDING"
+        };
+        ClientOrderStatusResponse {
+            client_order_id,
+            order_id: Some(order.order_id),
+            status: status.into(),
+        }
+    } else {
+        ClientOrderStatusResponse {
+            client_order_id,
+            order_id: None,
+            status: "UNKNOWN".into(),
+        }
+    };
+
+    Ok(Json(response))
 }
 
 /// 注文キャンセル（POST /orders/{order_id}/cancel）
@@ -581,6 +710,16 @@ pub(super) struct OrderSnapshotResponse {
     accepted_at: u64,
     last_update_at: u64,
     filled_qty: u64,
+}
+
+/// クライアント注文ID照会レスポンス
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClientOrderStatusResponse {
+    client_order_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order_id: Option<String>,
+    status: String,
 }
 
 impl From<OrderSnapshot> for OrderSnapshotResponse {

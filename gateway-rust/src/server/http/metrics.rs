@@ -42,7 +42,24 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let reject_risk = state.reject_risk.load(Ordering::Relaxed);
     let reject_invalid_symbol = state.reject_invalid_symbol.load(Ordering::Relaxed);
     let reject_queue_full = state.reject_queue_full.load(Ordering::Relaxed);
+    let backpressure_soft_wal_age = state.backpressure_soft_wal_age.load(Ordering::Relaxed);
+    let backpressure_inflight = state.backpressure_inflight.load(Ordering::Relaxed);
+    let backpressure_wal_bytes = state.backpressure_wal_bytes.load(Ordering::Relaxed);
+    let backpressure_wal_age = state.backpressure_wal_age.load(Ordering::Relaxed);
+    let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
     let inflight = state.inflight.load(Ordering::Relaxed);
+    let durable_inflight = state.durable_inflight.load(Ordering::Relaxed);
+    let wal_age_ms = state.audit_log.wal_age_ms();
+    let (inflight_limit_dynamic, durable_commit_rate_ewma_milli, inflight_dynamic_enabled) =
+        if let Some(controller) = &state.inflight_controller {
+            (
+                controller.limit(),
+                controller.rate_ewma_milli(),
+                1u64,
+            )
+        } else {
+            (0u64, 0u64, 0u64)
+        };
     let ack_p50 = state.ack_hist.snapshot().percentile(50.0);
     let ack_p99 = state.ack_hist.snapshot().percentile(99.0);
     let ack_p999 = state.ack_hist.snapshot().percentile(99.9);
@@ -55,6 +72,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let fdatasync_p50 = state.fdatasync_hist.snapshot().percentile(50.0);
     let fdatasync_p99 = state.fdatasync_hist.snapshot().percentile(99.0);
     let fdatasync_p999 = state.fdatasync_hist.snapshot().percentile(99.9);
+    let fast_path_processing_p50 = state.engine.processing_p50() / 1_000;
+    let fast_path_processing_p99 = state.engine.processing_p99() / 1_000;
+    let fast_path_processing_p999 = state.engine.processing_p999() / 1_000;
 
     let snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
@@ -135,9 +155,39 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_reject_queue_full_total Total rejects due to queue full\n\
          # TYPE gateway_reject_queue_full_total counter\n\
          gateway_reject_queue_full_total {}\n\
-         # HELP gateway_inflight Current inflight order count\n\
-         # TYPE gateway_inflight gauge\n\
-         gateway_inflight {}\n\
+         # HELP gateway_backpressure_soft_wal_age_total Total soft rejects due to WAL age\n\
+         # TYPE gateway_backpressure_soft_wal_age_total counter\n\
+         gateway_backpressure_soft_wal_age_total {}\n\
+         # HELP gateway_backpressure_inflight_total Total rejects due to inflight\n\
+         # TYPE gateway_backpressure_inflight_total counter\n\
+         gateway_backpressure_inflight_total {}\n\
+         # HELP gateway_backpressure_wal_bytes_total Total rejects due to WAL bytes\n\
+         # TYPE gateway_backpressure_wal_bytes_total counter\n\
+         gateway_backpressure_wal_bytes_total {}\n\
+         # HELP gateway_backpressure_wal_age_total Total rejects due to WAL age\n\
+         # TYPE gateway_backpressure_wal_age_total counter\n\
+         gateway_backpressure_wal_age_total {}\n\
+         # HELP gateway_backpressure_disk_free_total Total rejects due to low disk free\n\
+         # TYPE gateway_backpressure_disk_free_total counter\n\
+         gateway_backpressure_disk_free_total {}\n\
+        # HELP gateway_inflight Current inflight order count\n\
+        # TYPE gateway_inflight gauge\n\
+        gateway_inflight {}\n\
+        # HELP gateway_inflight_dynamic_enabled Dynamic inflight controller enabled (1/0)\n\
+        # TYPE gateway_inflight_dynamic_enabled gauge\n\
+        gateway_inflight_dynamic_enabled {}\n\
+        # HELP gateway_inflight_limit_dynamic Current dynamic inflight limit\n\
+        # TYPE gateway_inflight_limit_dynamic gauge\n\
+        gateway_inflight_limit_dynamic {}\n\
+        # HELP gateway_durable_commit_rate_ewma Durable commit rate EWMA (events/sec)\n\
+        # TYPE gateway_durable_commit_rate_ewma gauge\n\
+        gateway_durable_commit_rate_ewma {}\n\
+        # HELP gateway_durable_inflight Current durable inflight count\n\
+        # TYPE gateway_durable_inflight gauge\n\
+        gateway_durable_inflight {}\n\
+         # HELP gateway_wal_age_ms WAL age in milliseconds\n\
+         # TYPE gateway_wal_age_ms gauge\n\
+         gateway_wal_age_ms {}\n\
          # HELP gateway_ack_p50_us ACK latency p50 in microseconds\n\
          # TYPE gateway_ack_p50_us gauge\n\
          gateway_ack_p50_us {}\n\
@@ -174,6 +224,15 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_fdatasync_p999_us fdatasync latency p999 in microseconds\n\
          # TYPE gateway_fdatasync_p999_us gauge\n\
          gateway_fdatasync_p999_us {}\n\
+         # HELP gateway_fast_path_processing_p50_us Fast path risk processing latency p50 in microseconds\n\
+         # TYPE gateway_fast_path_processing_p50_us gauge\n\
+         gateway_fast_path_processing_p50_us {}\n\
+         # HELP gateway_fast_path_processing_p99_us Fast path risk processing latency p99 in microseconds\n\
+         # TYPE gateway_fast_path_processing_p99_us gauge\n\
+         gateway_fast_path_processing_p99_us {}\n\
+         # HELP gateway_fast_path_processing_p999_us Fast path risk processing latency p999 in microseconds\n\
+         # TYPE gateway_fast_path_processing_p999_us gauge\n\
+         gateway_fast_path_processing_p999_us {}\n\
          # HELP gateway_latency_p50_ns Latency p50 in nanoseconds\n\
          # TYPE gateway_latency_p50_ns gauge\n\
          gateway_latency_p50_ns {}\n\
@@ -221,7 +280,17 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         reject_risk,
         reject_invalid_symbol,
         reject_queue_full,
+        backpressure_soft_wal_age,
+        backpressure_inflight,
+        backpressure_wal_bytes,
+        backpressure_wal_age,
+        backpressure_disk_free,
         inflight,
+        inflight_dynamic_enabled,
+        inflight_limit_dynamic,
+        (durable_commit_rate_ewma_milli as f64) / 1000.0,
+        durable_inflight,
+        wal_age_ms,
         ack_p50,
         ack_p99,
         ack_p999,
@@ -234,6 +303,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         fdatasync_p50,
         fdatasync_p99,
         fdatasync_p999,
+        fast_path_processing_p50,
+        fast_path_processing_p99,
+        fast_path_processing_p999,
         state.engine.latency_p50(),
         state.engine.latency_p95(),
         state.engine.latency_p99(),

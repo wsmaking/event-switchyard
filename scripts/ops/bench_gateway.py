@@ -98,7 +98,7 @@ class GatewayBenchmark:
     def _make_connection(self) -> http.client.HTTPConnection:
         return http.client.HTTPConnection(self.host, self.port, timeout=10)
 
-    def _make_order_payload(self, heavy: bool = False) -> bytes:
+    def _make_order_payload(self, heavy: bool = False, client_order_id: str | None = None) -> bytes:
         """注文ペイロード生成"""
         payload = {
             "symbol": "AAPL",
@@ -108,6 +108,8 @@ class GatewayBenchmark:
             "price": 15000,
             "timeInForce": "GTC",
         }
+        if client_order_id:
+            payload["clientOrderId"] = client_order_id
         if heavy:
             # 大きなclientOrderIdを追加（重いリクエストシミュレーション）
             payload["clientOrderId"] = "X" * 1000
@@ -149,11 +151,12 @@ class GatewayBenchmark:
         print(f"[RTT] Running {requests} sequential requests (warmup: {warmup})...")
 
         conn = self._make_connection()
-        body = self._make_order_payload()
         headers = self._make_headers()
+        sample_body = self._make_order_payload(heavy=True, client_order_id="heavy_sample")
 
         # Warmup
         for _ in range(warmup):
+            body = self._make_order_payload(client_order_id=f"warmup_{time.time_ns()}")
             conn.request("POST", "/orders", body=body, headers=headers)
             resp = conn.getresponse()
             resp.read()
@@ -165,6 +168,7 @@ class GatewayBenchmark:
 
         for i in range(requests):
             start = time.perf_counter()
+            body = self._make_order_payload(client_order_id=f"bench_{time.time_ns()}_{i}")
             conn.request("POST", "/orders", body=body, headers=headers)
             resp = conn.getresponse()
             resp.read()
@@ -215,7 +219,6 @@ class GatewayBenchmark:
         """
         print(f"[Throughput] Running {duration_sec}s burst with {concurrency} workers, {num_accounts} accounts...")
 
-        body = self._make_order_payload()
         headers_by_account = {
             str(10000 + i): self._make_headers(str(10000 + i))
             for i in range(num_accounts)
@@ -237,9 +240,14 @@ class GatewayBenchmark:
             account_id = account_ids[worker_id % num_accounts]
             headers = headers_by_account[account_id]
 
+            counter = 0
             while not stop_flag.is_set():
                 try:
                     start = time.perf_counter()
+                    body = self._make_order_payload(
+                        client_order_id=f"bench_{account_id}_{worker_id}_{counter}"
+                    )
+                    counter += 1
                     conn.request("POST", "/orders", body=body, headers=headers)
                     resp = conn.getresponse()
                     resp.read()
@@ -316,7 +324,6 @@ class GatewayBenchmark:
         """
         print(f"[Sustained] Running {duration_sec}s at {target_rps} RPS...")
 
-        body = self._make_order_payload()
         headers_by_account = {
             str(10000 + i): self._make_headers(str(10000 + i))
             for i in range(num_accounts)
@@ -421,7 +428,6 @@ class GatewayBenchmark:
         print(f"[Heavy] Running {requests} heavy requests...")
 
         conn = self._make_connection()
-        body = self._make_order_payload(heavy=True)
         headers = self._make_headers()
 
         latencies_us = []
@@ -430,6 +436,8 @@ class GatewayBenchmark:
 
         for i in range(requests):
             start = time.perf_counter()
+            body = self._make_order_payload(client_order_id=f"sustained_{time.time_ns()}_{request_count}")
+            body = self._make_order_payload(heavy=True, client_order_id=f"heavy_{time.time_ns()}_{i}")
             conn.request("POST", "/orders", body=body, headers=headers)
             resp = conn.getresponse()
             resp.read()
@@ -447,7 +455,7 @@ class GatewayBenchmark:
 
         metrics = {
             "requests": requests,
-            "payload_size": len(body),
+            "payload_size": len(sample_body),
             "accepted": accepted,
             "rejected": rejected,
             "p50_us": percentile(latencies_us, 0.50),

@@ -21,6 +21,12 @@ struct Shard {
     by_id: HashMap<String, OrderSnapshot>,
     /// idempotency_key -> order_id
     idempotency_index: HashMap<String, IdempotencyEntry>,
+    /// client_order_id -> order_id
+    client_order_index: HashMap<String, String>,
+    /// order_id -> durable_at_ms
+    durable_index: HashMap<String, u64>,
+    /// client_order_id -> rejected_at_ms
+    rejected_client_orders: HashMap<String, u64>,
 }
 
 impl Shard {
@@ -28,6 +34,9 @@ impl Shard {
         Self {
             by_id: HashMap::new(),
             idempotency_index: HashMap::new(),
+            client_order_index: HashMap::new(),
+            durable_index: HashMap::new(),
+            rejected_client_orders: HashMap::new(),
         }
     }
 }
@@ -112,6 +121,48 @@ impl ShardedOrderStore {
         guard.by_id.get(order_id).cloned()
     }
 
+    /// client_order_id で検索（アカウント単位）
+    pub fn find_by_client_order_id(&self, account_id: &str, client_order_id: &str) -> Option<OrderSnapshot> {
+        let idx = self.shard_index(account_id);
+        let guard = self.shards[idx].read().unwrap();
+        let order_id = guard.client_order_index.get(client_order_id)?;
+        guard.by_id.get(order_id).cloned()
+    }
+
+    /// durable 完了を記録
+    pub fn mark_durable(&self, order_id: &str, account_id: &str, at_ms: u64) -> bool {
+        let idx = self.shard_index(account_id);
+        let mut guard = self.shards[idx].write().unwrap();
+        if guard.by_id.contains_key(order_id) {
+            guard.durable_index.insert(order_id.to_string(), at_ms);
+            return true;
+        }
+        false
+    }
+
+    /// durable 状態を取得
+    pub fn is_durable(&self, order_id: &str, account_id: &str) -> bool {
+        let idx = self.shard_index(account_id);
+        let guard = self.shards[idx].read().unwrap();
+        guard.durable_index.contains_key(order_id)
+    }
+
+    /// client_order_id の拒否状態を記録
+    pub fn mark_rejected_client_order(&self, account_id: &str, client_order_id: &str) {
+        let idx = self.shard_index(account_id);
+        let mut guard = self.shards[idx].write().unwrap();
+        guard
+            .rejected_client_orders
+            .insert(client_order_id.to_string(), now_millis());
+    }
+
+    /// client_order_id が拒否済みか確認
+    pub fn is_rejected_client_order(&self, account_id: &str, client_order_id: &str) -> bool {
+        let idx = self.shard_index(account_id);
+        let guard = self.shards[idx].read().unwrap();
+        guard.rejected_client_orders.contains_key(client_order_id)
+    }
+
     /// idempotency_key で検索
     #[allow(dead_code)]
     /// 個別参照API向けのヘルパー
@@ -161,6 +212,9 @@ impl ShardedOrderStore {
         };
         let order_id = order.order_id.clone();
         guard.by_id.insert(order_id.clone(), order.clone());
+        if let Some(client_order_id) = order.client_order_id.clone() {
+            guard.client_order_index.insert(client_order_id, order_id.clone());
+        }
         guard.idempotency_index.insert(
             idx_key,
             IdempotencyEntry {
@@ -180,6 +234,9 @@ impl ShardedOrderStore {
 
         let mut guard = self.shards[idx].write().unwrap();
         guard.by_id.insert(order_id.clone(), order);
+        if let Some(client_order_id) = guard.by_id.get(&order_id).and_then(|o| o.client_order_id.clone()) {
+            guard.client_order_index.insert(client_order_id, order_id.clone());
+        }
 
         if let Some(key) = idempotency_key {
             let idx_key = Self::idempotency_key(&account_id, key);
