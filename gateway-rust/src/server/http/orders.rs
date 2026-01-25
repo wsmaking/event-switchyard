@@ -42,22 +42,15 @@ impl Drop for InflightGuard {
 }
 
 fn record_ack(state: &AppState, start_ns: u64) {
-    let elapsed = now_nanos().saturating_sub(start_ns);
-    state.ack_hist.record(elapsed);
+    let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
+    state.ack_hist.record(elapsed_us);
 }
 
-fn record_wal_timings(state: &AppState, start_ns: u64, timings: audit::AuditAppendTimings) {
+fn record_wal_enqueue(state: &AppState, start_ns: u64, timings: audit::AuditAppendTimings) {
     if timings.enqueue_done_ns >= start_ns {
-        state
-            .wal_enqueue_hist
-            .record(timings.enqueue_done_ns - start_ns);
+        let elapsed_us = (timings.enqueue_done_ns - start_ns) / 1_000;
+        state.wal_enqueue_hist.record(elapsed_us);
     }
-    if timings.durable_done_ns >= start_ns {
-        state
-            .durable_ack_hist
-            .record(timings.durable_done_ns - start_ns);
-    }
-    state.fdatasync_hist.record(timings.fdatasync_ns);
 }
 
 /// 注文受付（POST /orders）
@@ -211,8 +204,8 @@ pub(super) async fn handle_order(
                         "expireAt": snapshot.expire_at,
                         "clientOrderId": snapshot.client_order_id,
                     }),
-                });
-                record_wal_timings(&state, t0, timings);
+                }, t0);
+                record_wal_enqueue(&state, t0, timings);
                 if !state.bus_mode_outbox {
                     state.bus_publisher.publish(BusEvent {
                         event_type: "OrderAccepted".into(),
@@ -335,8 +328,8 @@ pub(super) async fn handle_order(
                 account_id: audit_account_id.clone(),
                 order_id: Some(audit_order_id.clone()),
                 data: audit_data.clone(),
-            });
-            record_wal_timings(&state, t0, timings);
+            }, t0);
+            record_wal_enqueue(&state, t0, timings);
             if !state.bus_mode_outbox {
                 state.bus_publisher.publish(BusEvent {
                     event_type: "OrderAccepted".into(),

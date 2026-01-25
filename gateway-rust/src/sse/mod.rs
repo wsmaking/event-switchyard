@@ -85,8 +85,6 @@ impl SseHub {
     }
 
     /// アカウントにイベントを配信
-    #[allow(dead_code)]
-    /// 将来のアカウント通知向けに保持
     pub fn publish_account(&self, account_id: &str, event_type: &str, data: &str) {
         let event = SseEvent {
             id: self.next_event_id.fetch_add(1, Ordering::Relaxed),

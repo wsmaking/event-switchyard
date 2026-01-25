@@ -33,9 +33,11 @@ use axum::{
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use crate::audit::AuditDurableNotification;
 use crate::audit::AuditLog;
 use crate::auth::JwtAuth;
 use crate::backpressure::BackpressureConfig;
@@ -98,6 +100,7 @@ pub async fn run(
     bus_publisher: Arc<BusPublisher>,
     bus_mode_outbox: bool,
     idempotency_ttl_sec: u64,
+    durable_rx: Option<UnboundedReceiver<AuditDurableNotification>>,
 ) -> anyhow::Result<()> {
     let shard_count = std::env::var("ORDER_STORE_SHARDS")
         .ok()
@@ -134,6 +137,13 @@ pub async fn run(
         reject_queue_full: Arc::new(AtomicU64::new(0)),
     };
 
+    if let Some(rx) = durable_rx {
+        let durable_state = state.clone();
+        tokio::spawn(async move {
+            run_durable_notifier(rx, durable_state).await;
+        });
+    }
+
     let app = Router::new()
         .route("/orders", post(handle_order))
         .route("/orders/{order_id}", get(handle_get_order))
@@ -156,4 +166,37 @@ pub async fn run(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn run_durable_notifier(
+    mut rx: UnboundedReceiver<AuditDurableNotification>,
+    state: AppState,
+) {
+    while let Some(note) = rx.recv().await {
+        if note.durable_done_ns >= note.request_start_ns && note.request_start_ns > 0 {
+            let elapsed_us = (note.durable_done_ns - note.request_start_ns) / 1_000;
+            state.durable_ack_hist.record(elapsed_us);
+        }
+        if note.fdatasync_ns > 0 {
+            state.fdatasync_hist.record(note.fdatasync_ns / 1_000);
+        }
+
+        let durable_latency_us = if note.durable_done_ns >= note.request_start_ns {
+            (note.durable_done_ns - note.request_start_ns) / 1_000
+        } else {
+            0
+        };
+        let data = serde_json::json!({
+            "eventType": note.event.event_type,
+            "durableLatencyUs": durable_latency_us,
+        })
+        .to_string();
+
+        if let Some(order_id) = note.event.order_id.as_deref() {
+            state.sse_hub.publish_order(order_id, "order_durable", &data);
+        }
+        state
+            .sse_hub
+            .publish_account(&note.event.account_id, "order_durable", &data);
+    }
 }

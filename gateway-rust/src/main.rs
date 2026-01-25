@@ -58,6 +58,10 @@ async fn main() -> anyhow::Result<()> {
     let audit_path = std::env::var("GATEWAY_AUDIT_PATH").unwrap_or_else(|_| "var/gateway/audit.log".into());
     let audit_log = Arc::new(audit::AuditLog::new(audit_path)?);
     info!("AuditLog initialized");
+    let (durable_tx, durable_rx) = tokio::sync::mpsc::unbounded_channel();
+    audit_log
+        .clone()
+        .start_async_writer(Some(durable_tx));
 
     let bus_publisher = Arc::new(bus::BusPublisher::from_env()?);
     info!("BusPublisher initialized (enabled={})", bus_publisher.is_enabled());
@@ -131,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
     let idempotency_ttl_sec = config.idempotency_ttl_sec;
 
     tokio::select! {
-        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec) => {
+        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec, Some(durable_rx)) => {
             if let Err(e) = result {
                 tracing::error!(error = %e, "HTTP server exited with error");
                 return Err(e.into());

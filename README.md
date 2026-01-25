@@ -810,20 +810,41 @@ bench/profiles/
 #### Rust Gateway: WAL計測 / Backpressure
 - **計測ポイント**:
   - t0: 受付（HTTP到達）
-  - t1: WAL enqueue（監査ログ追記完了）
-  - t2: durable ACK（fdatasync完了）
+  - t1: WAL enqueue（監査ログにenqueue完了）
+  - t2: durable ACK（fdatasync完了、SSEで通知）
 - **主要メトリクス**:
-  - `gateway_ack_p50_ns` / `gateway_ack_p99_ns` / `gateway_ack_p999_ns`
-  - `gateway_wal_enqueue_p50_ns` / `gateway_wal_enqueue_p99_ns` / `gateway_wal_enqueue_p999_ns`
-  - `gateway_durable_ack_p50_ns` / `gateway_durable_ack_p99_ns` / `gateway_durable_ack_p999_ns`
-  - `gateway_fdatasync_p50_ns` / `gateway_fdatasync_p99_ns` / `gateway_fdatasync_p999_ns`
+  - `gateway_ack_p50_us` / `gateway_ack_p99_us` / `gateway_ack_p999_us`
+  - `gateway_wal_enqueue_p50_us` / `gateway_wal_enqueue_p99_us` / `gateway_wal_enqueue_p999_us`
+  - `gateway_durable_ack_p50_us` / `gateway_durable_ack_p99_us` / `gateway_durable_ack_p999_us`
+  - `gateway_fdatasync_p50_us` / `gateway_fdatasync_p99_us` / `gateway_fdatasync_p999_us`
   - `gateway_inflight`
+- **durable通知**:
+  - SSE `event: order_durable` を注文/アカウントストリームへ送信
 - **関連環境変数**:
   - `AUDIT_FDATASYNC` (default: true) fdatasync有効化
+  - `AUDIT_ASYNC_WAL` (default: true) WAL非同期 + バッチfsync
+  - `AUDIT_FDATASYNC_MAX_WAIT_US` (default: 200)
+  - `AUDIT_FDATASYNC_MAX_BATCH` (default: 64)
   - `BACKPRESSURE_INFLIGHT_MAX`
   - `BACKPRESSURE_WAL_BYTES_MAX`
   - `BACKPRESSURE_WAL_AGE_MS_MAX`
   - `BACKPRESSURE_DISK_FREE_PCT_MIN`
+ - **計測メモ（ローカル, 2026-01-25 / HDR）**:
+   - RTT(HTTP /orders) p99: **~371µs**（200 req / warmup 50）
+   - Throughput: **~11.5k req/s**（10s, concurrency=4, accounts=1）
+   - ACK p50/p99/p999: **12µs / 67µs / 144µs**
+   - WAL enqueue p50/p99/p999: **11µs / 64µs / 142µs**
+   - durable ACK p50/p99/p999: **~4.2ms / ~6.5ms / ~10.4ms**
+   - fdatasync p50/p99/p999: **~2.7ms / ~3.7ms / ~6.4ms**
+   - 判断: fdatasync p99 が 200µs を超えるため、永続ACKの同期方式/バッチング設計を見直す前提。
+   - 備考: Exchange未接続の場合は `FASTPATH_DRAIN_ENABLE=1` でキューを消費しないと 503(QUEUE_REJECT) が増える。
+ - **WALバッチ調整（HDR, 10s/4c/1acct）**:
+   - 200us/64: durable p99 **~6.2ms** / p999 **~9.1ms**
+   - 1000us/256: durable p99 **~6.9ms** / p999 **~10.0ms**
+   - 100us/64: durable p99 **~6.5ms** / p999 **~13.8ms**（RTT/throughputも悪化）
+   - 傾向: wait/batchを締めると durable p999 が改善（p99は誤差範囲）
+   - 採用値: **200us/64（デフォルト化）**
+ - **注記**: ヒストグラムはHDRで精密化済み（µs単位の上限近似ではない）。
 
 #### [Main.kt](app/src/main/kotlin/app/Main.kt)
 - **役割**: アプリケーションエントリーポイント

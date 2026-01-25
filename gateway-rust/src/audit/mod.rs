@@ -16,7 +16,11 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +49,10 @@ pub struct AuditLog {
     wal_bytes: AtomicU64,
     wal_last_append_ms: AtomicU64,
     fdatasync_enabled: bool,
+    async_enabled: bool,
+    fdatasync_max_wait_us: u64,
+    fdatasync_max_batch: usize,
+    append_tx: Mutex<Option<Sender<AuditAppendRequest>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +60,22 @@ pub struct AuditAppendTimings {
     pub enqueue_done_ns: u64,
     pub durable_done_ns: u64,
     pub fdatasync_ns: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditDurableNotification {
+    pub event: AuditEvent,
+    pub request_start_ns: u64,
+    pub enqueue_done_ns: u64,
+    pub durable_done_ns: u64,
+    pub fdatasync_ns: u64,
+}
+
+#[derive(Debug)]
+struct AuditAppendRequest {
+    event: AuditEvent,
+    request_start_ns: u64,
+    enqueue_done_ns: u64,
 }
 
 impl AuditLog {
@@ -81,6 +105,17 @@ impl AuditLog {
         let fdatasync_enabled = std::env::var("AUDIT_FDATASYNC")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
+        let async_enabled = std::env::var("AUDIT_ASYNC_WAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let fdatasync_max_wait_us = std::env::var("AUDIT_FDATASYNC_MAX_WAIT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(200);
+        let fdatasync_max_batch = std::env::var("AUDIT_FDATASYNC_MAX_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64);
         let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) = init_hash_chain(&path)?;
         let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
             .ok()
@@ -109,20 +144,70 @@ impl AuditLog {
             wal_bytes: AtomicU64::new(wal_bytes),
             wal_last_append_ms: AtomicU64::new(wal_last_append_ms),
             fdatasync_enabled,
+            async_enabled,
+            fdatasync_max_wait_us,
+            fdatasync_max_batch,
+            append_tx: Mutex::new(None),
         })
     }
 
     pub fn append(&self, event: AuditEvent) {
-        let _ = self.append_with_timings(event);
+        let _ = self.append_with_timings(event, now_nanos());
     }
 
-    pub fn append_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
+    pub fn append_with_timings(&self, event: AuditEvent, request_start_ns: u64) -> AuditAppendTimings {
+        if self.async_enabled {
+            if let Ok(guard) = self.append_tx.lock() {
+                if let Some(tx) = guard.as_ref() {
+                    let send_start_ns = now_nanos();
+                    let request = AuditAppendRequest {
+                        event: event.clone(),
+                        request_start_ns,
+                        enqueue_done_ns: send_start_ns,
+                    };
+                    if tx.send(request).is_ok() {
+                        let enqueue_done_ns = now_nanos();
+                        return AuditAppendTimings {
+                            enqueue_done_ns,
+                            durable_done_ns: 0,
+                            fdatasync_ns: 0,
+                        };
+                    }
+                }
+            }
+        }
+        self.append_sync_with_timings(event)
+    }
+
+    pub fn start_async_writer(self: std::sync::Arc<Self>, durable_tx: Option<UnboundedSender<AuditDurableNotification>>) {
+        if !self.async_enabled {
+            return;
+        }
+        let mut guard = match self.append_tx.lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<AuditAppendRequest>();
+        *guard = Some(tx);
+        drop(guard);
+
+        let fdatasync_enabled = self.fdatasync_enabled;
+        let max_wait_us = self.fdatasync_max_wait_us.max(1);
+        let max_batch = self.fdatasync_max_batch.max(1);
+        std::thread::spawn(move || {
+            run_async_writer(self, rx, durable_tx, fdatasync_enabled, max_wait_us, max_batch);
+        });
+    }
+
+    fn append_sync_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
         let mut enqueue_done_ns = 0;
         let mut durable_done_ns = 0;
         let mut fdatasync_ns = 0;
         if let Ok(mut writer) = self.writer.lock() {
             if let Ok(line) = serde_json::to_string(&event) {
-                let start = now_nanos();
                 let mut line_bytes = line.into_bytes();
                 line_bytes.push(b'\n');
                 let _ = writer.write_all(&line_bytes);
@@ -717,6 +802,82 @@ async fn decrypt_kms(ciphertext: Vec<u8>) -> Option<Vec<u8>> {
         .ok()?;
     let plaintext = response.plaintext()?;
     Some(plaintext.as_ref().to_vec())
+}
+
+fn run_async_writer(
+    audit: std::sync::Arc<AuditLog>,
+    rx: Receiver<AuditAppendRequest>,
+    durable_tx: Option<UnboundedSender<AuditDurableNotification>>,
+    fdatasync_enabled: bool,
+    max_wait_us: u64,
+    max_batch: usize,
+) {
+    let max_wait = Duration::from_micros(max_wait_us);
+    let mut batch: Vec<AuditAppendRequest> = Vec::with_capacity(max_batch);
+    loop {
+        let first = match rx.recv() {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        batch.push(first);
+        let started = Instant::now();
+        while batch.len() < max_batch {
+            let elapsed = started.elapsed();
+            let remaining = max_wait.checked_sub(elapsed).unwrap_or(Duration::from_micros(0));
+            if remaining.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(v) => batch.push(v),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let mut fdatasync_ns = 0;
+        let mut total_bytes = 0usize;
+        if let Ok(mut writer) = audit.writer.lock() {
+            for req in &batch {
+                if let Ok(line) = serde_json::to_string(&req.event) {
+                    let mut line_bytes = line.into_bytes();
+                    line_bytes.push(b'\n');
+                    let _ = writer.write_all(&line_bytes);
+                    audit.append_hash_chain(&line_bytes);
+                    total_bytes += line_bytes.len();
+                }
+            }
+            let _ = writer.flush();
+
+            audit
+                .wal_bytes
+                .fetch_add(total_bytes as u64, Ordering::Relaxed);
+            audit
+                .wal_last_append_ms
+                .store(now_millis(), Ordering::Relaxed);
+
+            if fdatasync_enabled {
+                let sync_start = now_nanos();
+                let _ = writer.get_ref().sync_data();
+                fdatasync_ns = now_nanos().saturating_sub(sync_start);
+            }
+        }
+
+        let durable_done_ns = now_nanos();
+        if fdatasync_enabled {
+            if let Some(tx) = durable_tx.as_ref() {
+                for req in &batch {
+                    let _ = tx.send(AuditDurableNotification {
+                        event: req.event.clone(),
+                        request_start_ns: req.request_start_ns,
+                        enqueue_done_ns: req.enqueue_done_ns,
+                        durable_done_ns,
+                        fdatasync_ns,
+                    });
+                }
+            }
+        }
+        batch.clear();
+    }
 }
 
 pub fn now_millis() -> u64 {

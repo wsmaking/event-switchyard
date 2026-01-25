@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
 parking_lot = "0.12"
+hdrhistogram = "7"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

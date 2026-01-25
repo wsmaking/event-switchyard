@@ -138,42 +138,42 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_inflight Current inflight order count\n\
          # TYPE gateway_inflight gauge\n\
          gateway_inflight {}\n\
-         # HELP gateway_ack_p50_ns ACK latency p50 in nanoseconds\n\
-         # TYPE gateway_ack_p50_ns gauge\n\
-         gateway_ack_p50_ns {}\n\
-         # HELP gateway_ack_p99_ns ACK latency p99 in nanoseconds\n\
-         # TYPE gateway_ack_p99_ns gauge\n\
-         gateway_ack_p99_ns {}\n\
-         # HELP gateway_ack_p999_ns ACK latency p999 in nanoseconds\n\
-         # TYPE gateway_ack_p999_ns gauge\n\
-         gateway_ack_p999_ns {}\n\
-         # HELP gateway_wal_enqueue_p50_ns WAL enqueue latency p50 in nanoseconds\n\
-         # TYPE gateway_wal_enqueue_p50_ns gauge\n\
-         gateway_wal_enqueue_p50_ns {}\n\
-         # HELP gateway_wal_enqueue_p99_ns WAL enqueue latency p99 in nanoseconds\n\
-         # TYPE gateway_wal_enqueue_p99_ns gauge\n\
-         gateway_wal_enqueue_p99_ns {}\n\
-         # HELP gateway_wal_enqueue_p999_ns WAL enqueue latency p999 in nanoseconds\n\
-         # TYPE gateway_wal_enqueue_p999_ns gauge\n\
-         gateway_wal_enqueue_p999_ns {}\n\
-         # HELP gateway_durable_ack_p50_ns Durable ACK latency p50 in nanoseconds\n\
-         # TYPE gateway_durable_ack_p50_ns gauge\n\
-         gateway_durable_ack_p50_ns {}\n\
-         # HELP gateway_durable_ack_p99_ns Durable ACK latency p99 in nanoseconds\n\
-         # TYPE gateway_durable_ack_p99_ns gauge\n\
-         gateway_durable_ack_p99_ns {}\n\
-         # HELP gateway_durable_ack_p999_ns Durable ACK latency p999 in nanoseconds\n\
-         # TYPE gateway_durable_ack_p999_ns gauge\n\
-         gateway_durable_ack_p999_ns {}\n\
-         # HELP gateway_fdatasync_p50_ns fdatasync latency p50 in nanoseconds\n\
-         # TYPE gateway_fdatasync_p50_ns gauge\n\
-         gateway_fdatasync_p50_ns {}\n\
-         # HELP gateway_fdatasync_p99_ns fdatasync latency p99 in nanoseconds\n\
-         # TYPE gateway_fdatasync_p99_ns gauge\n\
-         gateway_fdatasync_p99_ns {}\n\
-         # HELP gateway_fdatasync_p999_ns fdatasync latency p999 in nanoseconds\n\
-         # TYPE gateway_fdatasync_p999_ns gauge\n\
-         gateway_fdatasync_p999_ns {}\n\
+         # HELP gateway_ack_p50_us ACK latency p50 in microseconds\n\
+         # TYPE gateway_ack_p50_us gauge\n\
+         gateway_ack_p50_us {}\n\
+         # HELP gateway_ack_p99_us ACK latency p99 in microseconds\n\
+         # TYPE gateway_ack_p99_us gauge\n\
+         gateway_ack_p99_us {}\n\
+         # HELP gateway_ack_p999_us ACK latency p999 in microseconds\n\
+         # TYPE gateway_ack_p999_us gauge\n\
+         gateway_ack_p999_us {}\n\
+         # HELP gateway_wal_enqueue_p50_us WAL enqueue latency p50 in microseconds\n\
+         # TYPE gateway_wal_enqueue_p50_us gauge\n\
+         gateway_wal_enqueue_p50_us {}\n\
+         # HELP gateway_wal_enqueue_p99_us WAL enqueue latency p99 in microseconds\n\
+         # TYPE gateway_wal_enqueue_p99_us gauge\n\
+         gateway_wal_enqueue_p99_us {}\n\
+         # HELP gateway_wal_enqueue_p999_us WAL enqueue latency p999 in microseconds\n\
+         # TYPE gateway_wal_enqueue_p999_us gauge\n\
+         gateway_wal_enqueue_p999_us {}\n\
+         # HELP gateway_durable_ack_p50_us Durable ACK latency p50 in microseconds\n\
+         # TYPE gateway_durable_ack_p50_us gauge\n\
+         gateway_durable_ack_p50_us {}\n\
+         # HELP gateway_durable_ack_p99_us Durable ACK latency p99 in microseconds\n\
+         # TYPE gateway_durable_ack_p99_us gauge\n\
+         gateway_durable_ack_p99_us {}\n\
+         # HELP gateway_durable_ack_p999_us Durable ACK latency p999 in microseconds\n\
+         # TYPE gateway_durable_ack_p999_us gauge\n\
+         gateway_durable_ack_p999_us {}\n\
+         # HELP gateway_fdatasync_p50_us fdatasync latency p50 in microseconds\n\
+         # TYPE gateway_fdatasync_p50_us gauge\n\
+         gateway_fdatasync_p50_us {}\n\
+         # HELP gateway_fdatasync_p99_us fdatasync latency p99 in microseconds\n\
+         # TYPE gateway_fdatasync_p99_us gauge\n\
+         gateway_fdatasync_p99_us {}\n\
+         # HELP gateway_fdatasync_p999_us fdatasync latency p999 in microseconds\n\
+         # TYPE gateway_fdatasync_p999_us gauge\n\
+         gateway_fdatasync_p999_us {}\n\
          # HELP gateway_latency_p50_ns Latency p50 in nanoseconds\n\
          # TYPE gateway_latency_p50_ns gauge\n\
          gateway_latency_p50_ns {}\n\
