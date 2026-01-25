@@ -53,6 +53,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Kafka (Rust client, uses system librdkafka via pkg-config)
 rdkafka = { version = "0.36", features = ["dynamic-linking"] }
+libc = "0.2"
 
 [features]
 default = []

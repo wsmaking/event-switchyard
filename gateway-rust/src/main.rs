@@ -7,12 +7,20 @@
 //! GATEWAY_PORT=8081 cargo run --release -p gateway-rust
 //! ```
 //!
+//! ## 全体フロー（超要約）
+//! 1) HTTP/TCP で注文を受理（Risk→Queue投入までが同期境界）
+//! 2) FastPathQueue を Exchange worker が消費して外部送信
+//! 3) 監査ログへ append（正本）
+//! 4) Outbox が監査ログを読み、Kafkaへ配信（best-effort）
+//! 5) SSE で注文/アカウントの非同期イベントを配信
+//!
 //! ## 環境変数
 //! - `GATEWAY_PORT`: HTTPサーバーのポート（デフォルト: 8081）
 //! - `RUST_LOG`: ログレベル（デフォルト: info）
 
 mod auth;
 mod audit;
+mod backpressure;
 mod bus;
 mod outbox;
 mod config;
@@ -74,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Exchange Worker 起動（Exchange 接続が設定されている場合）
     if let Some(ref exchange_host) = config.exchange_host {
+        // 同一キューへの共有ハンドル（Arc）を取り出して worker に渡す
         let queue = engine.queue();
         let host = exchange_host.clone();
         let port = config.exchange_port;
@@ -83,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(1)
             .max(1);
         for _ in 0..workers {
+            // worker ごとに Arc を複製して所有権を渡す（キュー本体は共有）
             engine::exchange_worker::start_worker(Arc::clone(&queue), host.clone(), port);
         }
         info!(
@@ -94,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if drain_enabled {
+            // Exchange が無い環境のキュー詰まり防止用ドレイン
             let queue = engine.queue();
             let workers = std::env::var("FASTPATH_DRAIN_WORKERS")
                 .ok()
@@ -107,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // HTTP と TCP を並行起動
+    // HTTP と TCP を並行起動（先に終了/エラーした方で終了）
     let http_engine = engine.clone();
     let tcp_engine = engine;
     let http_order_store = Arc::clone(&order_store);
@@ -121,10 +132,16 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::select! {
         result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec) => {
-            result?;
+            if let Err(e) = result {
+                tracing::error!(error = %e, "HTTP server exited with error");
+                return Err(e.into());
+            }
         }
         result = server::tcp::run(tcp_port, tcp_engine) => {
-            result?;
+            if let Err(e) = result {
+                tracing::error!(error = %e, "TCP server exited with error");
+                return Err(e.into());
+            }
         }
     }
 

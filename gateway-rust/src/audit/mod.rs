@@ -4,6 +4,7 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use gateway_core::now_nanos;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -14,6 +15,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,16 @@ pub struct AuditLog {
     seq: Mutex<u64>,
     last_key_id: Mutex<Option<String>>,
     last_anchor_day: Mutex<Option<u64>>,
+    wal_bytes: AtomicU64,
+    wal_last_append_ms: AtomicU64,
+    fdatasync_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuditAppendTimings {
+    pub enqueue_done_ns: u64,
+    pub durable_done_ns: u64,
+    pub fdatasync_ns: u64,
 }
 
 impl AuditLog {
@@ -53,6 +65,22 @@ impl AuditLog {
             .append(true)
             .write(true)
             .open(&path)?;
+        let (wal_bytes, wal_last_append_ms) = match file.metadata() {
+            Ok(meta) => {
+                let bytes = meta.len();
+                let last_ms = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                (bytes, last_ms)
+            }
+            Err(_) => (0, 0),
+        };
+        let fdatasync_enabled = std::env::var("AUDIT_FDATASYNC")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
         let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) = init_hash_chain(&path)?;
         let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
             .ok()
@@ -78,19 +106,64 @@ impl AuditLog {
             seq: Mutex::new(seq),
             last_key_id: Mutex::new(last_key_id),
             last_anchor_day: Mutex::new(None),
+            wal_bytes: AtomicU64::new(wal_bytes),
+            wal_last_append_ms: AtomicU64::new(wal_last_append_ms),
+            fdatasync_enabled,
         })
     }
 
     pub fn append(&self, event: AuditEvent) {
+        let _ = self.append_with_timings(event);
+    }
+
+    pub fn append_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
+        let mut enqueue_done_ns = 0;
+        let mut durable_done_ns = 0;
+        let mut fdatasync_ns = 0;
         if let Ok(mut writer) = self.writer.lock() {
             if let Ok(line) = serde_json::to_string(&event) {
+                let start = now_nanos();
                 let mut line_bytes = line.into_bytes();
                 line_bytes.push(b'\n');
                 let _ = writer.write_all(&line_bytes);
                 let _ = writer.flush();
                 self.append_hash_chain(&line_bytes);
+                enqueue_done_ns = now_nanos();
+
+                self.wal_bytes
+                    .fetch_add(line_bytes.len() as u64, Ordering::Relaxed);
+                self.wal_last_append_ms
+                    .store(now_millis(), Ordering::Relaxed);
+
+                if self.fdatasync_enabled {
+                    let sync_start = now_nanos();
+                    let _ = writer.get_ref().sync_data();
+                    fdatasync_ns = now_nanos() - sync_start;
+                }
+                durable_done_ns = now_nanos();
             }
         }
+        AuditAppendTimings {
+            enqueue_done_ns,
+            durable_done_ns,
+            fdatasync_ns,
+        }
+    }
+
+    pub fn wal_bytes(&self) -> u64 {
+        self.wal_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn wal_age_ms(&self) -> u64 {
+        let last = self.wal_last_append_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            return 0;
+        }
+        now_millis().saturating_sub(last)
+    }
+
+    pub fn disk_free_pct(&self) -> Option<f64> {
+        disk_free_pct(&self.path)
     }
 
     pub fn read_events(
@@ -651,6 +724,30 @@ pub fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(unix)]
+fn disk_free_pct(path: &Path) -> Option<f64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    let total = stat.f_blocks as f64 * stat.f_frsize as f64;
+    let free = stat.f_bavail as f64 * stat.f_frsize as f64;
+    if total <= 0.0 {
+        return None;
+    }
+    Some((free / total) * 100.0)
+}
+
+#[cfg(not(unix))]
+fn disk_free_pct(_path: &Path) -> Option<f64> {
+    None
 }
 
 pub fn parse_time_param(raw: &str) -> Option<u64> {

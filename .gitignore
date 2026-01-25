@@ -20,6 +20,7 @@ venv/
 
 # --- OS
 .DS_Store
+*.pdf
 
 # --- Bench artifacts
 results/

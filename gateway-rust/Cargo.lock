@@ -846,6 +846,7 @@ dependencies = [
  "futures",
  "gateway-core",
  "hmac",
+ "libc",
  "monoio",
  "rdkafka",
  "serde",

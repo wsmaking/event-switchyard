@@ -741,6 +741,90 @@ bench/profiles/
 
 ### コアロジック
 
+### Rust Gateway（gateway-rust）
+
+#### [gateway-rust/src/main.rs](gateway-rust/src/main.rs)
+- **役割**: Rust版Gatewayのエントリーポイント
+- **処理**:
+  1. 設定読み込み（port/queue/TTL）
+  2. AuditLog/SSE/Bus/Outboxを初期化
+  3. Exchange worker または drain worker を起動
+  4. HTTP/TCPサーバーを並行起動
+
+#### [gateway-rust/src/server/http/mod.rs](gateway-rust/src/server/http/mod.rs)
+- **役割**: HTTP入口のルーティングと状態管理
+- **処理**:
+  1. JWT認証
+  2. IdempotencyKey判定（ShardedOrderStore）
+  3. Risk→Queue投入（FastPath）
+  4. 監査ログ・SSE・Busへの通知
+  5. Backpressure判定（inflight/WAL/ディスク）
+
+#### [gateway-rust/src/server/http/orders.rs](gateway-rust/src/server/http/orders.rs)
+- **役割**: 注文受理・取得・キャンセルのHTTPハンドラ
+
+#### [gateway-rust/src/server/http/audit.rs](gateway-rust/src/server/http/audit.rs)
+- **役割**: 監査イベント取得 / 監査ログ検証 / アンカー取得
+
+#### [gateway-rust/src/server/http/sse.rs](gateway-rust/src/server/http/sse.rs)
+- **役割**: SSEストリーム配信（リプレイ + ブロードキャスト）
+
+#### [gateway-rust/src/server/http/metrics.rs](gateway-rust/src/server/http/metrics.rs)
+- **役割**: health/metrics の運用エンドポイント
+
+#### [gateway-rust/src/engine/fast_path.rs](gateway-rust/src/engine/fast_path.rs)
+- **役割**: FastPathエンジン（受理→キュー）
+- **処理**:
+  1. Riskチェック
+  2. ロックフリーQueueへ投入
+  3. レイテンシ計測
+
+#### [gateway-core/src/queue.rs](gateway-core/src/queue.rs)
+- **役割**: ロックフリーリングバッファ（FastPathQueue）
+- **処理**:
+  - 満杯なら即座にreject（バックプレッシャー）
+
+#### [gateway-rust/src/store/sharded.rs](gateway-rust/src/store/sharded.rs)
+- **役割**: シャーディングOrderStore
+- **処理**:
+  - account_idハッシュで分散し、RwLock競合を軽減
+  - idempotencyの直列化
+
+#### [gateway-rust/src/audit/mod.rs](gateway-rust/src/audit/mod.rs)
+- **役割**: 監査ログ（append-only）
+- **処理**:
+  - JSONL追記、ハッシュチェーン、検証API
+  - WAL enqueue / durable ACK の計測（t0/t1/t2）
+
+#### [gateway-rust/src/outbox/mod.rs](gateway-rust/src/outbox/mod.rs)
+- **役割**: 監査ログ → Kafka 送信（Outbox）
+- **処理**:
+  - 監査ログを読み取り、Kafkaへbest-effort配信
+  - offsetはfsyncで保護
+
+#### [gateway-rust/src/bus/mod.rs](gateway-rust/src/bus/mod.rs)
+- **役割**: Kafka Publisher
+- **処理**:
+  - rdkafkaでpublish、delivery結果を集計
+
+#### Rust Gateway: WAL計測 / Backpressure
+- **計測ポイント**:
+  - t0: 受付（HTTP到達）
+  - t1: WAL enqueue（監査ログ追記完了）
+  - t2: durable ACK（fdatasync完了）
+- **主要メトリクス**:
+  - `gateway_ack_p50_ns` / `gateway_ack_p99_ns` / `gateway_ack_p999_ns`
+  - `gateway_wal_enqueue_p50_ns` / `gateway_wal_enqueue_p99_ns` / `gateway_wal_enqueue_p999_ns`
+  - `gateway_durable_ack_p50_ns` / `gateway_durable_ack_p99_ns` / `gateway_durable_ack_p999_ns`
+  - `gateway_fdatasync_p50_ns` / `gateway_fdatasync_p99_ns` / `gateway_fdatasync_p999_ns`
+  - `gateway_inflight`
+- **関連環境変数**:
+  - `AUDIT_FDATASYNC` (default: true) fdatasync有効化
+  - `BACKPRESSURE_INFLIGHT_MAX`
+  - `BACKPRESSURE_WAL_BYTES_MAX`
+  - `BACKPRESSURE_WAL_AGE_MS_MAX`
+  - `BACKPRESSURE_DISK_FREE_PCT_MIN`
+
 #### [Main.kt](app/src/main/kotlin/app/Main.kt)
 - **役割**: アプリケーションエントリーポイント
 - **処理**:
@@ -1322,6 +1406,44 @@ docker run -d \
 - **[docs/specs/slo.md](docs/specs/slo.md)** - SLO仕様 (目標値・閾値・アラート)
 - **[docs/runbook.md](docs/runbook.md)** - インシデント対応手順
 - **[docs/change_risk.md](docs/change_risk.md)** - 変更リスク評価ガイド
+
+### Gateway Rust: Kafka/Outbox運用
+
+**目的**: 監査ログ(JSONL)をOutboxで追跡し、Kafkaへ耐久配信する。
+
+**有効化条件**:
+- `BUS_MODE=outbox` かつ `KAFKA_ENABLE=1` のとき Outbox が起動
+
+**主要設定**:
+- `GATEWAY_AUDIT_PATH` (default: `var/gateway/audit.log`)
+- `OUTBOX_OFFSET_PATH` (default: `var/gateway/outbox.offset`)
+- `OUTBOX_BACKOFF_BASE_MS` / `OUTBOX_BACKOFF_MAX_MS`
+- `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CLIENT_ID`
+
+**配信対象**:
+- `OrderAccepted`, `CancelRequested` のみKafkaへ送信
+- それ以外の監査イベントはスキップ (outbox_events_skipped)
+
+**監視指標 (/metrics)**:
+- `gateway_outbox_*` (read/publish/errors/backoff)
+- `gateway_kafka_*` (delivery ok/err/dropped)
+- `gateway_outbox_offset_resets_total` が増えたら要注意
+
+**停止条件の目安**:
+- `gateway_outbox_publish_errors_total` が継続増加
+- `gateway_kafka_delivery_err_total` が増加し続ける
+- `gateway_outbox_backoff_current_ms` が `OUTBOX_BACKOFF_MAX_MS` に張り付き
+- `gateway_outbox_offset_resets_total` が急増
+
+**手動復旧手順**:
+1. Kafka到達性を確認 (`KAFKA_BOOTSTRAP_SERVERS`)
+2. `OUTBOX_OFFSET_PATH` を確認 (破損時は `.bad.<ts>` に退避される)
+3. 必要なら `OUTBOX_OFFSET_PATH` を 0 にしてフル再送
+4. 再送を避ける場合は監査ログのサイズ(バイト)に合わせてオフセットを設定
+5. 再起動して outbox が進むことを確認
+
+**注意**:
+- Outboxは at-least-once。再送時は下流で冪等化が必要。
 
 ### ADR (Architecture Decision Records)
 - **[docs/adr/001-slo-regression-gate.md](docs/adr/001-slo-regression-gate.md)** - SLO回帰ゲート導入
