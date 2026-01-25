@@ -10,8 +10,6 @@ use axum::{
 };
 use axum::http::HeaderMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
 use crate::audit::{self, AuditEvent};
 use crate::auth::{AuthError, AuthResult};
 use crate::backpressure::{BackpressureLevel, BackpressureMetrics, BackpressureReason};
@@ -25,19 +23,26 @@ use super::{AppState, AuthErrorResponse};
 
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
 
-struct InflightGuard {
-    counter: Arc<std::sync::atomic::AtomicU64>,
+struct ControllerInflightGuard {
+    handle: crate::inflight::InflightControllerHandle,
+    active: bool,
 }
 
-impl InflightGuard {
-    fn new(counter: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        Self { counter }
+impl ControllerInflightGuard {
+    fn new(handle: crate::inflight::InflightControllerHandle) -> Self {
+        Self { handle, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
     }
 }
 
-impl Drop for InflightGuard {
+impl Drop for ControllerInflightGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        if self.active {
+            self.handle.release(1);
+        }
     }
 }
 
@@ -99,10 +104,12 @@ pub(super) async fn handle_order(
         ));
     }
 
-    let inflight = state.inflight.fetch_add(1, Ordering::Relaxed) + 1;
-    let _guard = InflightGuard::new(Arc::clone(&state.inflight));
-    if let Some(controller) = &state.inflight_controller {
-        if controller.should_soft_reject(inflight) {
+    let (mut inflight_guard, inflight) = match state.inflight_controller.reserve().await {
+        crate::inflight::ReserveDecision::Allow { inflight, .. } => (
+            Some(ControllerInflightGuard::new(state.inflight_controller.clone())),
+            inflight,
+        ),
+        crate::inflight::ReserveDecision::RejectInflight { .. } => {
             state.backpressure_inflight.fetch_add(1, Ordering::Relaxed);
             record_ack(&state, t0);
             return Ok((
@@ -110,7 +117,15 @@ pub(super) async fn handle_order(
                 Json(OrderResponse::rejected("BACKPRESSURE_INFLIGHT_SOFT")),
             ));
         }
-    }
+        crate::inflight::ReserveDecision::RejectRateDecline { .. } => {
+            state.backpressure_soft_rate_decline.fetch_add(1, Ordering::Relaxed);
+            record_ack(&state, t0);
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(OrderResponse::rejected("BACKPRESSURE_DURABLE_RATE_DECLINE")),
+            ));
+        }
+    };
     let metrics = BackpressureMetrics {
         inflight,
         wal_bytes: state.audit_log.wal_bytes(),
@@ -247,7 +262,9 @@ pub(super) async fn handle_order(
                 }, t0);
                 record_wal_enqueue(&state, t0, timings);
                 if state.audit_log.async_enabled() {
-                    state.durable_inflight.fetch_add(1, Ordering::Relaxed);
+                    if let Some(guard) = inflight_guard.as_mut() {
+                        guard.disarm();
+                    }
                 }
                 if !state.bus_mode_outbox {
                     state.bus_publisher.publish(BusEvent {
@@ -381,7 +398,9 @@ pub(super) async fn handle_order(
             }, t0);
             record_wal_enqueue(&state, t0, timings);
             if state.audit_log.async_enabled() {
-                state.durable_inflight.fetch_add(1, Ordering::Relaxed);
+                if let Some(guard) = inflight_guard.as_mut() {
+                    guard.disarm();
+                }
             }
             if !state.bus_mode_outbox {
                 state.bus_publisher.publish(BusEvent {

@@ -43,23 +43,19 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let reject_invalid_symbol = state.reject_invalid_symbol.load(Ordering::Relaxed);
     let reject_queue_full = state.reject_queue_full.load(Ordering::Relaxed);
     let backpressure_soft_wal_age = state.backpressure_soft_wal_age.load(Ordering::Relaxed);
+    let backpressure_soft_rate_decline =
+        state.backpressure_soft_rate_decline.load(Ordering::Relaxed);
     let backpressure_inflight = state.backpressure_inflight.load(Ordering::Relaxed);
     let backpressure_wal_bytes = state.backpressure_wal_bytes.load(Ordering::Relaxed);
     let backpressure_wal_age = state.backpressure_wal_age.load(Ordering::Relaxed);
     let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
-    let inflight = state.inflight.load(Ordering::Relaxed);
-    let durable_inflight = state.durable_inflight.load(Ordering::Relaxed);
+    let inflight = state.inflight_controller.inflight();
+    let durable_inflight = state.inflight_controller.inflight();
     let wal_age_ms = state.audit_log.wal_age_ms();
-    let (inflight_limit_dynamic, durable_commit_rate_ewma_milli, inflight_dynamic_enabled) =
-        if let Some(controller) = &state.inflight_controller {
-            (
-                controller.limit(),
-                controller.rate_ewma_milli(),
-                1u64,
-            )
-        } else {
-            (0u64, 0u64, 0u64)
-        };
+    let inflight_limit_dynamic = state.inflight_controller.current_limit();
+    let durable_commit_rate_ewma_milli = state.inflight_controller.rate_ewma_milli();
+    let soft_reject_rate_ewma_milli = state.inflight_controller.soft_reject_rate_ewma_milli();
+    let inflight_dynamic_enabled = if state.inflight_controller.enabled() { 1 } else { 0 };
     let ack_p50 = state.ack_hist.snapshot().percentile(50.0);
     let ack_p99 = state.ack_hist.snapshot().percentile(99.0);
     let ack_p999 = state.ack_hist.snapshot().percentile(99.9);
@@ -155,12 +151,15 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_reject_queue_full_total Total rejects due to queue full\n\
          # TYPE gateway_reject_queue_full_total counter\n\
          gateway_reject_queue_full_total {}\n\
-         # HELP gateway_backpressure_soft_wal_age_total Total soft rejects due to WAL age\n\
-         # TYPE gateway_backpressure_soft_wal_age_total counter\n\
-         gateway_backpressure_soft_wal_age_total {}\n\
-         # HELP gateway_backpressure_inflight_total Total rejects due to inflight\n\
-         # TYPE gateway_backpressure_inflight_total counter\n\
-         gateway_backpressure_inflight_total {}\n\
+        # HELP gateway_backpressure_soft_wal_age_total Total soft rejects due to WAL age\n\
+        # TYPE gateway_backpressure_soft_wal_age_total counter\n\
+        gateway_backpressure_soft_wal_age_total {}\n\
+        # HELP gateway_backpressure_soft_rate_decline_total Total soft rejects due to durable rate declining\n\
+        # TYPE gateway_backpressure_soft_rate_decline_total counter\n\
+        gateway_backpressure_soft_rate_decline_total {}\n\
+        # HELP gateway_backpressure_inflight_total Total rejects due to inflight\n\
+        # TYPE gateway_backpressure_inflight_total counter\n\
+        gateway_backpressure_inflight_total {}\n\
          # HELP gateway_backpressure_wal_bytes_total Total rejects due to WAL bytes\n\
          # TYPE gateway_backpressure_wal_bytes_total counter\n\
          gateway_backpressure_wal_bytes_total {}\n\
@@ -179,6 +178,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         # HELP gateway_inflight_limit_dynamic Current dynamic inflight limit\n\
         # TYPE gateway_inflight_limit_dynamic gauge\n\
         gateway_inflight_limit_dynamic {}\n\
+        # HELP gateway_backpressure_soft_reject_rate_ewma Soft reject rate EWMA (events/sec)\n\
+        # TYPE gateway_backpressure_soft_reject_rate_ewma gauge\n\
+        gateway_backpressure_soft_reject_rate_ewma {}\n\
         # HELP gateway_durable_commit_rate_ewma Durable commit rate EWMA (events/sec)\n\
         # TYPE gateway_durable_commit_rate_ewma gauge\n\
         gateway_durable_commit_rate_ewma {}\n\
@@ -281,6 +283,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         reject_invalid_symbol,
         reject_queue_full,
         backpressure_soft_wal_age,
+        backpressure_soft_rate_decline,
         backpressure_inflight,
         backpressure_wal_bytes,
         backpressure_wal_age,
@@ -288,6 +291,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         inflight,
         inflight_dynamic_enabled,
         inflight_limit_dynamic,
+        (soft_reject_rate_ewma_milli as f64) / 1000.0,
         (durable_commit_rate_ewma_milli as f64) / 1000.0,
         durable_inflight,
         wal_age_ms,

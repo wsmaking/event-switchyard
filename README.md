@@ -828,9 +828,11 @@ bench/profiles/
   - `gateway_durable_inflight`
   - `gateway_inflight_dynamic_enabled`
   - `gateway_inflight_limit_dynamic`
+  - `gateway_backpressure_soft_reject_rate_ewma`
   - `gateway_durable_commit_rate_ewma`
   - `gateway_wal_age_ms`
   - `gateway_backpressure_soft_wal_age_total`
+  - `gateway_backpressure_soft_rate_decline_total`
   - `gateway_backpressure_inflight_total`
   - `gateway_backpressure_wal_bytes_total`
   - `gateway_backpressure_wal_age_total`
@@ -853,6 +855,9 @@ bench/profiles/
   - `BACKPRESSURE_INFLIGHT_SLEW_RATIO`
   - `BACKPRESSURE_INFLIGHT_HYSTERESIS_OFF_RATIO`
   - `BACKPRESSURE_INFLIGHT_INITIAL`
+  - `BACKPRESSURE_INFLIGHT_DECLINE_RATIO`
+  - `BACKPRESSURE_INFLIGHT_DECLINE_STREAK`
+  - `BACKPRESSURE_INFLIGHT_REJECT_BETA`
   - `BACKPRESSURE_SOFT_WAL_AGE_MS_MAX`
   - `BACKPRESSURE_WAL_BYTES_MAX`
   - `BACKPRESSURE_WAL_AGE_MS_MAX`

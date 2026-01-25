@@ -30,7 +30,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -70,10 +70,8 @@ pub(super) struct AppState {
     pub(super) audit_log: Arc<AuditLog>,
     pub(super) bus_publisher: Arc<BusPublisher>,
     pub(super) bus_mode_outbox: bool,
-    pub(super) inflight: Arc<AtomicU64>,
-    pub(super) durable_inflight: Arc<AtomicU64>,
     pub(super) backpressure: BackpressureConfig,
-    pub(super) inflight_controller: Option<InflightControllerHandle>,
+    pub(super) inflight_controller: InflightControllerHandle,
     pub(super) ack_hist: Arc<LatencyHistogram>,
     pub(super) wal_enqueue_hist: Arc<LatencyHistogram>,
     pub(super) durable_ack_hist: Arc<LatencyHistogram>,
@@ -86,6 +84,7 @@ pub(super) struct AppState {
     pub(super) reject_invalid_symbol: Arc<AtomicU64>,
     pub(super) reject_queue_full: Arc<AtomicU64>,
     pub(super) backpressure_soft_wal_age: Arc<AtomicU64>,
+    pub(super) backpressure_soft_rate_decline: Arc<AtomicU64>,
     pub(super) backpressure_inflight: Arc<AtomicU64>,
     pub(super) backpressure_wal_bytes: Arc<AtomicU64>,
     pub(super) backpressure_wal_age: Arc<AtomicU64>,
@@ -118,7 +117,7 @@ pub async fn run(
 
     let inflight_controller = crate::inflight::InflightController::spawn_from_env();
     let mut backpressure = BackpressureConfig::from_env();
-    if inflight_controller.is_some() {
+    if inflight_controller.enabled() {
         backpressure.inflight_max = None;
     }
 
@@ -136,8 +135,6 @@ pub async fn run(
         audit_log,
         bus_publisher,
         bus_mode_outbox,
-        inflight: Arc::new(AtomicU64::new(0)),
-        durable_inflight: Arc::new(AtomicU64::new(0)),
         backpressure,
         inflight_controller,
         ack_hist: Arc::new(LatencyHistogram::new()),
@@ -152,6 +149,7 @@ pub async fn run(
         reject_invalid_symbol: Arc::new(AtomicU64::new(0)),
         reject_queue_full: Arc::new(AtomicU64::new(0)),
         backpressure_soft_wal_age: Arc::new(AtomicU64::new(0)),
+        backpressure_soft_rate_decline: Arc::new(AtomicU64::new(0)),
         backpressure_inflight: Arc::new(AtomicU64::new(0)),
         backpressure_wal_bytes: Arc::new(AtomicU64::new(0)),
         backpressure_wal_age: Arc::new(AtomicU64::new(0)),
@@ -219,10 +217,7 @@ async fn run_durable_notifier(
                 state
                     .sharded_store
                     .mark_durable(order_id, &note.event.account_id, note.event.at);
-                decrement_inflight(&state.durable_inflight);
-                if let Some(controller) = &state.inflight_controller {
-                    controller.record_commit(1);
-                }
+                state.inflight_controller.on_commit(1);
                 state.sse_hub.publish_order(order_id, "order_durable", &data);
             }
             state
@@ -230,12 +225,4 @@ async fn run_durable_notifier(
                 .publish_account(&note.event.account_id, "order_durable", &data);
         }
     }
-}
-
-fn decrement_inflight(counter: &AtomicU64) {
-    let _ = counter.fetch_update(
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-        |value| Some(value.saturating_sub(1)),
-    );
 }
