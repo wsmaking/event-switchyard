@@ -586,6 +586,25 @@ python3 scripts/change_risk.py \
 
 ---
 
+## CI Gate Policy（開発/CI 共通）
+
+Gate0（PR）: 数分で終わる軽量ゲート。単体テスト/契約/簡易faultまで。  
+Gate1（main）: 回帰検知の中量ゲート。bench + 性能ゲート。  
+Gate2（nightly）: 長時間/重い検証を含む重量ゲート。
+
+```bash
+# Gate0: PR
+make check-lite
+
+# Gate1: main
+make check
+
+# Gate2: nightly/weekly
+make check-full
+```
+
+---
+
 ## Docker Compose
 
 ### 監視スタック込みフルスタック起動

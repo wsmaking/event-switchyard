@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -45,6 +45,8 @@ help:
 	@echo "  make bench       - CI/CDベンチマーク"
 	@echo "  make gate        - 性能ゲート検証"
 	@echo "  make check       - bench + gate"
+	@echo "  make check-lite  - 軽量ゲート (unit/contract/fault)"
+	@echo "  make check-full  - 重量ゲート (check + perf-gate-rust-full)"
 	@echo "  make bless       - ベースライン更新"
 	@echo "  make perf-gate-rust - Rust GatewayのPerf Gate"
 	@echo "  make perf-gate-rust-full - Perf Gate + OSサンプル付き"
@@ -251,6 +253,14 @@ gate:
 
 # bench + gate (既存)
 check: bench gate
+
+check-lite:
+	@echo "==> Running check-lite..."
+	@./gradlew :gateway:test
+
+check-full: check
+	@echo "==> Running check-full..."
+	@$(MAKE) perf-gate-rust-full
 
 # 良い結果をベースラインに昇格 (既存)
 bless:
