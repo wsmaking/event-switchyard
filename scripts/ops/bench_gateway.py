@@ -211,13 +211,14 @@ class GatewayBenchmark:
         )
 
     def bench_throughput(self, duration_sec: int = 5, concurrency: int = 50,
-                         num_accounts: int = 10) -> BenchmarkResult:
+                         num_accounts: int = 10, warmup_sec: int = 0) -> BenchmarkResult:
         """
         Throughput burst測定
         - 並列リクエストでスループット最大化
         - 複数アカウントでシャーディング効果を確認
         """
-        print(f"[Throughput] Running {duration_sec}s burst with {concurrency} workers, {num_accounts} accounts...")
+        warmup_msg = f", warmup {warmup_sec}s" if warmup_sec > 0 else ""
+        print(f"[Throughput] Running {duration_sec}s burst with {concurrency} workers, {num_accounts} accounts{warmup_msg}...")
 
         headers_by_account = {
             str(10000 + i): self._make_headers(str(10000 + i))
@@ -229,6 +230,7 @@ class GatewayBenchmark:
         latencies_us = []
         lock = __import__("threading").Lock()
         stop_flag = __import__("threading").Event()
+        start_flag = __import__("threading").Event()
 
         def worker(worker_id: int):
             conn = self._make_connection()
@@ -253,14 +255,15 @@ class GatewayBenchmark:
                     resp.read()
                     end = time.perf_counter()
 
-                    local_latencies.append((end - start) * 1_000_000)
-
-                    if resp.status == 202:
-                        local_accepted += 1
-                    else:
-                        local_rejected += 1
+                    if start_flag.is_set():
+                        local_latencies.append((end - start) * 1_000_000)
+                        if resp.status == 202:
+                            local_accepted += 1
+                        else:
+                            local_rejected += 1
                 except Exception:
-                    local_errors += 1
+                    if start_flag.is_set():
+                        local_errors += 1
                     try:
                         conn.close()
                     except:
@@ -278,10 +281,12 @@ class GatewayBenchmark:
             except:
                 pass
 
-        start_time = time.time()
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [executor.submit(worker, i) for i in range(concurrency)]
+            if warmup_sec > 0:
+                time.sleep(warmup_sec)
+            start_flag.set()
+            start_time = time.time()
             time.sleep(duration_sec)
             stop_flag.set()
             concurrent.futures.wait(futures)
@@ -311,7 +316,12 @@ class GatewayBenchmark:
         return BenchmarkResult(
             test_name="throughput",
             timestamp=datetime.utcnow().isoformat() + "Z",
-            config={"duration_sec": duration_sec, "concurrency": concurrency, "num_accounts": num_accounts},
+            config={
+                "duration_sec": duration_sec,
+                "concurrency": concurrency,
+                "num_accounts": num_accounts,
+                "warmup_sec": warmup_sec,
+            },
             metrics=metrics
         )
 
@@ -563,6 +573,8 @@ def main():
     parser.add_argument("--requests", type=int, default=1000, help="Number of requests (rtt/heavy)")
     parser.add_argument("--duration", type=int, default=10, help="Duration in seconds (throughput/sustained)")
     parser.add_argument("--concurrency", type=int, default=50, help="Concurrent workers (throughput)")
+    parser.add_argument("--warmup-rtt", type=int, default=50, help="Warmup requests (rtt)")
+    parser.add_argument("--warmup-throughput-sec", type=int, default=0, help="Warmup seconds (throughput)")
     parser.add_argument("--rps", type=int, default=1000, help="Target RPS (sustained)")
     parser.add_argument("--accounts", type=int, default=10, help="Number of accounts")
     parser.add_argument("--output", default="results", help="Output directory")
@@ -600,13 +612,14 @@ def main():
     results = []
 
     if args.test in ("rtt", "all"):
-        results.append(bench.bench_rtt(requests=args.requests))
+        results.append(bench.bench_rtt(requests=args.requests, warmup=args.warmup_rtt))
 
     if args.test in ("throughput", "all"):
         results.append(bench.bench_throughput(
             duration_sec=args.duration,
             concurrency=args.concurrency,
-            num_accounts=args.accounts
+            num_accounts=args.accounts,
+            warmup_sec=args.warmup_throughput_sec,
         ))
 
     if args.test in ("sustained", "all"):

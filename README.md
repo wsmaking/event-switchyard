@@ -124,6 +124,9 @@ scripts/ops/exchange_transport_smoke.sh sim
 | 性能ゲート | `make gate` | SLO検証（p99 < 100μs） |
 | ゲート+ベンチ | `make check` | `bench` + `gate` |
 | ベースライン更新 | `make bless` | 良い結果をベースラインに昇格 |
+| Rust PRゲート | `make perf-gate-rust-ci` | 実測 + 回帰 + strict |
+| Rust Nightly | `make perf-gate-rust-nightly` | 実測 + full report |
+| Rust baseline更新 | `make perf-gate-rust-bless` | 明示的なベースライン更新 |
 
 ---
 

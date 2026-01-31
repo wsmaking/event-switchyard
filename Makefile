@@ -50,6 +50,9 @@ help:
 	@echo "  make bless       - ベースライン更新"
 	@echo "  make perf-gate-rust - Rust GatewayのPerf Gate"
 	@echo "  make perf-gate-rust-full - Perf Gate + OSサンプル付き"
+	@echo "  make perf-gate-rust-ci - PR向け実測ゲート (strict + regression)"
+	@echo "  make perf-gate-rust-nightly - 夜間向け実測ゲート (full report)"
+	@echo "  make perf-gate-rust-bless - Rust Perf Gateのベースライン更新"
 	@echo ""
 	@echo "Rust Gateway (rootから実行):"
 	@echo "  make rust-check  - gateway-rust の cargo check"
@@ -193,6 +196,18 @@ perf-gate-rust:
 # Rust Gateway Perf Gate (full report)
 perf-gate-rust-full:
 	@scripts/ops/perf_gate_rust_full.sh
+
+# Rust Perf Gate (PR CI向け)
+perf-gate-rust-ci:
+	@STRICT=1 BASELINE_REGRESSION=0.03 scripts/ops/perf_gate_rust.sh
+
+# Rust Perf Gate (Nightly向け)
+perf-gate-rust-nightly:
+	@STRICT=1 BASELINE_REGRESSION=0.03 scripts/ops/perf_gate_rust_full.sh
+
+# Rust Perf Gate baseline update (明示的に実行)
+perf-gate-rust-bless:
+	@UPDATE_BASELINE=1 scripts/ops/perf_gate_rust_full.sh
 
 # Rust Gateway (rootから実行)
 rust-check:

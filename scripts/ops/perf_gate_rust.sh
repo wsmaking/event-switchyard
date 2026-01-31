@@ -9,11 +9,14 @@ MODE="${MODE:-balanced}" # latency | throughput | balanced
 BASELINE_PATH="${BASELINE_PATH:-baseline/perf_gate_rust.json}"
 BASELINE_REGRESSION="${BASELINE_REGRESSION:-0.05}"
 UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
+STRICT="${STRICT:-0}"
 
 REQUESTS_DEFAULT=2000
 DURATION_DEFAULT=10
 CONCURRENCY_DEFAULT=200
 THREADS_DEFAULT=8
+WARMUP_RTT_DEFAULT=100
+WARMUP_THROUGHPUT_DEFAULT=2
 
 case "${MODE}" in
   latency)
@@ -45,6 +48,12 @@ if [[ -z "${CONCURRENCY+x}" ]]; then
 fi
 if [[ -z "${THREADS+x}" ]]; then
   THREADS="${THREADS_DEFAULT}"
+fi
+if [[ -z "${WARMUP_RTT+x}" ]]; then
+  WARMUP_RTT="${WARMUP_RTT_DEFAULT}"
+fi
+if [[ -z "${WARMUP_THROUGHPUT_SEC+x}" ]]; then
+  WARMUP_THROUGHPUT_SEC="${WARMUP_THROUGHPUT_DEFAULT}"
 fi
 
 cd "${ROOT_DIR}"
@@ -102,6 +111,8 @@ PERF_GATE_ARGS=(
   --requests "${REQUESTS}"
   --duration "${DURATION}"
   --concurrency "${CONCURRENCY}"
+  --warmup-rtt "${WARMUP_RTT}"
+  --warmup-throughput-sec "${WARMUP_THROUGHPUT_SEC}"
   --wrk-input "${WRK_OUTPUT}"
 )
 if [[ -f "${BASELINE_PATH}" ]]; then
@@ -109,6 +120,9 @@ if [[ -f "${BASELINE_PATH}" ]]; then
 fi
 if [[ "${UPDATE_BASELINE}" == "1" ]]; then
   PERF_GATE_ARGS+=( --update-baseline "${BASELINE_PATH}" )
+fi
+if [[ "${STRICT}" == "1" ]]; then
+  PERF_GATE_ARGS+=( --strict )
 fi
 
 python3 scripts/ops/perf_gate.py "${PERF_GATE_ARGS[@]}"
