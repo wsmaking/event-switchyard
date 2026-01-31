@@ -1,0 +1,114 @@
+name: event-switchyard-rust
+
+x-app: &app
+  image: event-switchyard-app:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  pull_policy: never
+
+x-java-env: &java_env
+  JAVA_TOOL_OPTIONS: >-
+    --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+    --add-opens=java.base/java.lang=ALL-UNNAMED
+    --add-opens=java.base/java.nio=ALL-UNNAMED
+    --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.1
+    restart: unless-stopped
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  topic-init:
+    <<: *app
+    depends_on: [kafka]
+    restart: "no"
+    command: ["java","-cp","app-all.jar","org.example.TopicInit"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      TOPIC_NAME: events
+      PARTITIONS: "1"
+      REPLICATION: "1"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: backoffice
+      POSTGRES_USER: backoffice
+      POSTGRES_PASSWORD: backoffice
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  backoffice-migrate:
+    image: flyway/flyway:10-alpine
+    restart: "no"
+    depends_on: [postgres]
+    command:
+      - "-url=jdbc:postgresql://postgres:5432/backoffice"
+      - "-user=backoffice"
+      - "-password=backoffice"
+      - "-baselineOnMigrate=true"
+      - "-connectRetries=60"
+      - "migrate"
+    volumes:
+      - ./backoffice/src/main/resources/db/migration:/flyway/sql:ro
+
+  backoffice:
+    <<: *app
+    depends_on: [kafka, topic-init, postgres]
+    command: ["java","-jar","backoffice-all.jar"]
+    environment:
+      <<: *java_env
+      BACKOFFICE_PORT: "8082"
+      BACKOFFICE_ENABLE: "1"
+      BACKOFFICE_DB_ENABLE: "1"
+      BACKOFFICE_DB_URL: "jdbc:postgresql://postgres:5432/backoffice"
+      BACKOFFICE_DB_USER: "backoffice"
+      BACKOFFICE_DB_PASSWORD: "backoffice"
+      JWT_HS256_SECRET: "dev-secret-change-me"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC: "events"
+    ports:
+      - "8082:8082"
+
+  gateway-rust:
+    image: event-switchyard-gateway-rust:latest
+    build:
+      context: .
+      dockerfile: gateway-rust/Dockerfile
+    depends_on: [kafka, topic-init]
+    environment:
+      GATEWAY_PORT: "8081"
+      JWT_HS256_SECRET: "dev-secret-change-me"
+      BUS_MODE: "outbox"
+      KAFKA_ENABLE: "1"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC: "events"
+      FASTPATH_DRAIN_ENABLE: "1"
+      FASTPATH_DRAIN_WORKERS: "2"
+      GATEWAY_AUDIT_PATH: "/var/lib/gateway/audit.log"
+      OUTBOX_OFFSET_PATH: "/var/lib/gateway/outbox.offset"
+    ports:
+      - "8081:8081"
+    volumes:
+      - gateway-rust-data:/var/lib/gateway
+
+volumes:
+  postgres-data:
+  gateway-rust-data:
