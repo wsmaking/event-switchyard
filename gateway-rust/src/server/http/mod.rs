@@ -47,6 +47,7 @@ use crate::inflight::InflightControllerHandle;
 use crate::sse::SseHub;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
 use gateway_core::LatencyHistogram;
+use std::path::PathBuf;
 
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
@@ -68,6 +69,7 @@ pub(super) struct AppState {
     pub(super) sse_hub: Arc<SseHub>,
     pub(super) order_id_seq: Arc<AtomicU64>,
     pub(super) audit_log: Arc<AuditLog>,
+    pub(super) audit_read_path: Arc<PathBuf>,
     pub(super) bus_publisher: Arc<BusPublisher>,
     pub(super) bus_mode_outbox: bool,
     pub(super) backpressure: BackpressureConfig,
@@ -121,6 +123,23 @@ pub async fn run(
         backpressure.inflight_max = None;
     }
 
+    let audit_read_path = {
+        let configured = std::env::var("AUDIT_LOG_PATH").ok().map(PathBuf::from);
+        if let Some(path) = configured {
+            path
+        } else if std::env::var("AUDIT_MIRROR_ENABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            PathBuf::from(
+                std::env::var("AUDIT_MIRROR_PATH")
+                    .unwrap_or_else(|_| "var/gateway/audit.mirror.log".into()),
+            )
+        } else {
+            audit_log.path().to_path_buf()
+        }
+    };
+
     let state = AppState {
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
@@ -133,6 +152,7 @@ pub async fn run(
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,
+        audit_read_path: Arc::new(audit_read_path),
         bus_publisher,
         bus_mode_outbox,
         backpressure,

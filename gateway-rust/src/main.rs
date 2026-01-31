@@ -20,6 +20,7 @@
 
 mod auth;
 mod audit;
+mod audit_mirror;
 mod backpressure;
 mod inflight;
 mod bus;
@@ -56,13 +57,28 @@ async fn main() -> anyhow::Result<()> {
     let order_store = Arc::new(store::OrderStore::new());
     info!("OrderStore initialized");
 
-    let audit_path = std::env::var("GATEWAY_AUDIT_PATH").unwrap_or_else(|_| "var/gateway/audit.log".into());
-    let audit_log = Arc::new(audit::AuditLog::new(audit_path)?);
-    info!("AuditLog initialized");
+    let wal_path = std::env::var("GATEWAY_WAL_PATH")
+        .or_else(|_| std::env::var("GATEWAY_AUDIT_PATH"))
+        .unwrap_or_else(|_| "var/gateway/audit.log".into());
+    let audit_log = Arc::new(audit::AuditLog::new(wal_path)?);
+    info!("WAL initialized");
     let (durable_tx, durable_rx) = tokio::sync::mpsc::unbounded_channel();
     audit_log
         .clone()
         .start_async_writer(Some(durable_tx));
+
+    let mirror_enabled = std::env::var("AUDIT_MIRROR_ENABLE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if mirror_enabled {
+        let mirror_path = std::env::var("AUDIT_LOG_PATH")
+            .or_else(|_| std::env::var("AUDIT_MIRROR_PATH"))
+            .unwrap_or_else(|_| "var/gateway/audit.mirror.log".into());
+        let mirror_offset = std::env::var("AUDIT_MIRROR_OFFSET_PATH")
+            .unwrap_or_else(|_| "var/gateway/audit.mirror.offset".into());
+        audit_mirror::AuditMirrorWorker::new(audit_log.path(), mirror_path, mirror_offset).start();
+        info!("Audit mirror worker started");
+    }
 
     let bus_publisher = Arc::new(bus::BusPublisher::from_env()?);
     info!("BusPublisher initialized (enabled={})", bus_publisher.is_enabled());

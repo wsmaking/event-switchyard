@@ -63,3 +63,4 @@ gateway-core/target/
 gateway/src/main/resources/native/
 tools/async-profiler/
 gateway-rust/target/
+gateway-rust/var/

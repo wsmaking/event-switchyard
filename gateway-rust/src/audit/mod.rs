@@ -269,45 +269,7 @@ impl AuditLog {
         since_ms: Option<u64>,
         after_ms: Option<u64>,
     ) -> Vec<AuditEvent> {
-        let limit = limit.clamp(1, 1000);
-        let file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(_) => return Vec::new(),
-        };
-        let reader = BufReader::new(file);
-        let mut bucket: VecDeque<AuditEvent> = VecDeque::with_capacity(limit);
-        for line in reader.lines().flatten() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let ev: AuditEvent = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if ev.account_id != account_id {
-                continue;
-            }
-            if let Some(order_id) = order_id {
-                if ev.order_id.as_deref() != Some(order_id) {
-                    continue;
-                }
-            }
-            if let Some(since) = since_ms {
-                if ev.at < since {
-                    continue;
-                }
-            }
-            if let Some(after) = after_ms {
-                if ev.at <= after {
-                    continue;
-                }
-            }
-            bucket.push_back(ev);
-            while bucket.len() > limit {
-                bucket.pop_front();
-            }
-        }
-        bucket.into_iter().collect()
+        read_events_from_path(&self.path, account_id, order_id, limit, since_ms, after_ms)
     }
 
     pub fn path(&self) -> &Path {
@@ -925,6 +887,55 @@ fn disk_free_pct(path: &Path) -> Option<f64> {
 #[cfg(not(unix))]
 fn disk_free_pct(_path: &Path) -> Option<f64> {
     None
+}
+
+pub fn read_events_from_path(
+    path: impl AsRef<Path>,
+    account_id: &str,
+    order_id: Option<&str>,
+    limit: usize,
+    since_ms: Option<u64>,
+    after_ms: Option<u64>,
+) -> Vec<AuditEvent> {
+    let limit = limit.clamp(1, 1000);
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = BufReader::new(file);
+    let mut bucket: VecDeque<AuditEvent> = VecDeque::with_capacity(limit);
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ev: AuditEvent = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if ev.account_id != account_id {
+            continue;
+        }
+        if let Some(order_id) = order_id {
+            if ev.order_id.as_deref() != Some(order_id) {
+                continue;
+            }
+        }
+        if let Some(since) = since_ms {
+            if ev.at < since {
+                continue;
+            }
+        }
+        if let Some(after) = after_ms {
+            if ev.at <= after {
+                continue;
+            }
+        }
+        bucket.push_back(ev);
+        while bucket.len() > limit {
+            bucket.pop_front();
+        }
+    }
+    bucket.into_iter().collect()
 }
 
 pub fn parse_time_param(raw: &str) -> Option<u64> {

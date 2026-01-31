@@ -801,6 +801,54 @@ bench/profiles/
 - **処理**:
   - JSONL追記、ハッシュチェーン、検証API
   - WAL enqueue / durable ACK の計測（t0/t1/t2）
+  - 監査ミラーは WAL から非同期再生成（`AUDIT_MIRROR_ENABLE=1`）
+  - WAL 出力先: `GATEWAY_WAL_PATH`（旧 `GATEWAY_AUDIT_PATH` 互換）
+  - 監査ログ出力先: `AUDIT_LOG_PATH`（ミラーの書き込み先）
+  - ミラーのhash/anchor: `AUDIT_MIRROR_HASH_PATH` / `AUDIT_MIRROR_ANCHOR_PATH`
+  - ミラーは起動時に最新アンカーを再生成（再起動時の整合維持）
+
+### 監査ミラーの動作確認
+
+目的: WAL から監査ログ（mirror）を再生成し、hash/anchor が更新されることを確認。
+
+```bash
+# 1) 起動（別ターミナル）
+AUDIT_MIRROR_ENABLE=1 \
+AUDIT_HMAC_KEY=secret123 \
+scripts/ops/run_dynamic_inflight.sh
+```
+
+```bash
+# 2) 注文投入（別ターミナル）
+TOKEN=$(JWT_SECRET=secret123 ACCOUNT_ID=1 python3 - <<'PY'
+import os, json, base64, hmac, hashlib, time
+secret = os.environ["JWT_SECRET"].encode()
+header = {"alg":"HS256","typ":"JWT"}
+payload = {"sub":os.environ["ACCOUNT_ID"],"iat":int(time.time())-10,"exp":int(time.time())+3600}
+def b64url(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+h = f"{b64url(json.dumps(header,separators=(',',':')).encode())}.{b64url(json.dumps(payload,separators=(',',':')).encode())}"
+sig = hmac.new(secret, h.encode(), hashlib.sha256).digest()
+print(f"{h}.{b64url(sig)}")
+PY
+)
+
+curl -s -X POST http://127.0.0.1:8082/orders \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: test-mirror" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"BTC","side":"BUY","type":"LIMIT","qty":1,"price":100}'
+```
+
+```bash
+# 3) 生成物を確認
+ls -l gateway-rust/var/gateway/audit.mirror.log \
+      gateway-rust/var/gateway/audit.mirror.log.hash \
+      gateway-rust/var/gateway/audit.mirror.log.anchor
+
+tail -n 2 gateway-rust/var/gateway/audit.mirror.log
+tail -n 2 gateway-rust/var/gateway/audit.mirror.log.hash
+cat gateway-rust/var/gateway/audit.mirror.log.anchor
+```
 
 #### [gateway-rust/src/outbox/mod.rs](gateway-rust/src/outbox/mod.rs)
 - **役割**: 監査ログ → Kafka 送信（Outbox）
@@ -1565,7 +1613,3 @@ docker run -d \
 MIT
 
 ---
-
-**更新日**: 2025-11-03
-**ステータス**: ✅ 本番投入準備100%完了 - デプロイ可能
-**作成者**: Claude (Anthropic) - Phase 1-8実装完了

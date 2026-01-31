@@ -1,4 +1,4 @@
-//! 監査API（正本の読み出し口）:
+//! 監査API（監査ログの読み出し口）:
 //! - 役割: 監査ログを「閲覧/検証/アンカー取得」するための読み取り専用の入口。
 //! - 位置: 注文処理の結果を後から追跡・検証するための運用/調査パス。
 //! - 内包: 注文/アカウント別イベント取得 + 監査ログ検証/アンカー取得。
@@ -94,7 +94,8 @@ pub(super) async fn handle_order_events(
     let since_ms = params.get("since").and_then(|v| audit::parse_time_param(v));
     let after_ms = params.get("after").and_then(|v| audit::parse_time_param(v));
 
-    let events = state.audit_log.read_events(
+    let events = audit::read_events_from_path(
+        state.audit_read_path.as_ref(),
         &order.account_id,
         Some(&order_id),
         limit,
@@ -149,7 +150,8 @@ pub(super) async fn handle_account_events(
     let since_ms = params.get("since").and_then(|v| audit::parse_time_param(v));
     let after_ms = params.get("after").and_then(|v| audit::parse_time_param(v));
 
-    let events = state.audit_log.read_events(
+    let events = audit::read_events_from_path(
+        state.audit_read_path.as_ref(),
         &account_id,
         None,
         limit,
