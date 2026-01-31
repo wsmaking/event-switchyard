@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 OUT="${OUT:-var/results/pr.json}"
 MODE="${MODE:-quick}"
