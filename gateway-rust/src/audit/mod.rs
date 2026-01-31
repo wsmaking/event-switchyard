@@ -952,3 +952,62 @@ pub fn parse_time_param(raw: &str) -> Option<u64> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn set_env(key: &str, value: &str) -> Option<String> {
+        let prev = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        prev
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(v) = value {
+            unsafe {
+                std::env::set_var(key, v);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_append_and_read_events() {
+        let prev_async = set_env("AUDIT_ASYNC_WAL", "0");
+        let prev_fsync = set_env("AUDIT_FDATASYNC", "0");
+
+        let dir = std::env::temp_dir().join(format!(
+            "audit_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.log");
+
+        let log = AuditLog::new(&path).unwrap();
+        let event = AuditEvent {
+            event_type: "OrderAccepted".to_string(),
+            at: now_millis(),
+            account_id: "acct-1".to_string(),
+            order_id: Some("ord-1".to_string()),
+            data: json!({"status":"ACCEPTED"}),
+        };
+        log.append(event.clone());
+
+        let events = log.read_events("acct-1", Some("ord-1"), 10, None, None);
+        assert_eq!(1, events.len());
+        assert_eq!(event.event_type, events[0].event_type);
+
+        restore_env("AUDIT_ASYNC_WAL", prev_async);
+        restore_env("AUDIT_FDATASYNC", prev_fsync);
+    }
+}

@@ -227,4 +227,27 @@ mod tests {
         // 購読者がいなくてもパニックしない
         hub.publish_order("ord_1", "order_update", r#"{"status":"FILLED"}"#);
     }
+
+    #[test]
+    fn test_replay_resync_required() {
+        let hub = SseHub::with_capacity(10, 2);
+        hub.publish_order("ord_1", "order_update", r#"{"status":"ACCEPTED"}"#);
+        hub.publish_order("ord_1", "order_update", r#"{"status":"SENT"}"#);
+        hub.publish_order("ord_1", "order_update", r#"{"status":"FILLED"}"#);
+
+        let res = hub.replay_order("ord_1", Some(1));
+        assert!(res.resync_required.is_some());
+    }
+
+    #[test]
+    fn test_replay_from_id() {
+        let hub = SseHub::with_capacity(10, 10);
+        hub.publish_account("acct_1", "account_update", r#"{"seq":1}"#);
+        hub.publish_account("acct_1", "account_update", r#"{"seq":2}"#);
+        hub.publish_account("acct_1", "account_update", r#"{"seq":3}"#);
+
+        let res = hub.replay_account("acct_1", Some(2));
+        assert_eq!(1, res.events.len());
+        assert_eq!("account_update", res.events[0].event_type);
+    }
 }
