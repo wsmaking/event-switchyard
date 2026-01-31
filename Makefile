@@ -271,11 +271,12 @@ check: bench gate
 
 check-lite:
 	@echo "==> Running check-lite..."
-	@./gradlew :gateway:test
+	@./gradlew :gateway:test :backoffice:test
 
 check-full: check
 	@echo "==> Running check-full..."
 	@$(MAKE) perf-gate-rust-full
+	@scripts/ops/gate2_e2e.sh
 
 # 良い結果をベースラインに昇格 (既存)
 bless:

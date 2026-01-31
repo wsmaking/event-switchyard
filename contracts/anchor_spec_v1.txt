@@ -166,6 +166,9 @@ Event Switchyard — Implementation Anchor Spec v1
   - type 一覧（現状）:
       - OrderAccepted / OrderSent / CancelRequested / CancelSent / ExecutionReport / OrderUpdated
 
+API schema（現状）
+  - CreateOrderRequest: contracts/order_request_v1.schema.json
+
 -----------------------------------------------------------------------------
 5) BackOffice（簡易 consumer の現状） + 今後のアンカー
 

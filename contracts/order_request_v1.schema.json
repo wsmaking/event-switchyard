@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/event-switchyard/contracts/order_request_v1.schema.json",
+  "title": "CreateOrderRequest",
+  "type": "object",
+  "required": ["symbol", "side", "type", "qty"],
+  "properties": {
+    "symbol": { "type": "string", "minLength": 1 },
+    "side": { "type": "string", "enum": ["BUY", "SELL"] },
+    "type": { "type": "string", "enum": ["LIMIT", "MARKET"] },
+    "qty": { "type": "integer", "minimum": 1 },
+    "price": { "type": ["integer", "null"], "minimum": 0 },
+    "timeInForce": { "type": "string", "enum": ["GTC", "IOC", "FOK"] },
+    "expireAt": { "type": ["string", "null"], "format": "date-time" },
+    "clientOrderId": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}
