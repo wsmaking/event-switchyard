@@ -1,0 +1,54 @@
+name: perf-rust-baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name for baseline update PR"
+        required: false
+        default: "perf/baseline-update"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-baseline:
+    runs-on: [self-hosted, linux, x64, perf]
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      RUSTFLAGS: "-C target-cpu=native"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev wrk
+
+      - name: Update Rust perf baseline (strict)
+        run: STRICT=1 BASELINE_REGRESSION=0.03 make perf-gate-rust-bless
+
+      - name: Create baseline PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update perf_gate_rust baseline"
+          title: "chore: update perf_gate_rust baseline"
+          branch: ${{ inputs.branch }}-${{ github.run_id }}
+          add-paths: |
+            baseline/perf_gate_rust.json

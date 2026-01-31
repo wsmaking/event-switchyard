@@ -131,7 +131,9 @@ def run_benchmark(
     port: int = 8081,
     requests: int = 1000,
     duration: int = 5,
-    concurrency: int = 50
+    concurrency: int = 50,
+    warmup_rtt: int = 50,
+    warmup_throughput_sec: int = 0
 ) -> Optional[Dict]:
     """
     bench_gateway.py を実行してベンチマーク結果を取得
@@ -152,6 +154,8 @@ def run_benchmark(
         "--requests", str(requests),
         "--duration", str(duration),
         "--concurrency", str(concurrency),
+        "--warmup-rtt", str(warmup_rtt),
+        "--warmup-throughput-sec", str(warmup_throughput_sec),
         "--output", str(script_dir / "results"),
     ]
 
@@ -519,6 +523,9 @@ def main():
     parser.add_argument("--requests", type=int, default=1000, help="Number of requests for RTT")
     parser.add_argument("--duration", type=int, default=5, help="Duration for throughput test")
     parser.add_argument("--concurrency", type=int, default=50, help="Concurrent workers")
+    parser.add_argument("--warmup-rtt", type=int, default=50, help="Warmup requests for RTT")
+    parser.add_argument("--warmup-throughput-sec", type=int, default=0,
+                        help="Warmup seconds for throughput test")
 
     # 閾値オプション
     parser.add_argument("--p50", type=float, help=f"p50 threshold (µs, default: {DEFAULT_THRESHOLDS['p50_us']})")
@@ -556,7 +563,9 @@ def main():
             port=args.port,
             requests=args.requests,
             duration=args.duration,
-            concurrency=args.concurrency
+            concurrency=args.concurrency,
+            warmup_rtt=args.warmup_rtt,
+            warmup_throughput_sec=args.warmup_throughput_sec
         )
     else:
         results = load_results(args.input)

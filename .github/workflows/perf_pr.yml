@@ -1,0 +1,37 @@
+name: perf-rust-pr
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  perf-gate:
+    runs-on: [self-hosted, linux, x64, perf]
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      RUSTFLAGS: "-C target-cpu=native"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev wrk
+
+      - name: Run Rust perf gate (PR)
+        run: make perf-gate-rust-ci
