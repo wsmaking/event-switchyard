@@ -39,10 +39,17 @@ fi
 echo "==> Running gateway-backoffice e2e"
 scripts/ops/gateway_backoffice_e2e.sh
 
+echo "==> Long-run stability test"
+JWT_HS256_SECRET="${JWT_HS256_SECRET:-dev-secret-change-me}"
+GATEWAY_HOST="localhost" \
+GATEWAY_PORT="8081" \
+JWT_HS256_SECRET="${JWT_HS256_SECRET}" \
+  scripts/ops/gate2_longrun.sh
+
 echo "==> Fault injection: stop kafka and verify accept"
 compose --profile gateway stop kafka
 
-JWT_SECRET="${JWT_HS256_SECRET:-dev-secret-change-me}"
+JWT_SECRET="${JWT_HS256_SECRET}"
 ACCOUNT_ID="${ACCOUNT_ID:-acct_demo}"
 export JWT_SECRET ACCOUNT_ID
 token="$(

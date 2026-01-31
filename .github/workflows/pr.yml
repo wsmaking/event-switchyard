@@ -12,5 +12,10 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python deps
+        run: pip install -r requirements.txt
       - name: Gate0 (check-lite)
         run: make check-lite

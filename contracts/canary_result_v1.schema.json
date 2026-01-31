@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/event-switchyard/contracts/canary_result_v1.schema.json",
+  "title": "Quick Canary Result",
+  "type": "object",
+  "required": ["version", "timestamp", "metrics"],
+  "properties": {
+    "version": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "required": ["fast_path", "summary"],
+      "properties": {
+        "fast_path": {
+          "type": "object",
+          "required": ["process_latency_us", "drop_count"],
+          "properties": {
+            "process_latency_us": {
+              "type": "object",
+              "required": ["p50", "p99", "p999"],
+              "properties": {
+                "p50": { "type": "number" },
+                "p99": { "type": "number" },
+                "p999": { "type": "number" }
+              },
+              "additionalProperties": true
+            },
+            "drop_count": { "type": "integer" }
+          },
+          "additionalProperties": true
+        },
+        "summary": {
+          "type": "object",
+          "required": ["tail_ratio", "throughput_events_per_sec", "error_rate_percent"],
+          "properties": {
+            "tail_ratio": { "type": "number" },
+            "throughput_events_per_sec": { "type": "number" },
+            "error_rate_percent": { "type": "number" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -17,13 +17,13 @@ URL="http://${HOST}:${PORT}/orders"
 
 if [[ -z "${JWT_TOKEN:-}" ]]; then
   JWT_TOKEN="$(
-    python3 - <<'PY'
+    JWT_SECRET="${JWT_SECRET}" ACCOUNT_ID="${ACCOUNT_ID}" python3 - <<'PY'
 import hmac, hashlib, base64, json, os, time
 secret = os.environ.get("JWT_SECRET", "secret123")
 account_id = os.environ.get("ACCOUNT_ID", "12345")
 now = int(time.time())
 header = {"alg": "HS256", "typ": "JWT"}
-payload = {"sub": f"user_{account_id}", "account_id": account_id, "iat": now, "exp": now + 86400}
+payload = {"sub": account_id, "accountId": account_id, "iat": now, "exp": now + 86400}
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 h = b64url(json.dumps(header).encode())
@@ -41,12 +41,12 @@ echo "  url=${URL}"
 echo "  duration=${DURATION}s threads=${THREADS} connections=${CONNECTIONS} latency=${LATENCY}"
 echo "  accountId=${ACCOUNT_ID} clientIdLen=${CLIENT_ID_LEN}"
 
-JWT_SECRET="${JWT_SECRET}" \
-ACCOUNT_ID="${ACCOUNT_ID}" \
-JWT_TOKEN="${JWT_TOKEN}" \
-CLIENT_ID_LEN="${CLIENT_ID_LEN}" \
 WRK_ARGS=( -t "${THREADS}" -c "${CONNECTIONS}" -d "${DURATION}s" -s "${LUA_SCRIPT}" )
 if [[ "${LATENCY}" == "1" ]]; then
   WRK_ARGS+=( --latency )
 fi
+JWT_SECRET="${JWT_SECRET}" \
+ACCOUNT_ID="${ACCOUNT_ID}" \
+JWT_TOKEN="${JWT_TOKEN}" \
+CLIENT_ID_LEN="${CLIENT_ID_LEN}" \
 wrk "${WRK_ARGS[@]}" "${URL}"

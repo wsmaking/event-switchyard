@@ -359,6 +359,9 @@ class GatewayBenchmark:
 
             req_start = time.perf_counter()
             try:
+                body = self._make_order_payload(
+                    client_order_id=f"sust_{account_id}_{time.time_ns()}_{request_count}"
+                )
                 conn.request("POST", "/orders", body=body, headers=headers)
                 resp = conn.getresponse()
                 resp.read()

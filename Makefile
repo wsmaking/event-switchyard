@@ -44,8 +44,8 @@ help:
 	@echo "CI/CD用 (既存):"
 	@echo "  make bench       - CI/CDベンチマーク"
 	@echo "  make gate        - 性能ゲート検証"
-	@echo "  make check       - bench + gate"
-	@echo "  make check-lite  - 軽量ゲート (unit/contract/fault)"
+	@echo "  make check       - gate1 (bench + gate + change risk)"
+	@echo "  make check-lite  - 軽量ゲート (unit/contract/fault/slo)"
 	@echo "  make check-full  - 重量ゲート (check + perf-gate-rust-full)"
 	@echo "  make bless       - ベースライン更新"
 	@echo "  make perf-gate-rust - Rust GatewayのPerf Gate"
@@ -267,11 +267,13 @@ gate:
 	tools/gate/run.sh $(OUT)
 
 # bench + gate (既存)
-check: bench gate
+check:
+	@scripts/ops/gate1_check.sh
 
 check-lite:
 	@echo "==> Running check-lite..."
-	@./gradlew :gateway:test :backoffice:test
+	@./gradlew :gateway:test :backoffice:test :app:test
+	@scripts/ops/check_lite.sh
 
 check-full: check
 	@echo "==> Running check-full..."
