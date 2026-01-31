@@ -58,6 +58,10 @@ fn record_wal_enqueue(state: &AppState, start_ns: u64, timings: audit::AuditAppe
     }
 }
 
+fn build_request_id(accept_seq: Option<u64>) -> Option<String> {
+    accept_seq.map(|seq| format!("req_{}", seq))
+}
+
 /// 注文受付（POST /orders）
 /// - JWT検証 → Idempotency-Key → FastPath → 監査/Bus/Snapshot 保存
 pub(super) async fn handle_order(
@@ -205,10 +209,17 @@ pub(super) async fn handle_order(
         return match outcome {
             crate::store::IdempotencyOutcome::Existing(existing) => {
                 state.idempotency_hits.fetch_add(1, Ordering::Relaxed);
+                let accept_seq = state.order_id_map.to_internal(&existing.order_id);
+                let request_id = build_request_id(accept_seq);
                 record_ack(&state, t0);
                 Ok((
                     StatusCode::ACCEPTED,
-                    Json(OrderResponse::accepted(&existing.order_id)),
+                    Json(OrderResponse::accepted(
+                        &existing.order_id,
+                        accept_seq,
+                        request_id,
+                        existing.client_order_id.clone(),
+                    )),
                 ))
             }
             crate::store::IdempotencyOutcome::Created(snapshot) => {
@@ -276,7 +287,17 @@ pub(super) async fn handle_order(
                     });
                 }
                 record_ack(&state, t0);
-                Ok((StatusCode::ACCEPTED, Json(OrderResponse::accepted(&snapshot.order_id))))
+                let accept_seq = Some(internal_order_id);
+                let request_id = build_request_id(accept_seq);
+                Ok((
+                    StatusCode::ACCEPTED,
+                    Json(OrderResponse::accepted(
+                        &snapshot.order_id,
+                        accept_seq,
+                        request_id,
+                        snapshot.client_order_id.clone(),
+                    )),
+                ))
             }
             crate::store::IdempotencyOutcome::NotCreated => {
                 let (status, response) = match process_result {
@@ -412,7 +433,15 @@ pub(super) async fn handle_order(
                 });
             }
 
-            (StatusCode::ACCEPTED, OrderResponse::accepted(&order_id))
+            (
+                StatusCode::ACCEPTED,
+                OrderResponse::accepted(
+                    &order_id,
+                    Some(internal_order_id),
+                    build_request_id(Some(internal_order_id)),
+                    req.client_order_id.clone(),
+                ),
+            )
         }
         ProcessResult::RejectedMaxQty => (
             StatusCode::UNPROCESSABLE_ENTITY,

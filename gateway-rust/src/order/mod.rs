@@ -74,6 +74,15 @@ impl OrderRequest {
 pub struct OrderResponse {
     /// 注文ID (文字列形式)
     pub order_id: String,
+    /// 受理シーケンス（内部IDベース）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_seq: Option<u64>,
+    /// サーバー発行のリクエストID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// クライアント注文ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
     /// ステータス: "ACCEPTED", "REJECTED"
     pub status: String,
     /// 拒否理由（REJECTEDの場合のみ）
@@ -82,9 +91,17 @@ pub struct OrderResponse {
 }
 
 impl OrderResponse {
-    pub fn accepted(order_id: &str) -> Self {
+    pub fn accepted(
+        order_id: &str,
+        accept_seq: Option<u64>,
+        request_id: Option<String>,
+        client_order_id: Option<String>,
+    ) -> Self {
         Self {
             order_id: order_id.to_string(),
+            accept_seq,
+            request_id,
+            client_order_id,
             status: "ACCEPTED".into(),
             reason: None,
         }
@@ -93,6 +110,9 @@ impl OrderResponse {
     pub fn rejected(reason: &str) -> Self {
         Self {
             order_id: String::new(),
+            accept_seq: None,
+            request_id: None,
+            client_order_id: None,
             status: "REJECTED".into(),
             reason: Some(reason.into()),
         }

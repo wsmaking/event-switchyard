@@ -763,7 +763,7 @@ bench/profiles/
 #### [gateway-rust/src/server/http/orders.rs](gateway-rust/src/server/http/orders.rs)
 - **役割**: 注文受理・取得・キャンセルのHTTPハンドラ
 - **処理**:
-  - POST /orders → FastPathEngine → 202
+  - POST /orders → FastPathEngine → 202（`acceptSeq` / `requestId` を返す）
   - GET /orders/{id} → 注文状態
   - GET /orders/client/{client_order_id} → PENDING/DURABLE/REJECTED/UNKNOWN
   - POST /orders/{id}/cancel → キャンセル要求
