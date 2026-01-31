@@ -594,6 +594,8 @@ python3 scripts/change_risk.py \
 Gate0（PR）: 数分で終わる軽量ゲート。単体テスト/契約/簡易faultまで。  
 Gate1（main）: 回帰検知の中量ゲート。bench + 性能ゲート。  
 Gate2（nightly）: 長時間/重い検証を含む重量ゲート。
+Gate2 の性能ゲートは専用ランナーで固定し、`RUNNER_LABEL` に紐づくベースラインを比較する。
+個人開発では専用ランナーが用意できるまで nightly のスケジュール実行は停止し、手動実行に留める。
 
 ```bash
 # Gate0: PR
@@ -605,6 +607,10 @@ make check
 # Gate2: nightly/weekly
 make check-full
 ```
+
+補足:
+- Gate2 の性能ゲートは `RUNNER_LABEL` ごとのベースラインを使用する（例: `baseline/perf_gate_rust_perf-gate-rust.json`）。
+- ベースライン更新は同一ランナーで `make perf-gate-rust-bless` を実行する。
 
 ---
 

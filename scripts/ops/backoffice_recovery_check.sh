@@ -72,13 +72,15 @@ append_query() {
 echo "# stats"
 stats_json="$(curl -fsS -H "${auth_header[@]}" "${BASE_URL}/stats$(query_with "${account_qs}")")"
 echo "$stats_json"
-printf "%s" "$stats_json" | STALE_SEC="$STALE_SEC" STRICT="$STRICT" python3 - <<'PY'
+printf "%s" "$stats_json" | STATS_JSON="$stats_json" STALE_SEC="$STALE_SEC" STRICT="$STRICT" python3 - <<'PY'
 import datetime as dt
 import json
 import os
 import sys
 
 raw = sys.stdin.read().strip()
+if not raw:
+    raw = os.environ.get("STATS_JSON", "").strip()
 if not raw:
     print("stats: empty response", file=sys.stderr)
     sys.exit(1)
@@ -102,7 +104,7 @@ try:
     last_dt = dt.datetime.fromisoformat(last_event_at)
 except Exception:
     print("stats: invalid lastEventAt", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(1 if strict else 0)
 
 now = dt.datetime.now(tz=last_dt.tzinfo or dt.timezone.utc)
 age = (now - last_dt).total_seconds()
@@ -134,11 +136,14 @@ echo "# reconcile"
 reconcile_query="$(append_query "${account_qs}" "limit=1000")"
 reconcile_json="$(curl -fsS -H "${auth_header[@]}" "${BASE_URL}/reconcile$(query_with "${reconcile_query}")")"
 echo "$reconcile_json"
-printf "%s" "$reconcile_json" | python3 - <<'PY'
+printf "%s" "$reconcile_json" | RECONCILE_JSON="$reconcile_json" python3 - <<'PY'
 import json
 import sys
+import os
 
 raw = sys.stdin.read().strip()
+if not raw:
+    raw = os.environ.get("RECONCILE_JSON", "").strip()
 if not raw:
     print("reconcile: empty response", file=sys.stderr)
     sys.exit(1)

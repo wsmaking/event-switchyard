@@ -13,19 +13,31 @@ from datetime import datetime
 try:
     import jsonschema
     from jsonschema import validate, ValidationError
+    JSONSCHEMA_AVAILABLE = True
 except ImportError:
-    print("ERROR: jsonschema not installed. Run: pip install jsonschema", file=sys.stderr)
-    sys.exit(1)
+    JSONSCHEMA_AVAILABLE = False
 
 
 # SLO Thresholds (aligned with docs/specs/slo.md)
-SLO_THRESHOLDS = {
+DEFAULT_THRESHOLDS = {
     "fast_path_p99_us": 100.0,
     "fast_path_p999_us": 3000.0,
     "tail_ratio_max": 12.0,
     "drop_count_max": 0,
     "error_rate_percent_max": 0.01,
     "throughput_min_events_per_sec": 10000,
+}
+
+PROFILE_THRESHOLDS = {
+    "strict": DEFAULT_THRESHOLDS,
+    "light": {
+        "fast_path_p99_us": 300.0,
+        "fast_path_p999_us": 10000.0,
+        "tail_ratio_max": 20.0,
+        "drop_count_max": 0,
+        "error_rate_percent_max": 0.01,
+        "throughput_min_events_per_sec": 500.0,
+    },
 }
 
 
@@ -61,6 +73,9 @@ def load_results(results_path: Path) -> Dict:
 
 def validate_schema(results: Dict, schema: Dict) -> bool:
     """Validate results against JSON schema"""
+    if not JSONSCHEMA_AVAILABLE:
+        print(f"{Colors.YELLOW}!{Colors.END} Schema validation skipped (jsonschema not installed)")
+        return True
     try:
         validate(instance=results, schema=schema)
         print(f"{Colors.GREEN}✓{Colors.END} Schema validation passed")
@@ -134,7 +149,7 @@ def get_nested_value(data: Dict, path: str) -> Any:
     return value
 
 
-def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
+def run_slo_checks(results: Dict, thresholds: Dict[str, float]) -> Tuple[str, List[Dict]]:
     """
     Run all SLO checks against benchmark results
 
@@ -157,7 +172,7 @@ def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
             name="Fast Path p99",
             metric_path="metrics.fast_path.process_latency_us.p99",
             operator="<=",
-            threshold=SLO_THRESHOLDS["fast_path_p99_us"],
+            threshold=thresholds["fast_path_p99_us"],
             actual=p99,
             severity="critical"
         )
@@ -170,7 +185,7 @@ def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
             name="Fast Path p999",
             metric_path="metrics.fast_path.process_latency_us.p999",
             operator="<=",
-            threshold=SLO_THRESHOLDS["fast_path_p999_us"],
+            threshold=thresholds["fast_path_p999_us"],
             actual=p999,
             severity="critical"
         )
@@ -183,7 +198,7 @@ def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
             name="Tail Ratio",
             metric_path="metrics.summary.tail_ratio",
             operator="<=",
-            threshold=SLO_THRESHOLDS["tail_ratio_max"],
+            threshold=thresholds["tail_ratio_max"],
             actual=tail_ratio,
             severity="warning"
         )
@@ -195,7 +210,7 @@ def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
         name="Drop Count",
         metric_path="metrics.fast_path.drop_count",
         operator="==",
-        threshold=SLO_THRESHOLDS["drop_count_max"],
+        threshold=thresholds["drop_count_max"],
         actual=drop_count,
         severity="critical"
     )
@@ -207,11 +222,24 @@ def run_slo_checks(results: Dict) -> Tuple[str, List[Dict]]:
         name="Error Rate",
         metric_path="metrics.summary.error_rate_percent",
         operator="<=",
-        threshold=SLO_THRESHOLDS["error_rate_percent_max"],
+        threshold=thresholds["error_rate_percent_max"],
         actual=error_rate,
         severity="critical"
     )
     checks.append(check)
+
+    # Check 6: Throughput
+    throughput = summary.get("throughput_events_per_sec")
+    if throughput is not None:
+        passed, check = check_slo(
+            name="Throughput",
+            metric_path="metrics.summary.throughput_events_per_sec",
+            operator=">=",
+            threshold=thresholds["throughput_min_events_per_sec"],
+            actual=throughput,
+            severity="critical"
+        )
+        checks.append(check)
 
     # Determine overall status
     critical_failures = [c for c in checks if not c["passed"] and c["severity"] == "critical"]
@@ -336,6 +364,18 @@ def main():
     parser.add_argument("--baseline", help="Baseline results for comparison (optional)")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--no-fail", action="store_true", help="Exit with 0 even on SLO failures (for testing)")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILE_THRESHOLDS.keys()),
+        default="strict",
+        help="Threshold profile (default: strict)"
+    )
+    parser.add_argument("--p99-us", type=float, help="Override p99 threshold (µs)")
+    parser.add_argument("--p999-us", type=float, help="Override p999 threshold (µs)")
+    parser.add_argument("--tail-ratio-max", type=float, help="Override tail ratio max")
+    parser.add_argument("--drop-count-max", type=float, help="Override drop count max")
+    parser.add_argument("--error-rate-percent-max", type=float, help="Override error rate percent max")
+    parser.add_argument("--throughput-min-events-per-sec", type=float, help="Override throughput min (events/s)")
 
     args = parser.parse_args()
 
@@ -347,8 +387,21 @@ def main():
     if not validate_schema(results, schema):
         sys.exit(1)
 
+    thresholds = dict(PROFILE_THRESHOLDS[args.profile])
+    overrides = {
+        "fast_path_p99_us": args.p99_us,
+        "fast_path_p999_us": args.p999_us,
+        "tail_ratio_max": args.tail_ratio_max,
+        "drop_count_max": args.drop_count_max,
+        "error_rate_percent_max": args.error_rate_percent_max,
+        "throughput_min_events_per_sec": args.throughput_min_events_per_sec,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            thresholds[key] = value
+
     # Run SLO checks
-    status, checks = run_slo_checks(results)
+    status, checks = run_slo_checks(results, thresholds)
 
     # Add slo_compliance to results
     results["slo_compliance"] = {

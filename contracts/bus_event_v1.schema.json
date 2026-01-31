@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/event-switchyard/contracts/bus_event_v1.schema.json",
+  "title": "BusEvent",
+  "type": "object",
+  "required": ["type", "at", "accountId", "data"],
+  "properties": {
+    "type": { "type": "string", "minLength": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "accountId": { "type": "string", "minLength": 1 },
+    "orderId": { "type": ["string", "null"] },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false
+}

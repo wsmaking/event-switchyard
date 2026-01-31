@@ -2,11 +2,41 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-PORT="${PORT:-8081}"
+PORT_DEFAULT=8081
+if [[ -z "${PORT+x}" ]]; then
+  PORT="$(
+    python3 - <<'PY'
+import socket
+
+candidates = [8081, 18081]
+for port in candidates:
+    s = socket.socket()
+    try:
+        s.bind(("0.0.0.0", port))
+        s.close()
+        print(port)
+        raise SystemExit
+    except OSError:
+        s.close()
+print(candidates[-1])
+PY
+  )"
+else
+  PORT="${PORT}"
+fi
 HOST="${HOST:-localhost}"
 JWT_SECRET="${JWT_HS256_SECRET:-secret123}"
 MODE="${MODE:-balanced}" # latency | throughput | balanced
-BASELINE_PATH="${BASELINE_PATH:-baseline/perf_gate_rust.json}"
+RUNNER_LABEL="${RUNNER_LABEL:-}"
+if [[ -z "${BASELINE_PATH+x}" ]]; then
+  if [[ -n "${RUNNER_LABEL}" ]]; then
+    SAFE_LABEL="$(printf "%s" "${RUNNER_LABEL}" | tr -cs 'A-Za-z0-9_.-' '_' )"
+    BASELINE_PATH="baseline/perf_gate_rust_${SAFE_LABEL}.json"
+  else
+    BASELINE_PATH="baseline/perf_gate_rust.json"
+  fi
+fi
+PERF_GATE_PROFILE="${PERF_GATE_PROFILE:-}"
 BASELINE_REGRESSION="${BASELINE_REGRESSION:-0.05}"
 UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
 STRICT="${STRICT:-0}"
@@ -17,6 +47,11 @@ CONCURRENCY_DEFAULT=200
 THREADS_DEFAULT=8
 WARMUP_RTT_DEFAULT=100
 WARMUP_THROUGHPUT_DEFAULT=2
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  export CXXFLAGS="${CXXFLAGS:-} -std=c++17"
+  export CFLAGS="${CFLAGS:-} -std=c11"
+fi
 
 case "${MODE}" in
   latency)
@@ -139,6 +174,15 @@ PERF_GATE_ARGS=(
   --warmup-throughput-sec "${WARMUP_THROUGHPUT_SEC}"
   --wrk-input "${WRK_OUTPUT}"
 )
+
+if [[ "${PERF_GATE_PROFILE}" == "local" || "${RUNNER_LABEL}" == "local" ]]; then
+  PERF_GATE_ARGS+=(
+    --p50 "${PERF_P50_US:-1000}"
+    --p99 "${PERF_P99_US:-10000}"
+    --max "${PERF_MAX_US:-100000}"
+    --throughput "${PERF_THROUGHPUT_RPS:-10000}"
+  )
+fi
 
 if [[ -f "${BASELINE_PATH}" ]]; then
   PERF_GATE_ARGS+=( --baseline "${BASELINE_PATH}" --baseline-regression "${BASELINE_REGRESSION}" )
