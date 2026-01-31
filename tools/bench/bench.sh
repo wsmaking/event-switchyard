@@ -36,8 +36,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting app for bench (FAST_PATH_ENABLE=1)"
-FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 ./gradlew :app:run >/tmp/bench_app.log 2>&1 &
+echo "==> Starting app for bench (FAST_PATH_ENABLE=1, KAFKA_BRIDGE_ENABLE=0)"
+FAST_PATH_ENABLE=1 FAST_PATH_METRICS=1 KAFKA_BRIDGE_ENABLE=0 ./gradlew :app:run >/tmp/bench_app.log 2>&1 &
 APP_PID=$!
 
 READY=0

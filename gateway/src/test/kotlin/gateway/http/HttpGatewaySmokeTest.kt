@@ -41,7 +41,7 @@ class HttpGatewaySmokeTest {
             orderService = service,
             sseHub = sseHub,
             auditLogReader = AuditLogReader(auditPath),
-            jwtAuth = JwtAuth("test-secret"),
+            jwtAuth = JwtAuth("test-secret".toByteArray()),
             metrics = metrics
         )
 

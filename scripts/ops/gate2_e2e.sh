@@ -44,6 +44,7 @@ compose --profile gateway stop kafka
 
 JWT_SECRET="${JWT_HS256_SECRET:-dev-secret-change-me}"
 ACCOUNT_ID="${ACCOUNT_ID:-acct_demo}"
+export JWT_SECRET ACCOUNT_ID
 token="$(
   python3 - <<'PY'
 import base64, json, hmac, hashlib, os, time

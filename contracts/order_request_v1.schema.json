@@ -10,8 +10,8 @@
     "type": { "type": "string", "enum": ["LIMIT", "MARKET"] },
     "qty": { "type": "integer", "minimum": 1 },
     "price": { "type": ["integer", "null"], "minimum": 0 },
-    "timeInForce": { "type": "string", "enum": ["GTC", "IOC", "FOK"] },
-    "expireAt": { "type": ["string", "null"], "format": "date-time" },
+    "timeInForce": { "type": "string", "enum": ["GTC", "GTD"] },
+    "expireAt": { "type": ["integer", "null"], "minimum": 0 },
     "clientOrderId": { "type": ["string", "null"] }
   },
   "additionalProperties": false

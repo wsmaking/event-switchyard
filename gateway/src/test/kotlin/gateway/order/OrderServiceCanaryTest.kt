@@ -34,8 +34,8 @@ class OrderServiceCanaryTest {
                 symbol = "BTC",
                 side = OrderSide.BUY,
                 type = OrderType.LIMIT,
-                qty = 1,
-                price = 100 + i,
+                qty = 1L,
+                price = (100 + i).toLong(),
                 timeInForce = TimeInForce.GTC,
                 expireAt = null,
                 clientOrderId = "c-$i"

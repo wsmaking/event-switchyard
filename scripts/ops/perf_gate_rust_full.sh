@@ -2,7 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-PORT="${PORT:-8081}"
+PORT_DEFAULT=8081
+if [[ -z "${PORT+x}" ]]; then
+  PORT="$(
+    python3 - <<'PY'
+import socket
+
+candidates = [8081, 18081]
+for port in candidates:
+    s = socket.socket()
+    try:
+        s.bind(("0.0.0.0", port))
+        s.close()
+        print(port)
+        raise SystemExit
+    except OSError:
+        s.close()
+print(candidates[-1])
+PY
+  )"
+else
+  PORT="${PORT}"
+fi
 HOST="${HOST:-localhost}"
 JWT_SECRET="${JWT_HS256_SECRET:-secret123}"
 MODE="${MODE:-balanced}" # latency | throughput | balanced
@@ -17,6 +38,11 @@ CONCURRENCY_DEFAULT=200
 THREADS_DEFAULT=8
 WARMUP_RTT_DEFAULT=100
 WARMUP_THROUGHPUT_DEFAULT=2
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  export CXXFLAGS="${CXXFLAGS:-} -std=c++17"
+  export CFLAGS="${CFLAGS:-} -std=c11"
+fi
 
 case "${MODE}" in
   latency)

@@ -444,9 +444,10 @@ class GatewayBenchmark:
         accepted = 0
         rejected = 0
 
+        sample_body = self._make_order_payload(heavy=True, client_order_id="heavy_sample")
+
         for i in range(requests):
             start = time.perf_counter()
-            body = self._make_order_payload(client_order_id=f"sustained_{time.time_ns()}_{request_count}")
             body = self._make_order_payload(heavy=True, client_order_id=f"heavy_{time.time_ns()}_{i}")
             conn.request("POST", "/orders", body=body, headers=headers)
             resp = conn.getresponse()
