@@ -20,6 +20,7 @@ venv/
 
 # --- OS
 .DS_Store
+*.pdf
 
 # --- Bench artifacts
 results/
@@ -56,3 +57,10 @@ var/run/
 
 # --- Local notes (not tracked)
 docs/arch/system_design_interview_questions.txt
+
+# --- Rust build artifacts
+gateway-core/target/
+gateway/src/main/resources/native/
+tools/async-profiler/
+gateway-rust/target/
+gateway-rust/var/

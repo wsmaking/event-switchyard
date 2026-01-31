@@ -586,6 +586,25 @@ python3 scripts/change_risk.py \
 
 ---
 
+## CI Gate Policy（開発/CI 共通）
+
+Gate0（PR）: 数分で終わる軽量ゲート。単体テスト/契約/簡易faultまで。  
+Gate1（main）: 回帰検知の中量ゲート。bench + 性能ゲート。  
+Gate2（nightly）: 長時間/重い検証を含む重量ゲート。
+
+```bash
+# Gate0: PR
+make check-lite
+
+# Gate1: main
+make check
+
+# Gate2: nightly/weekly
+make check-full
+```
+
+---
+
 ## Docker Compose
 
 ### 監視スタック込みフルスタック起動
@@ -740,6 +759,216 @@ bench/profiles/
 ## 各ソースがやっていること
 
 ### コアロジック
+
+### Rust Gateway（gateway-rust）
+
+#### [gateway-rust/src/main.rs](gateway-rust/src/main.rs)
+- **役割**: Rust版Gatewayのエントリーポイント
+- **処理**:
+  1. 設定読み込み（port/queue/TTL）
+  2. AuditLog/SSE/Bus/Outboxを初期化
+  3. Exchange worker または drain worker を起動
+  4. HTTP/TCPサーバーを並行起動
+
+#### [gateway-rust/src/server/http/mod.rs](gateway-rust/src/server/http/mod.rs)
+- **役割**: HTTP入口のルーティングと状態管理
+- **処理**:
+  1. JWT認証
+  2. IdempotencyKey判定（ShardedOrderStore）
+  3. Risk→Queue投入（FastPath）
+  4. 監査ログ・SSE・Busへの通知
+  5. Backpressure判定（inflight/WAL/ディスク）
+
+#### [gateway-rust/src/server/http/orders.rs](gateway-rust/src/server/http/orders.rs)
+- **役割**: 注文受理・取得・キャンセルのHTTPハンドラ
+- **処理**:
+  - POST /orders → FastPathEngine → 202（`acceptSeq` / `requestId` を返す）
+  - GET /orders/{id} → 注文状態
+  - GET /orders/client/{client_order_id} → PENDING/DURABLE/REJECTED/UNKNOWN
+  - POST /orders/{id}/cancel → キャンセル要求
+  - Idempotency-Key もしくは client_order_id を必須にして再送可能にする
+
+#### [gateway-rust/src/server/http/audit.rs](gateway-rust/src/server/http/audit.rs)
+- **役割**: 監査イベント取得 / 監査ログ検証 / アンカー取得
+
+#### [gateway-rust/src/server/http/sse.rs](gateway-rust/src/server/http/sse.rs)
+- **役割**: SSEストリーム配信（リプレイ + ブロードキャスト）
+
+#### [gateway-rust/src/server/http/metrics.rs](gateway-rust/src/server/http/metrics.rs)
+- **役割**: health/metrics の運用エンドポイント
+
+#### [gateway-rust/src/engine/fast_path.rs](gateway-rust/src/engine/fast_path.rs)
+- **役割**: FastPathエンジン（受理→キュー）
+- **処理**:
+  1. Riskチェック
+  2. ロックフリーQueueへ投入
+  3. レイテンシ計測
+
+#### [gateway-core/src/queue.rs](gateway-core/src/queue.rs)
+- **役割**: ロックフリーリングバッファ（FastPathQueue）
+- **処理**:
+  - 満杯なら即座にreject（バックプレッシャー）
+
+#### [gateway-rust/src/store/sharded.rs](gateway-rust/src/store/sharded.rs)
+- **役割**: シャーディングOrderStore
+- **処理**:
+  - account_idハッシュで分散し、RwLock競合を軽減
+  - idempotencyの直列化
+
+#### [gateway-rust/src/audit/mod.rs](gateway-rust/src/audit/mod.rs)
+- **役割**: 監査ログ（append-only）
+- **処理**:
+  - JSONL追記、ハッシュチェーン、検証API
+  - WAL enqueue / durable ACK の計測（t0/t1/t2）
+  - 監査ミラーは WAL から非同期再生成（`AUDIT_MIRROR_ENABLE=1`）
+  - WAL 出力先: `GATEWAY_WAL_PATH`（旧 `GATEWAY_AUDIT_PATH` 互換）
+  - 監査ログ出力先: `AUDIT_LOG_PATH`（ミラーの書き込み先）
+  - ミラーのhash/anchor: `AUDIT_MIRROR_HASH_PATH` / `AUDIT_MIRROR_ANCHOR_PATH`
+  - ミラーは起動時に最新アンカーを再生成（再起動時の整合維持）
+
+### 監査ミラーの動作確認
+
+目的: WAL から監査ログ（mirror）を再生成し、hash/anchor が更新されることを確認。
+
+```bash
+# 1) 起動（別ターミナル）
+AUDIT_MIRROR_ENABLE=1 \
+AUDIT_HMAC_KEY=secret123 \
+scripts/ops/run_dynamic_inflight.sh
+```
+
+```bash
+# 2) 注文投入（別ターミナル）
+TOKEN=$(JWT_SECRET=secret123 ACCOUNT_ID=1 python3 - <<'PY'
+import os, json, base64, hmac, hashlib, time
+secret = os.environ["JWT_SECRET"].encode()
+header = {"alg":"HS256","typ":"JWT"}
+payload = {"sub":os.environ["ACCOUNT_ID"],"iat":int(time.time())-10,"exp":int(time.time())+3600}
+def b64url(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+h = f"{b64url(json.dumps(header,separators=(',',':')).encode())}.{b64url(json.dumps(payload,separators=(',',':')).encode())}"
+sig = hmac.new(secret, h.encode(), hashlib.sha256).digest()
+print(f"{h}.{b64url(sig)}")
+PY
+)
+
+curl -s -X POST http://127.0.0.1:8082/orders \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: test-mirror" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"BTC","side":"BUY","type":"LIMIT","qty":1,"price":100}'
+```
+
+```bash
+# 3) 生成物を確認
+ls -l gateway-rust/var/gateway/audit.mirror.log \
+      gateway-rust/var/gateway/audit.mirror.log.hash \
+      gateway-rust/var/gateway/audit.mirror.log.anchor
+
+tail -n 2 gateway-rust/var/gateway/audit.mirror.log
+tail -n 2 gateway-rust/var/gateway/audit.mirror.log.hash
+cat gateway-rust/var/gateway/audit.mirror.log.anchor
+```
+
+#### [gateway-rust/src/outbox/mod.rs](gateway-rust/src/outbox/mod.rs)
+- **役割**: 監査ログ → Kafka 送信（Outbox）
+- **処理**:
+  - 監査ログを読み取り、Kafkaへbest-effort配信
+  - offsetはfsyncで保護
+
+#### [gateway-rust/src/bus/mod.rs](gateway-rust/src/bus/mod.rs)
+- **役割**: Kafka Publisher
+- **処理**:
+  - rdkafkaでpublish、delivery結果を集計
+
+#### Rust Gateway: WAL計測 / Backpressure
+- **計測ポイント**:
+  - t0: 受付（HTTP到達）
+  - t1: WAL enqueue（監査ログにenqueue完了）
+  - t2: durable ACK（fdatasync完了、SSEで通知）
+- **主要メトリクス**:
+  - `gateway_ack_p50_us` / `gateway_ack_p99_us` / `gateway_ack_p999_us`
+  - `gateway_wal_enqueue_p50_us` / `gateway_wal_enqueue_p99_us` / `gateway_wal_enqueue_p999_us`
+  - `gateway_durable_ack_p50_us` / `gateway_durable_ack_p99_us` / `gateway_durable_ack_p999_us`
+  - `gateway_fdatasync_p50_us` / `gateway_fdatasync_p99_us` / `gateway_fdatasync_p999_us`
+  - `gateway_fast_path_processing_p50_us` / `gateway_fast_path_processing_p99_us` / `gateway_fast_path_processing_p999_us`
+  - `gateway_inflight`
+  - `gateway_durable_inflight`
+  - `gateway_inflight_dynamic_enabled`
+  - `gateway_inflight_limit_dynamic`
+  - `gateway_backpressure_soft_reject_rate_ewma`
+  - `gateway_durable_commit_rate_ewma`
+  - `gateway_wal_age_ms`
+  - `gateway_backpressure_soft_wal_age_total`
+  - `gateway_backpressure_soft_rate_decline_total`
+  - `gateway_backpressure_inflight_total`
+  - `gateway_backpressure_wal_bytes_total`
+  - `gateway_backpressure_wal_age_total`
+  - `gateway_backpressure_disk_free_total`
+- **durable通知**:
+  - SSE `event: order_durable` を注文/アカウントストリームへ送信
+- **関連環境変数**:
+  - `AUDIT_FDATASYNC` (default: true) fdatasync有効化
+  - `AUDIT_ASYNC_WAL` (default: true) WAL非同期 + バッチfsync
+  - `AUDIT_FDATASYNC_MAX_WAIT_US` (default: 200)
+  - `AUDIT_FDATASYNC_MAX_BATCH` (default: 64)
+  - `BACKPRESSURE_INFLIGHT_MAX`
+  - `BACKPRESSURE_INFLIGHT_DYNAMIC`
+  - `BACKPRESSURE_INFLIGHT_TARGET_WAL_AGE_SEC`
+  - `BACKPRESSURE_INFLIGHT_ALPHA`
+  - `BACKPRESSURE_INFLIGHT_BETA`
+  - `BACKPRESSURE_INFLIGHT_MIN`
+  - `BACKPRESSURE_INFLIGHT_CAP`
+  - `BACKPRESSURE_INFLIGHT_TICK_MS`
+  - `BACKPRESSURE_INFLIGHT_SLEW_RATIO`
+  - `BACKPRESSURE_INFLIGHT_HYSTERESIS_OFF_RATIO`
+  - `BACKPRESSURE_INFLIGHT_INITIAL`
+  - `BACKPRESSURE_INFLIGHT_DECLINE_RATIO`
+  - `BACKPRESSURE_INFLIGHT_DECLINE_STREAK`
+  - `BACKPRESSURE_INFLIGHT_REJECT_BETA`
+  - `BACKPRESSURE_SOFT_WAL_AGE_MS_MAX`
+  - `BACKPRESSURE_WAL_BYTES_MAX`
+  - `BACKPRESSURE_WAL_AGE_MS_MAX`
+  - `BACKPRESSURE_DISK_FREE_PCT_MIN`
+ - **計測メモ（ローカル, 2026-01-25 / HDR）**:
+   - RTT(HTTP /orders) p99: **~371µs**（200 req / warmup 50）
+   - Throughput: **~11.5k req/s**（10s, concurrency=4, accounts=1）
+   - ACK p50/p99/p999: **12µs / 67µs / 144µs**
+   - WAL enqueue p50/p99/p999: **11µs / 64µs / 142µs**
+   - durable ACK p50/p99/p999: **~4.2ms / ~6.5ms / ~10.4ms**
+   - fdatasync p50/p99/p999: **~2.7ms / ~3.7ms / ~6.4ms**
+   - 判断: fdatasync p99 が 200µs を超えるため、永続ACKの同期方式/バッチング設計を見直す前提。
+   - 備考: Exchange未接続の場合は `FASTPATH_DRAIN_ENABLE=1` でキューを消費しないと 503(QUEUE_REJECT) が増える。
+ - **WALバッチ調整（HDR, 10s/4c/1acct）**:
+   - 200us/64: durable p99 **~6.2ms** / p999 **~9.1ms**
+   - 1000us/256: durable p99 **~6.9ms** / p999 **~10.0ms**
+   - 100us/64: durable p99 **~6.5ms** / p999 **~13.8ms**（RTT/throughputも悪化）
+   - 傾向: wait/batchを締めると durable p999 が改善（p99は誤差範囲）
+   - 採用値: **200us/64（デフォルト化）**
+ - **動的 inflight（Soft Reject）: 実行手順**
+   ```bash
+   cd gateway-rust
+   BACKPRESSURE_INFLIGHT_DYNAMIC=1 \
+   BACKPRESSURE_INFLIGHT_TARGET_WAL_AGE_SEC=1.0 \
+   BACKPRESSURE_INFLIGHT_ALPHA=0.8 \
+   BACKPRESSURE_INFLIGHT_BETA=0.2 \
+   BACKPRESSURE_INFLIGHT_MIN=256 \
+   BACKPRESSURE_INFLIGHT_CAP=10000 \
+   BACKPRESSURE_INFLIGHT_TICK_MS=250 \
+   BACKPRESSURE_INFLIGHT_SLEW_RATIO=0.2 \
+   BACKPRESSURE_INFLIGHT_HYSTERESIS_OFF_RATIO=0.9 \
+   BACKPRESSURE_INFLIGHT_INITIAL=2000 \
+   GATEWAY_PORT=8081 GATEWAY_TCP_PORT=0 \
+   AUDIT_ASYNC_WAL=1 AUDIT_FDATASYNC=1 \
+   JWT_HS256_SECRET=secret123 \
+   cargo run --bin gateway-rust
+   ```
+   ```bash
+   curl -s http://127.0.0.1:8081/metrics | rg "gateway_fast_path_processing_p(50|99|999)_us|gateway_inflight_dynamic_enabled|gateway_inflight_limit_dynamic|gateway_durable_commit_rate_ewma"
+   ```
+ - **Backpressure確認**:
+   - Soft: `BACKPRESSURE_SOFT_WAL_AGE_MS_MAX=1000` → 429 (`BACKPRESSURE_SOFT_WAL_AGE`)
+   - Hard: `BACKPRESSURE_INFLIGHT_MAX=5` + 5s/20c で 244件拒否（`gateway_backpressure_inflight_total=244`）
+ - **注記**: ヒストグラムはHDRで精密化済み（µs単位の上限近似ではない）。
 
 #### [Main.kt](app/src/main/kotlin/app/Main.kt)
 - **役割**: アプリケーションエントリーポイント
@@ -1323,6 +1552,44 @@ docker run -d \
 - **[docs/runbook.md](docs/runbook.md)** - インシデント対応手順
 - **[docs/change_risk.md](docs/change_risk.md)** - 変更リスク評価ガイド
 
+### Gateway Rust: Kafka/Outbox運用
+
+**目的**: 監査ログ(JSONL)をOutboxで追跡し、Kafkaへ耐久配信する。
+
+**有効化条件**:
+- `BUS_MODE=outbox` かつ `KAFKA_ENABLE=1` のとき Outbox が起動
+
+**主要設定**:
+- `GATEWAY_AUDIT_PATH` (default: `var/gateway/audit.log`)
+- `OUTBOX_OFFSET_PATH` (default: `var/gateway/outbox.offset`)
+- `OUTBOX_BACKOFF_BASE_MS` / `OUTBOX_BACKOFF_MAX_MS`
+- `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CLIENT_ID`
+
+**配信対象**:
+- `OrderAccepted`, `CancelRequested` のみKafkaへ送信
+- それ以外の監査イベントはスキップ (outbox_events_skipped)
+
+**監視指標 (/metrics)**:
+- `gateway_outbox_*` (read/publish/errors/backoff)
+- `gateway_kafka_*` (delivery ok/err/dropped)
+- `gateway_outbox_offset_resets_total` が増えたら要注意
+
+**停止条件の目安**:
+- `gateway_outbox_publish_errors_total` が継続増加
+- `gateway_kafka_delivery_err_total` が増加し続ける
+- `gateway_outbox_backoff_current_ms` が `OUTBOX_BACKOFF_MAX_MS` に張り付き
+- `gateway_outbox_offset_resets_total` が急増
+
+**手動復旧手順**:
+1. Kafka到達性を確認 (`KAFKA_BOOTSTRAP_SERVERS`)
+2. `OUTBOX_OFFSET_PATH` を確認 (破損時は `.bad.<ts>` に退避される)
+3. 必要なら `OUTBOX_OFFSET_PATH` を 0 にしてフル再送
+4. 再送を避ける場合は監査ログのサイズ(バイト)に合わせてオフセットを設定
+5. 再起動して outbox が進むことを確認
+
+**注意**:
+- Outboxは at-least-once。再送時は下流で冪等化が必要。
+
 ### ADR (Architecture Decision Records)
 - **[docs/adr/001-slo-regression-gate.md](docs/adr/001-slo-regression-gate.md)** - SLO回帰ゲート導入
 - **[docs/adr/002-backpressure-auto-tuner.md](docs/adr/002-backpressure-auto-tuner.md)** - バックプレッシャー自動チューナー
@@ -1365,7 +1632,3 @@ docker run -d \
 MIT
 
 ---
-
-**更新日**: 2025-11-03
-**ステータス**: ✅ 本番投入準備100%完了 - デプロイ可能
-**作成者**: Claude (Anthropic) - Phase 1-8実装完了

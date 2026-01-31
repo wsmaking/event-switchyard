@@ -1,0 +1,19 @@
+name: merge
+on:
+  push:
+    branches: [main]
+
+jobs:
+  gate1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Gate1 (check)
+        run: make check

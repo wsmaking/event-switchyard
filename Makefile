@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -45,7 +45,27 @@ help:
 	@echo "  make bench       - CI/CDベンチマーク"
 	@echo "  make gate        - 性能ゲート検証"
 	@echo "  make check       - bench + gate"
+	@echo "  make check-lite  - 軽量ゲート (unit/contract/fault)"
+	@echo "  make check-full  - 重量ゲート (check + perf-gate-rust-full)"
 	@echo "  make bless       - ベースライン更新"
+	@echo "  make perf-gate-rust - Rust GatewayのPerf Gate"
+	@echo "  make perf-gate-rust-full - Perf Gate + OSサンプル付き"
+	@echo ""
+	@echo "Rust Gateway (rootから実行):"
+	@echo "  make rust-check  - gateway-rust の cargo check"
+	@echo "  make rust-test   - gateway-rust の cargo test"
+	@echo "  make rust-run    - gateway-rust を起動 (release)"
+	@echo ""
+	@echo "Kotlin/Java (rootから実行):"
+	@echo "  make app-run     - app を起動"
+	@echo "  make app-check   - app の check"
+	@echo "  make app-test    - app の test"
+	@echo "  make gateway-run - gateway を起動"
+	@echo "  make gateway-check - gateway の check"
+	@echo "  make gateway-test  - gateway の test"
+	@echo "  make backoffice-run - backoffice を起動"
+	@echo "  make backoffice-check - backoffice の check"
+	@echo "  make backoffice-test  - backoffice の test"
 	@echo ""
 	@echo "========================================="
 
@@ -63,6 +83,35 @@ run-gateway:
 run-backoffice:
 	@echo "==> Starting BackOffice..."
 	./gradlew :backoffice:run
+
+# Kotlin/Java module aliases (rootから実行)
+app-run: run
+gateway-run: run-gateway
+backoffice-run: run-backoffice
+
+app-check:
+	@echo "==> Checking app..."
+	@./gradlew :app:check
+
+gateway-check:
+	@echo "==> Checking gateway..."
+	@./gradlew :gateway:check
+
+backoffice-check:
+	@echo "==> Checking backoffice..."
+	@./gradlew :backoffice:check
+
+app-test:
+	@echo "==> Testing app..."
+	@./gradlew :app:test
+
+gateway-test:
+	@echo "==> Testing gateway..."
+	@./gradlew :gateway:test
+
+backoffice-test:
+	@echo "==> Testing backoffice..."
+	@./gradlew :backoffice:test
 
 # 開発用ベンチマーク実行
 dev-bench:
@@ -137,6 +186,27 @@ backoffice-recovery:
 gateway-backoffice-e2e:
 	@scripts/ops/gateway_backoffice_e2e.sh
 
+# Rust Gateway Perf Gate
+perf-gate-rust:
+	@scripts/ops/perf_gate_rust.sh
+
+# Rust Gateway Perf Gate (full report)
+perf-gate-rust-full:
+	@scripts/ops/perf_gate_rust_full.sh
+
+# Rust Gateway (rootから実行)
+rust-check:
+	@echo "==> Rust Gateway check..."
+	@cd gateway-rust && cargo check
+
+rust-test:
+	@echo "==> Rust Gateway test..."
+	@cd gateway-rust && cargo test
+
+rust-run:
+	@echo "==> Starting Rust Gateway..."
+	@cd gateway-rust && cargo run --release
+
 # ビルド
 build:
 	@echo "==> Building..."
@@ -183,6 +253,14 @@ gate:
 
 # bench + gate (既存)
 check: bench gate
+
+check-lite:
+	@echo "==> Running check-lite..."
+	@./gradlew :gateway:test
+
+check-full: check
+	@echo "==> Running check-full..."
+	@$(MAKE) perf-gate-rust-full
 
 # 良い結果をベースラインに昇格 (既存)
 bless:
