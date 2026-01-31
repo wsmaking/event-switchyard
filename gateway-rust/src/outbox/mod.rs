@@ -254,3 +254,59 @@ fn temp_offset_path(path: &Path) -> PathBuf {
         .map(|p| p.join(&tmp_name))
         .unwrap_or_else(|| PathBuf::from(tmp_name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_to_bus_event_filters() {
+        let accepted = AuditEvent {
+            event_type: "OrderAccepted".to_string(),
+            at: 1,
+            account_id: "acct-1".to_string(),
+            order_id: Some("ord-1".to_string()),
+            data: json!({"status":"ACCEPTED"}),
+        };
+        let report = AuditEvent {
+            event_type: "ExecutionReport".to_string(),
+            at: 2,
+            account_id: "acct-1".to_string(),
+            order_id: Some("ord-1".to_string()),
+            data: json!({"status":"FILLED"}),
+        };
+
+        assert!(to_bus_event(accepted).is_some());
+        assert!(to_bus_event(report).is_none());
+    }
+
+    #[test]
+    fn test_read_offset_invalid_backs_up() {
+        let dir = std::env::temp_dir().join(format!(
+            "outbox_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outbox.offset");
+        std::fs::write(&path, "not-a-number").unwrap();
+
+        let value = read_offset(&path);
+
+        assert_eq!(0, value);
+        assert!(!path.exists());
+        let backup_found = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("outbox.offset.bad.")
+            });
+        assert!(backup_found);
+    }
+}
