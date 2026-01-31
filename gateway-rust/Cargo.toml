@@ -51,8 +51,8 @@ dashmap = "6"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
-# Kafka (Rust client, uses system librdkafka via pkg-config)
-rdkafka = { version = "0.36", features = ["dynamic-linking"] }
+# Kafka (Rust client, build bundled librdkafka to avoid system version mismatch)
+rdkafka = { version = "0.36", features = ["cmake-build"] }
 libc = "0.2"
 
 [features]

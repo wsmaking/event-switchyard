@@ -1,10 +1,11 @@
-FROM rust:1.78-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
     pkg-config \
     libssl-dev \
-    librdkafka-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

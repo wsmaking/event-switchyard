@@ -54,11 +54,18 @@ services:
       POSTGRES_PASSWORD: backoffice
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U backoffice -d backoffice"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   backoffice-migrate:
     image: flyway/flyway:10-alpine
     restart: "no"
-    depends_on: [postgres]
+    depends_on:
+      postgres:
+        condition: service_healthy
     command:
       - "-url=jdbc:postgresql://postgres:5432/backoffice"
       - "-user=backoffice"
@@ -71,7 +78,13 @@ services:
 
   backoffice:
     <<: *app
-    depends_on: [kafka, topic-init, postgres]
+    depends_on:
+      kafka:
+        condition: service_started
+      topic-init:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     command: ["java","-jar","backoffice-all.jar"]
     environment:
       <<: *java_env
