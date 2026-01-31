@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 
 # 既定パス（必要ならここだけ直せば全員同じ条件で走る）
