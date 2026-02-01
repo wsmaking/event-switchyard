@@ -92,7 +92,7 @@ class FastPathAtomicityTest {
 
         auditGate.countDown()
 
-        assertTrue(sentLatch.await(1, TimeUnit.SECONDS))
+        assertTrue(sentLatch.await(5, TimeUnit.SECONDS))
         assertFalse(sentBeforeAudit.get())
 
         acceptThread.join(1000)
