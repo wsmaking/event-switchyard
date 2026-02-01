@@ -1,0 +1,13 @@
+{
+  "type": "OrderAccepted",
+  "at": "2025-01-01T00:00:00Z",
+  "accountId": "acct-1",
+  "orderId": "ord-1",
+  "data": {
+    "symbol": "BTC",
+    "side": "BUY",
+    "type": "LIMIT",
+    "qty": 1,
+    "price": 100
+  }
+}

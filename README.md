@@ -124,6 +124,7 @@ scripts/ops/exchange_transport_smoke.sh sim
 | 性能ゲート | `make gate` | SLO検証（p99 < 100μs） |
 | ゲート+ベンチ | `make check` | `bench` + `gate` |
 | ベースライン更新 | `make bless` | 良い結果をベースラインに昇格 |
+| Kafka疎通（Gate2） | `scripts/ops/kafka_smoke_check.sh` | Kafka publishの疎通・キュー収束確認 |
 | Rust PRゲート | `make perf-gate-rust-ci` | 実測 + 回帰 + strict |
 | Rust Nightly | `make perf-gate-rust-nightly` | 実測 + full report |
 | Rust baseline更新 | `make perf-gate-rust-bless` | 明示的なベースライン更新 |
@@ -147,6 +148,17 @@ scripts/ops/exchange_transport_smoke.sh sim
 **性能特性**:
 - Zero GC: ホットパスでのGCなし
 - データロスゼロ: Chronicle Queue経由で完全永続化
+
+**高負荷実測（最新）**:
+- Fast Path (60s, target 1000 RPS): actual_rps=816.4, avg_p99_us=770.66, max_p99_us=3668.71
+- SSE (200 conns, 60s): events=200, errors=0
+- Kafka有効 (60s, target 1000 RPS): actual_rps=815.93, avg_p99_us=700.39, max_p99_us=4879.58
+- 実測日時: 2026-02-01 00:17-00:19 (local)
+- コマンド: `python3 scripts/ops/bench_gateway.py sustained --duration 60 --rps 1000 --port 18084 --secret secret123`,
+  `python3 scripts/ops/sse_load_test.py --url http://localhost:18084/stream --connections 200 --duration 60 --jwt-secret secret123 --account-id acct_demo`,
+  `KAFKA_ENABLE=1 JWT_HS256_SECRET=secret123 GATEWAY_PORT=18085 ./gradlew :gateway:run`
+- 詳細: `results/bench_20260201_001705.json`, `results/load_fastpath_20260201_001705.txt`, `results/load_sse_20260201_001705.txt`,
+  `results/bench_20260201_001958.json`, `results/load_kafka_20260201_001958.txt`, `results/metrics_fastpath_20260201_001705.txt`, `results/metrics_kafka_20260201_001958.txt`
 
 ---
 

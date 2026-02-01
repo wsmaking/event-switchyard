@@ -2,6 +2,7 @@
 //!
 //! Best-effort publish for downstream consumers.
 
+use chrono::{SecondsFormat, TimeZone, Utc};
 use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
 use std::sync::mpsc;
@@ -16,10 +17,51 @@ use tracing::warn;
 pub struct BusEvent {
     #[serde(rename = "type")]
     pub event_type: String,
-    pub at: u64,
+    pub at: String,
     pub account_id: String,
     pub order_id: Option<String>,
     pub data: Value,
+}
+
+pub fn format_event_time(epoch_ms: u64) -> String {
+    let secs = (epoch_ms / 1000) as i64;
+    let nsec = ((epoch_ms % 1000) * 1_000_000) as u32;
+    let dt = Utc
+        .timestamp_opt(secs, nsec)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+    dt.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BusEvent;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn find_fixture(rel: &str) -> PathBuf {
+        let mut dir = std::env::current_dir().expect("cwd");
+        for _ in 0..6 {
+            let candidate = dir.join(rel);
+            if candidate.exists() {
+                return candidate;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        panic!("fixture not found: {rel}");
+    }
+
+    #[test]
+    fn bus_event_fixture_deserializes() {
+        let path = find_fixture("contracts/fixtures/bus_event_v1.json");
+        let raw = fs::read_to_string(path).expect("read fixture");
+        let parsed: BusEvent = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(parsed.event_type, "OrderAccepted");
+        assert_eq!(parsed.account_id, "acct-1");
+        assert_eq!(parsed.at, "2025-01-01T00:00:00Z");
+    }
 }
 
 pub struct BusPublisher {

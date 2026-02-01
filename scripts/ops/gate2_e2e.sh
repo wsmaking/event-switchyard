@@ -99,3 +99,9 @@ PY
 
 echo "==> Restarting kafka"
 compose --profile gateway start kafka
+
+echo "==> Kafka smoke check"
+GATEWAY_URL="http://localhost:8081" \
+JWT_HS256_SECRET="${JWT_HS256_SECRET:-dev-secret-change-me}" \
+ACCOUNT_ID="${ACCOUNT_ID:-acct_demo}" \
+  scripts/ops/kafka_smoke_check.sh
