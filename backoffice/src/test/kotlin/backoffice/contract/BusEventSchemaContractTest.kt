@@ -23,6 +23,16 @@ class BusEventSchemaContractTest {
         throw IllegalStateException("schema not found")
     }
 
+    private fun findFixture(): Path {
+        var dir = Path.of("").toAbsolutePath()
+        repeat(6) {
+            val candidate = dir.resolve("contracts/fixtures/bus_event_v1.json")
+            if (Files.exists(candidate)) return candidate
+            dir = dir.parent ?: return@repeat
+        }
+        throw IllegalStateException("fixture not found")
+    }
+
     private fun validate(payload: ObjectNode, schema: JsonNode): List<String> {
         val errors = mutableListOf<String>()
         val required = schema.path("required").map { it.asText() }.toSet()
@@ -90,6 +100,14 @@ class BusEventSchemaContractTest {
             })
         }
 
+        val errors = validate(payload, schema)
+        assertTrue(errors.isEmpty(), "errors=$errors")
+    }
+
+    @Test
+    fun `schema accepts fixture payload`() {
+        val schema = mapper.readTree(Files.readString(findSchema()))
+        val payload = mapper.readTree(Files.readString(findFixture())) as ObjectNode
         val errors = validate(payload, schema)
         assertTrue(errors.isEmpty(), "errors=$errors")
     }

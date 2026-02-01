@@ -8,6 +8,7 @@ BACKOFFICE_ACCOUNT_ID="${BACKOFFICE_ACCOUNT_ID:-}"
 JWT_SECRET="${JWT_HS256_SECRET:-}"
 BACKOFFICE_JWT="${BACKOFFICE_JWT:-}"
 WAIT_SEC="${BACKOFFICE_REPLAY_WAIT_SEC:-3}"
+REPLAY_SLO_MS="${BACKOFFICE_REPLAY_SLO_MS:-5000}"
 PASS_FAIL="${BACKOFFICE_PASSFAIL:-1}"
 
 if [[ ! -f "$LEDGER_PATH" ]]; then
@@ -53,6 +54,24 @@ if [[ "${PASS_FAIL}" == "1" ]]; then
 fi
 
 sleep "$WAIT_SEC"
+
+echo "==> Replay SLO check (<= ${REPLAY_SLO_MS}ms)"
+curl -fsS -H "Authorization: Bearer ${BACKOFFICE_JWT}" \
+  "${BACKOFFICE_URL}/stats" \
+  | BACKOFFICE_REPLAY_SLO_MS="$REPLAY_SLO_MS" python3 - <<'PY'
+import json, os, sys
+data = json.load(sys.stdin)
+replay = data.get("ledgerReplay") or {}
+duration = replay.get("durationMs")
+slo = int(os.environ.get("BACKOFFICE_REPLAY_SLO_MS", "0") or "0")
+if duration is None:
+    print("replay slo: MISSING durationMs", file=sys.stderr)
+    sys.exit(1)
+if slo > 0 and duration > slo:
+    print(f"replay slo: FAIL durationMs={duration} > {slo}", file=sys.stderr)
+    sys.exit(1)
+print(f"replay slo: PASS durationMs={duration}")
+PY
 
 echo "==> Reconcile"
 account_qs=""

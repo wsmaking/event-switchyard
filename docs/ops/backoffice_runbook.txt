@@ -14,8 +14,11 @@ export BACKOFFICE_URL=http://localhost:8082
 export BACKOFFICE_ACCOUNT_ID=acct_demo
 export JWT_HS256_SECRET=dev-secret-change-me
 export BACKOFFICE_STALE_SEC=120
+export BACKOFFICE_DB_ENABLE=1
+export BACKOFFICE_DB_URL=jdbc:postgresql://localhost:5432/backoffice
 export BACKOFFICE_STRICT=0
 export BACKOFFICE_PASSFAIL=1
+export BACKOFFICE_REPLAY_SLO_MS=5000
 ```
 
 1) Start / Restart
@@ -42,18 +45,24 @@ scripts/ops/gateway_backoffice_e2e.sh
 ```
 scripts/ops/backoffice_replay_verify.sh
 ```
+- The script enforces `BACKOFFICE_REPLAY_SLO_MS` via `/stats` (durationMs).
 
-4) If Data Looks Stale
+4) RDB Standardization
+- Production runs should enable Postgres (`BACKOFFICE_DB_ENABLE=1` or `BACKOFFICE_DB_URL` set).
+- InMemory store is intended for dev-only; snapshotting runs only in that mode.
+
+5) If Data Looks Stale
 - Confirm consumer is enabled: `BACKOFFICE_ENABLE=1`
 - Check `/stats` for `lastEventAt` and `lastKafkaOffset`.
 - If offsets are not advancing, check Kafka connectivity and topic name.
 
-5) If Ledger Replay Fails
+6) If Ledger Replay Fails
 - Inspect `var/backoffice/ledger.log` for malformed lines.
 - Restart BackOffice after fixing any invalid entries.
 
 Checklist (quick pass)
 - /stats returns 200 and `lastEventAt` is recent.
+- `ledgerReplay.durationMs` is within `BACKOFFICE_REPLAY_SLO_MS`.
 - /positions and /balances return 200 for the account.
 - /ledger returns entries for the account (limit=10).
 - If any check fails, verify Kafka connectivity and `BACKOFFICE_ENABLE=1`.

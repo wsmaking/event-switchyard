@@ -119,6 +119,36 @@ impl OrderResponse {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::OrderRequest;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn find_fixture(rel: &str) -> PathBuf {
+        let mut dir = std::env::current_dir().expect("cwd");
+        for _ in 0..6 {
+            let candidate = dir.join(rel);
+            if candidate.exists() {
+                return candidate;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        panic!("fixture not found: {rel}");
+    }
+
+    #[test]
+    fn order_request_fixture_deserializes() {
+        let path = find_fixture("contracts/fixtures/order_request_v1.json");
+        let raw = fs::read_to_string(path).expect("read fixture");
+        let parsed: OrderRequest = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(parsed.symbol, "BTC");
+        assert_eq!(parsed.qty, 1);
+    }
+}
+
 /// ヘルスチェックレスポンス
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

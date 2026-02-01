@@ -168,7 +168,7 @@ fn to_bus_event(event: AuditEvent) -> Option<BusEvent> {
     match event.event_type.as_str() {
         "OrderAccepted" | "CancelRequested" => Some(BusEvent {
             event_type: event.event_type,
-            at: event.at,
+            at: crate::bus::format_event_time(event.at),
             account_id: event.account_id,
             order_id: event.order_id,
             data: event.data,

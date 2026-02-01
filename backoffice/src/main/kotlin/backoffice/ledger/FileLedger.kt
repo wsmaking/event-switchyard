@@ -45,8 +45,9 @@ class FileLedger(
     }
 
     fun replayFromLine(startLine: Long, apply: (LedgerEntry) -> Unit): ReplayStats {
-        if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0)
+        if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0, durationMs = 0)
 
+        val startNs = System.nanoTime()
         var lines = 0L
         var applied = 0L
         var skipped = 0L
@@ -69,7 +70,8 @@ class FileLedger(
                 }
             }
         }
-        return ReplayStats(lines = lines, applied = applied, skipped = skipped)
+        val durationMs = (System.nanoTime() - startNs) / 1_000_000
+        return ReplayStats(lines = lines, applied = applied, skipped = skipped, durationMs = durationMs)
     }
 
     fun currentLineCount(): Long = lineCount
@@ -105,7 +107,8 @@ class FileLedger(
     }
 
     fun compactFromLine(startLine: Long, outputPath: Path): ReplayStats {
-        if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0)
+        if (!Files.exists(path)) return ReplayStats(lines = 0, applied = 0, skipped = 0, durationMs = 0)
+        val startNs = System.nanoTime()
         var lines = 0L
         var kept = 0L
         var skipped = 0L
@@ -130,7 +133,8 @@ class FileLedger(
                 }
             }
         }
-        return ReplayStats(lines = lines, applied = kept, skipped = skipped)
+        val durationMs = (System.nanoTime() - startNs) / 1_000_000
+        return ReplayStats(lines = lines, applied = kept, skipped = skipped, durationMs = durationMs)
     }
 
     override fun close() {
@@ -170,7 +174,8 @@ class FileLedger(
     data class ReplayStats(
         val lines: Long,
         val applied: Long,
-        val skipped: Long
+        val skipped: Long,
+        val durationMs: Long
     )
 
     private fun entryToJson(entry: LedgerEntry): Map<String, Any?> {

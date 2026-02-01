@@ -13,6 +13,7 @@ import gateway.queue.CancelOrderCommand
 import gateway.rate.RateLimiter
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 
 sealed interface AcceptOrderResult {
     val httpStatus: Int
@@ -73,52 +74,57 @@ class OrderService(
         )
         orderStore.put(snapshot, idempotencyKey)
 
-        val enqueue = fastPathQueue.tryEnqueue(NewOrderCommand(orderId))
+        val auditReady = CountDownLatch(1)
+        val enqueue = fastPathQueue.tryEnqueue(NewOrderCommand(orderId, auditReady))
         metrics.onFastPathEnqueue(enqueue.ok)
         if (!enqueue.ok) {
             orderStore.remove(orderId, idempotencyKey)
             metrics.onOrderRejected()
-            return AcceptOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
+            return AcceptOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", queueRejectStatus(enqueue.reason))
         }
 
-        auditLog.append(
-            AuditEvent(
-                type = "OrderAccepted",
-                at = now,
-                accountId = principal.accountId,
-                orderId = orderId,
-                data = mapOf(
-                    "accountId" to principal.accountId,
-                    "symbol" to req.symbol,
-                    "side" to req.side.name,
-                    "type" to req.type.name,
-                    "qty" to req.qty,
-                    "price" to req.price,
-                    "timeInForce" to req.timeInForce.name,
-                    "expireAt" to req.expireAt,
-                    "clientOrderId" to req.clientOrderId,
-                    "idempotencyKey" to idempotencyKey
+        try {
+            auditLog.append(
+                AuditEvent(
+                    type = "OrderAccepted",
+                    at = now,
+                    accountId = principal.accountId,
+                    orderId = orderId,
+                    data = mapOf(
+                        "accountId" to principal.accountId,
+                        "symbol" to req.symbol,
+                        "side" to req.side.name,
+                        "type" to req.type.name,
+                        "qty" to req.qty,
+                        "price" to req.price,
+                        "timeInForce" to req.timeInForce.name,
+                        "expireAt" to req.expireAt,
+                        "clientOrderId" to req.clientOrderId,
+                        "idempotencyKey" to idempotencyKey
+                    )
                 )
             )
-        )
-        eventPublisher.publish(
-            BusEvent(
-                type = "OrderAccepted",
-                at = now,
-                accountId = principal.accountId,
-                orderId = orderId,
-                data = mapOf(
-                    "symbol" to req.symbol,
-                    "side" to req.side.name,
-                    "type" to req.type.name,
-                    "qty" to req.qty,
-                    "price" to req.price,
-                    "timeInForce" to req.timeInForce.name,
-                    "expireAt" to req.expireAt,
-                    "clientOrderId" to req.clientOrderId
+            eventPublisher.publish(
+                BusEvent(
+                    type = "OrderAccepted",
+                    at = now,
+                    accountId = principal.accountId,
+                    orderId = orderId,
+                    data = mapOf(
+                        "symbol" to req.symbol,
+                        "side" to req.side.name,
+                        "type" to req.type.name,
+                        "qty" to req.qty,
+                        "price" to req.price,
+                        "timeInForce" to req.timeInForce.name,
+                        "expireAt" to req.expireAt,
+                        "clientOrderId" to req.clientOrderId
+                    )
                 )
             )
-        )
+        } finally {
+            auditReady.countDown()
+        }
 
         metrics.onOrderAccepted()
         return AcceptOrderResult.Accepted(orderId)
@@ -145,7 +151,7 @@ class OrderService(
         metrics.onFastPathEnqueue(enqueue.ok)
         if (!enqueue.ok) {
             orderStore.update(orderId) { it.copy(status = order.status, lastUpdateAt = now) }
-            return CancelOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", 503)
+            return CancelOrderResult.Rejected(enqueue.reason ?: "QUEUE_REJECT", queueRejectStatus(enqueue.reason))
         }
 
         auditLog.append(AuditEvent(type = "CancelRequested", at = now, accountId = principal.accountId, orderId = orderId))
@@ -175,6 +181,10 @@ class OrderService(
                 if (p <= 0) "INVALID_PRICE" else null
             }
         }
+    }
+
+    private fun queueRejectStatus(reason: String?): Int {
+        return if (reason == "QUEUE_FULL") 429 else 503
     }
 }
 

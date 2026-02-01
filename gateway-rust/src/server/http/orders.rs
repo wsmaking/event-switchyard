@@ -280,7 +280,7 @@ pub(super) async fn handle_order(
                 if !state.bus_mode_outbox {
                     state.bus_publisher.publish(BusEvent {
                         event_type: "OrderAccepted".into(),
-                        at: audit::now_millis(),
+                        at: crate::bus::format_event_time(audit::now_millis()),
                         account_id: bus_account_id,
                         order_id: Some(bus_order_id),
                         data: bus_data,
@@ -426,7 +426,7 @@ pub(super) async fn handle_order(
             if !state.bus_mode_outbox {
                 state.bus_publisher.publish(BusEvent {
                     event_type: "OrderAccepted".into(),
-                    at: audit::now_millis(),
+                    at: crate::bus::format_event_time(audit::now_millis()),
                     account_id: audit_account_id,
                     order_id: Some(audit_order_id),
                     data: audit_data,
@@ -710,7 +710,7 @@ pub(super) async fn handle_cancel_order(
     if !state.bus_mode_outbox {
         state.bus_publisher.publish(BusEvent {
             event_type: "CancelRequested".into(),
-            at: audit::now_millis(),
+            at: crate::bus::format_event_time(audit::now_millis()),
             account_id: order.account_id.clone(),
             order_id: Some(order.order_id.clone()),
             data: serde_json::json!({}),

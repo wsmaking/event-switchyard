@@ -38,7 +38,7 @@ class FastPathEngine(
                     val cmd = queue.poll()
                     if (cmd == null) continue
                     when (cmd) {
-                        is NewOrderCommand -> handleNewOrder(cmd.orderId)
+                        is NewOrderCommand -> handleNewOrder(cmd)
                         is CancelOrderCommand -> handleCancel(cmd.orderId)
                     }
                 } catch (_: InterruptedException) {
@@ -49,8 +49,9 @@ class FastPathEngine(
         }
     }
 
-    private fun handleNewOrder(orderId: String) {
-        val order = orderStore.findById(orderId) ?: return
+    private fun handleNewOrder(cmd: NewOrderCommand) {
+        cmd.auditReady?.await()
+        val order = orderStore.findById(cmd.orderId) ?: return
         val now = Instant.now()
         val updated = orderStore.update(order.orderId) { it.copy(status = OrderStatus.SENT, lastUpdateAt = now) }
         if (updated != null) {

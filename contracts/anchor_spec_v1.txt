@@ -44,7 +44,8 @@ Event Switchyard — Implementation Anchor Spec v1
           - 400: "INVALID_JSON" など（text/plainの場合あり）
           - 401: {"status":"UNAUTHORIZED","reason":...}
           - 422: {"status":"REJECTED","reason":...}（バリデーション/リスク）
-          - 503: {"status":"REJECTED","reason":"QUEUE_REJECT"}（FastPath queue）
+          - 429: {"status":"REJECTED","reason":"QUEUE_FULL"}（FastPath queue）
+          - 503: {"status":"REJECTED","reason":"QUEUE_CLOSED"}（FastPath queue）
       - Idempotency:
           - Header: Idempotency-Key を付与すると、同一 accountId + key は同じ orderId を返す（202）。
           - Rust Gateway でも同じ挙動（HTTPのみ、TCPは対象外）。
@@ -170,6 +171,11 @@ Event Switchyard — Implementation Anchor Spec v1
 API schema（現状）
   - CreateOrderRequest: contracts/order_request_v1.schema.json
   - CanaryResult（CI用）: contracts/canary_result_v1.schema.json
+
+Schema versioning policy（決定）
+  - schema filename と $id には必ず v{N} を含める（例: *_v1.schema.json）
+  - 後方互換の変更は optional field の追加のみ（type/enum/required は変えない）
+  - 互換破壊の変更は新バージョンを追加し、旧版は1リリース以上維持する
 
 -----------------------------------------------------------------------------
 5) BackOffice（簡易 consumer の現状） + 今後のアンカー
