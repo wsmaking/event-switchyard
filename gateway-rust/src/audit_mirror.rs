@@ -248,7 +248,9 @@ fn load_audit_keys() -> (HashMap<String, Vec<u8>>, Option<String>) {
 fn parse_key_value(raw: &str) -> Option<Vec<u8>> {
     let trimmed = raw.trim();
     if let Some(value) = trimmed.strip_prefix("base64:") {
-        return base64::engine::general_purpose::STANDARD.decode(value.trim()).ok();
+        return base64::engine::general_purpose::STANDARD
+            .decode(value.trim())
+            .ok();
     }
     Some(trimmed.as_bytes().to_vec())
 }
@@ -257,7 +259,12 @@ fn truncate_file(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = OpenOptions::new().create(true).write(true).truncate(true).open(path) {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
         let _ = f.flush();
         let _ = f.sync_all();
     }
@@ -346,7 +353,10 @@ fn build_hash_entry(
     Some((line, hash, key_id.clone(), now_millis()))
 }
 
-fn read_hash_state(hash_path: &Path, anchor_path: &Path) -> (u64, Vec<u8>, Option<String>, Option<u64>) {
+fn read_hash_state(
+    hash_path: &Path,
+    anchor_path: &Path,
+) -> (u64, Vec<u8>, Option<String>, Option<u64>) {
     let file = match File::open(hash_path) {
         Ok(f) => f,
         Err(_) => return (0, Vec::new(), None, None),

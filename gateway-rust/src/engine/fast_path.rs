@@ -3,9 +3,7 @@
 //! 注文の受付 → リスクチェック → キュー投入 を担当。
 //! gateway-core の機能をそのまま使用し、FFIオーバーヘッドなしで動作。
 
-use gateway_core::{
-    now_nanos, FastPathQueue, LatencyHistogram, Order, RiskChecker, RiskResult,
-};
+use gateway_core::{FastPathQueue, LatencyHistogram, Order, RiskChecker, RiskResult, now_nanos};
 use std::sync::Arc;
 
 /// 注文処理結果

@@ -3,8 +3,8 @@
 //! 注文・アカウント単位でクライアントにイベントを配信する。
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 /// SSE イベント
@@ -129,9 +129,16 @@ impl SseHub {
             .unwrap_or(0)
     }
 
-    fn push_buffer(&self, buffers: &RwLock<HashMap<String, VecDeque<SseEvent>>>, key: &str, event: SseEvent) {
+    fn push_buffer(
+        &self,
+        buffers: &RwLock<HashMap<String, VecDeque<SseEvent>>>,
+        key: &str,
+        event: SseEvent,
+    ) {
         let mut map = buffers.write().unwrap();
-        let buf = map.entry(key.to_string()).or_insert_with(|| VecDeque::with_capacity(self.buffer_capacity));
+        let buf = map
+            .entry(key.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(self.buffer_capacity));
         buf.push_back(event);
         while buf.len() > self.buffer_capacity {
             buf.pop_front();
@@ -158,7 +165,7 @@ impl SseHub {
                 return ReplayResult {
                     events: Vec::new(),
                     resync_required: None,
-                }
+                };
             }
         };
         let oldest = buf.front().map(|e| e.id);
@@ -173,11 +180,7 @@ impl SseHub {
                 };
             }
         }
-        let events = buf
-            .iter()
-            .filter(|e| e.id > from_id)
-            .cloned()
-            .collect();
+        let events = buf.iter().filter(|e| e.id > from_id).cloned().collect();
         ReplayResult {
             events,
             resync_required: None,

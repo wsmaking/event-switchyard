@@ -4,13 +4,13 @@
 //! - 挙動: `Last-Event-ID` があればリプレイし、古すぎる場合は `resync_required` を通知。
 //! - 実体: `SseHub` のリングバッファ + broadcast で「リプレイ→live」を連結。
 
+use axum::http::HeaderMap;
 use axum::{
     extract::{Path, State},
     http::{header::AUTHORIZATION, StatusCode},
     response::sse::{Event, Sse},
     Json,
 };
-use axum::http::HeaderMap;
 use futures::stream::Stream;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -32,9 +32,7 @@ pub(super) async fn handle_order_stream(
     Path(order_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<AuthErrorResponse>)>
 {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let principal = match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(p) => p,
@@ -50,7 +48,9 @@ pub(super) async fn handle_order_stream(
 
     let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
     let order = if let Some(ref acc_id) = account_id_from_map {
-        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+        state
+            .sharded_store
+            .find_by_id_with_account(&order_id, acc_id)
     } else {
         state.sharded_store.find_by_id(&order_id)
     };
@@ -78,13 +78,19 @@ pub(super) async fn handle_order_stream(
             "oldestAvailableId": resync.oldest_available_id,
             "eventsEndpoint": format!("/orders/{}/events", order_id),
         });
-        initial.push(Event::default().event("resync_required").data(data.to_string()));
+        initial.push(
+            Event::default()
+                .event("resync_required")
+                .data(data.to_string()),
+        );
     }
     for ev in replay.events {
-        initial.push(Event::default()
-            .id(ev.id.to_string())
-            .event(ev.event_type)
-            .data(ev.data));
+        initial.push(
+            Event::default()
+                .id(ev.id.to_string())
+                .event(ev.event_type)
+                .data(ev.data),
+        );
     }
 
     // リプレイ後に live 配信へ接続
@@ -114,9 +120,7 @@ pub(super) async fn handle_account_stream(
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<AuthErrorResponse>)>
 {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let principal = match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(p) => p,
@@ -132,7 +136,9 @@ pub(super) async fn handle_account_stream(
 
     // 直近のイベントIDがあれば、その続きをリプレイする
     let last_event_id = parse_last_event_id(&headers);
-    let replay = state.sse_hub.replay_account(&principal.account_id, last_event_id);
+    let replay = state
+        .sse_hub
+        .replay_account(&principal.account_id, last_event_id);
     let mut initial = Vec::new();
     if let Some(resync) = replay.resync_required {
         let data = serde_json::json!({
@@ -142,13 +148,19 @@ pub(super) async fn handle_account_stream(
             "oldestAvailableId": resync.oldest_available_id,
             "eventsEndpoint": format!("/accounts/{}/events", principal.account_id),
         });
-        initial.push(Event::default().event("resync_required").data(data.to_string()));
+        initial.push(
+            Event::default()
+                .event("resync_required")
+                .data(data.to_string()),
+        );
     }
     for ev in replay.events {
-        initial.push(Event::default()
-            .id(ev.id.to_string())
-            .event(ev.event_type)
-            .data(ev.data));
+        initial.push(
+            Event::default()
+                .id(ev.id.to_string())
+                .event(ev.event_type)
+                .data(ev.data),
+        );
     }
 
     let rx = state.sse_hub.subscribe_account(&principal.account_id);

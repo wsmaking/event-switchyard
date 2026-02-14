@@ -115,14 +115,22 @@ impl ShardedOrderStore {
     }
 
     /// account_id を指定して注文IDで検索（推奨）
-    pub fn find_by_id_with_account(&self, order_id: &str, account_id: &str) -> Option<OrderSnapshot> {
+    pub fn find_by_id_with_account(
+        &self,
+        order_id: &str,
+        account_id: &str,
+    ) -> Option<OrderSnapshot> {
         let idx = self.shard_index(account_id);
         let guard = self.shards[idx].read().unwrap();
         guard.by_id.get(order_id).cloned()
     }
 
     /// client_order_id で検索（アカウント単位）
-    pub fn find_by_client_order_id(&self, account_id: &str, client_order_id: &str) -> Option<OrderSnapshot> {
+    pub fn find_by_client_order_id(
+        &self,
+        account_id: &str,
+        client_order_id: &str,
+    ) -> Option<OrderSnapshot> {
         let idx = self.shard_index(account_id);
         let guard = self.shards[idx].read().unwrap();
         let order_id = guard.client_order_index.get(client_order_id)?;
@@ -175,7 +183,8 @@ impl ShardedOrderStore {
         let entry = guard.idempotency_index.get(&idx_key)?.clone();
         if self.is_expired(entry.created_at_ms, now_ms) {
             guard.idempotency_index.remove(&idx_key);
-            self.idempotency_expired_total.fetch_add(1, Ordering::Relaxed);
+            self.idempotency_expired_total
+                .fetch_add(1, Ordering::Relaxed);
             return None;
         }
         guard.by_id.get(&entry.order_id).cloned()
@@ -185,36 +194,48 @@ impl ShardedOrderStore {
         &self,
         account_id: &str,
         key: &str,
-        create: F
+        create: F,
     ) -> IdempotencyOutcome
     where
         F: FnOnce() -> Option<OrderSnapshot>,
     {
+        // account単位でシャードを決め、同一キー判定を同じロック範囲で行う。
         let idx = self.shard_index(account_id);
         let idx_key = Self::idempotency_key(account_id, key);
         let mut guard = self.shards[idx].write().unwrap();
         let now_ms = now_millis();
 
+        // 既存キーがあれば、TTL有効時は既存注文を返す（再送を二重実行しない）。
         if let Some(entry) = guard.idempotency_index.get(&idx_key).cloned() {
             if !self.is_expired(entry.created_at_ms, now_ms) {
                 if let Some(order) = guard.by_id.get(&entry.order_id) {
                     return IdempotencyOutcome::Existing(order.clone());
                 }
             } else {
+                // 期限切れならインデックスを掃除し、初回扱いに戻す。
                 guard.idempotency_index.remove(&idx_key);
-                self.idempotency_expired_total.fetch_add(1, Ordering::Relaxed);
+                self.idempotency_expired_total
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
 
+        // 初回キーのみ create() を実行する。
+        // None は「受理失敗(保存対象なし)」として NotCreated を返す。
         let order = match create() {
             Some(order) => order,
             None => return IdempotencyOutcome::NotCreated,
         };
+
+        // 受理できた注文を本体ストアと検索インデックスに登録する。
         let order_id = order.order_id.clone();
         guard.by_id.insert(order_id.clone(), order.clone());
         if let Some(client_order_id) = order.client_order_id.clone() {
-            guard.client_order_index.insert(client_order_id, order_id.clone());
+            guard
+                .client_order_index
+                .insert(client_order_id, order_id.clone());
         }
+
+        // idempotencyキーにも紐付けて、次回同キーは Existing を返せるようにする。
         guard.idempotency_index.insert(
             idx_key,
             IdempotencyEntry {
@@ -222,6 +243,8 @@ impl ShardedOrderStore {
                 created_at_ms: now_ms,
             },
         );
+
+        // 初回受理として作成結果を返す。
         IdempotencyOutcome::Created(order)
     }
 
@@ -234,8 +257,14 @@ impl ShardedOrderStore {
 
         let mut guard = self.shards[idx].write().unwrap();
         guard.by_id.insert(order_id.clone(), order);
-        if let Some(client_order_id) = guard.by_id.get(&order_id).and_then(|o| o.client_order_id.clone()) {
-            guard.client_order_index.insert(client_order_id, order_id.clone());
+        if let Some(client_order_id) = guard
+            .by_id
+            .get(&order_id)
+            .and_then(|o| o.client_order_id.clone())
+        {
+            guard
+                .client_order_index
+                .insert(client_order_id, order_id.clone());
         }
 
         if let Some(key) = idempotency_key {
@@ -283,7 +312,11 @@ impl ShardedOrderStore {
     }
 
     /// Execution Report を適用
-    pub fn apply_execution_report(&self, report: &ExecReport, account_id: &str) -> Option<OrderSnapshot> {
+    pub fn apply_execution_report(
+        &self,
+        report: &ExecReport,
+        account_id: &str,
+    ) -> Option<OrderSnapshot> {
         self.update(&report.order_id, account_id, |prev| {
             let next_filled = prev.filled_qty.max(report.filled_qty_total);
 
@@ -338,12 +371,18 @@ impl ShardedOrderStore {
 
     /// 全注文数を取得
     pub fn count(&self) -> usize {
-        self.shards.iter().map(|s| s.read().unwrap().by_id.len()).sum()
+        self.shards
+            .iter()
+            .map(|s| s.read().unwrap().by_id.len())
+            .sum()
     }
 
     /// シャードごとの注文数を取得（デバッグ用）
     pub fn shard_counts(&self) -> Vec<usize> {
-        self.shards.iter().map(|s| s.read().unwrap().by_id.len()).collect()
+        self.shards
+            .iter()
+            .map(|s| s.read().unwrap().by_id.len())
+            .collect()
     }
 
     pub fn shard_count(&self) -> usize {
@@ -380,8 +419,8 @@ impl Default for ShardedOrderStore {
 mod tests {
     use super::*;
     use crate::order::{OrderType, TimeInForce};
-    use std::sync::{Arc, Barrier, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -412,7 +451,11 @@ mod tests {
         // シャード分散を確認（完全に偏っていないこと）
         let counts = store.shard_counts();
         let non_empty = counts.iter().filter(|&&c| c > 0).count();
-        assert!(non_empty > 10, "シャードが偏りすぎ: {} non-empty shards", non_empty);
+        assert!(
+            non_empty > 10,
+            "シャードが偏りすぎ: {} non-empty shards",
+            non_empty
+        );
     }
 
     #[test]
@@ -423,7 +466,7 @@ mod tests {
         for i in 0..10 {
             let order = OrderSnapshot::new(
                 format!("ord_{}", i),
-                "acc_1".into(),  // 同一アカウント
+                "acc_1".into(), // 同一アカウント
                 "AAPL".into(),
                 "BUY".into(),
                 OrderType::Limit,
@@ -574,7 +617,9 @@ mod tests {
             ))
         });
         match first {
-            IdempotencyOutcome::Existing(_) | IdempotencyOutcome::NotCreated => panic!("expected create"),
+            IdempotencyOutcome::Existing(_) | IdempotencyOutcome::NotCreated => {
+                panic!("expected create")
+            }
             IdempotencyOutcome::Created(_) => {}
         }
 

@@ -11,12 +11,14 @@ pub fn start_worker(
     queue: Arc<gateway_core::FastPathQueue>,
     worker_id: usize,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || loop {
-        if queue.pop().is_some() {
-            // drop
-        } else {
-            thread::sleep(Duration::from_micros(100));
+    thread::spawn(move || {
+        loop {
+            if queue.pop().is_some() {
+                // drop
+            } else {
+                thread::sleep(Duration::from_micros(100));
+            }
+            let _ = worker_id;
         }
-        let _ = worker_id;
     })
 }

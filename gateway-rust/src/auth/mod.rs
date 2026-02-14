@@ -3,7 +3,7 @@
 //! HS256 署名を検証し、accountId を抽出する。
 //! Kotlin Gateway と同じ環境変数・ロジックを使用。
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::env;
@@ -201,9 +201,7 @@ impl JwtAuth {
     fn payload_has_audience(payload: &serde_json::Value, expected: &str) -> bool {
         match payload.get("aud") {
             Some(serde_json::Value::String(s)) => s == expected,
-            Some(serde_json::Value::Array(arr)) => {
-                arr.iter().any(|v| v.as_str() == Some(expected))
-            }
+            Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(expected)),
             _ => false,
         }
     }
@@ -245,8 +243,7 @@ mod tests {
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload.as_bytes());
 
         let signing_input = format!("{}.{}", header_b64, payload_b64);
-        let mut mac =
-            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key error");
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key error");
         mac.update(signing_input.as_bytes());
         let sig = mac.finalize().into_bytes();
         let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);

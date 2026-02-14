@@ -8,8 +8,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static OUTBOX_LINES_READ: AtomicU64 = AtomicU64::new(0);
@@ -55,7 +55,11 @@ pub struct OutboxWorker {
 }
 
 impl OutboxWorker {
-    pub fn new(audit_path: impl AsRef<Path>, bus: Arc<BusPublisher>, offset_path: impl AsRef<Path>) -> Self {
+    pub fn new(
+        audit_path: impl AsRef<Path>,
+        bus: Arc<BusPublisher>,
+        offset_path: impl AsRef<Path>,
+    ) -> Self {
         Self {
             offset_path: offset_path.as_ref().to_path_buf(),
             audit_path: audit_path.as_ref().to_path_buf(),
