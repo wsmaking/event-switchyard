@@ -1,0 +1,84 @@
+# Inflight制御 説明テンプレ（実務/面接向け）
+
+1) 何を守る設計か
+- 目標SLO:
+  - queue_full_total = 0 を維持（深部崩壊回避）
+  - tail latency（thr_p99_us）を許容範囲で維持
+- 失敗時の優先順位:
+  1. 深部保護（queue full 回避）
+  2. 可用性維持（入口遮断で劣化運転）
+  3. 通常性能回復
+
+2) なぜこの制御が必要か
+- 問題:
+  - WAL/ディスク劣化時に無制限受入れすると、深部キューが飽和して崩壊する。
+- 解法:
+  - reserve で入口受入れ可否を即時判定
+  - tick で動的limitを更新し、過負荷時は受入れ上限を下げる
+- 意図:
+  - 壊れる前に拒否し、復帰可能な劣化に留める。
+
+3) トレードオフ
+- 取るもの:
+  - 深部崩壊の回避、復帰容易性、運用時の予測可能性
+- 捨てるもの:
+  - 劣化時の受理率（reject増加）
+  - 一時的なスループット見かけ値の解釈容易性
+- 注意:
+  - throughput_rps と ack_p99_us は reject を含むため単独評価しない。
+
+4) 採用プリセット
+- Normal:
+  - CAP=1024, ALPHA=0.8, WAIT_US=200, BATCH=128
+- Degraded:
+  - CAP=512, ALPHA=0.8, BATCH=1
+- 切替ルール（最終固定）:
+  - Normal -> Degraded:
+    - wal_age_ms >= 550 が継続（60秒目安）
+    - または backpressure_inflight_total 増分急増
+  - Degraded -> Normal:
+    - wal_age_ms < 200 が継続（5分目安）
+    - かつ queue_full_total 増分 0
+
+5) 実測結果（2026-02-14）
+- 計測日:
+  - 2026-02-14
+- 条件:
+  - A/B比較（各5回中央値）:
+    - A: CAP=1024, ALPHA=0.8
+    - B: CAP=512, ALPHA=1.0
+  - 境界再試験（各5回中央値）:
+    - CAP=512, ALPHA=0.8, BATCH=1
+    - wait_us in {200, 1000, 5000}
+  - 切替検証:
+    - Normal -> Degraded -> Normal（10s, 220c, 32 accounts）
+
+- 結果表（A/B比較, 各5回中央値）:
+  - A_1024_08: throughput=9299, thr_p99=71843us, rejected=0, bp_inflight=0, queue_full=0, ack_p99=2719us
+  - B_0512_10: throughput=9021, thr_p99=78243us, rejected=0, bp_inflight=156, queue_full=0, ack_p99=2911us
+  - 採用: A（Normal）
+
+- 結果表（境界再試験, CAP=512/BATCH=1, 各5回中央値）:
+  - wait=200:  throughput=8738, thr_p99=81378us, rejected=101204, bp_inflight=133838, queue_full=0, wal_age_ms=749,  limit=270
+  - wait=1000: throughput=8601, thr_p99=86775us, rejected=97359,  bp_inflight=128500, queue_full=0, wal_age_ms=770,  limit=389
+  - wait=5000: throughput=9420, thr_p99=71249us, rejected=106898, bp_inflight=144191, queue_full=0, wal_age_ms=751,  limit=442
+  - 解釈: reject/backpressure を増やしてでも queue_full=0 を維持できる。
+
+- 結果表（切替検証 1run）:
+  - normal_baseline: throughput=7279, thr_p99=98687us, rejected=0,     bp_inflight=572,    queue_full=0, ack_p99=4571us, wal_age_ms=0,   limit=1024
+  - degraded_injected: throughput=9761, thr_p99=60928us, rejected=94476, bp_inflight=127439, queue_full=0, ack_p99=195us,  wal_age_ms=745, limit=267
+  - normal_recovery: throughput=9025, thr_p99=65823us, rejected=0,     bp_inflight=0,      queue_full=0, ack_p99=1691us, wal_age_ms=0,   limit=1024
+  - 解釈: 劣化時に limit を下げて深部保護し、復帰時に normal へ戻せることを確認。
+
+- 結論:
+  - 切替で守れたもの:
+    - queue_full_total=0（深部崩壊回避）
+    - wal_age 悪化時の制御介入（limit低下）
+    - 復帰後の正常運転復元（wal_age=0, limit=1024）
+  - 犠牲にしたもの:
+    - 劣化時の受理率（rejected増加）
+    - 指標解釈の単純さ（throughput/ackはreject込み）
+
+6) 運用判断の一言（確定）
+- 劣化時は受理率より深部保護を優先し、queue_fullゼロを最上位KPIに置く。
+- 復帰条件を満たしたらNormalへ戻し、過剰遮断を解除する。

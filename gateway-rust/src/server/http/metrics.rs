@@ -33,12 +33,19 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let idempotency_expired = state.sharded_store.idempotency_expired_total();
     let idempotency_checked = state.idempotency_checked.load(Ordering::Relaxed);
     let idempotency_handled = idempotency_hits + idempotency_creates + idempotency_expired;
-    let idempotency_handled_ratio =
-        if idempotency_checked == 0 { 0.0 } else { idempotency_handled as f64 / idempotency_checked as f64 };
-    let idempotency_expired_ratio =
-        if idempotency_checked == 0 { 0.0 } else { idempotency_expired as f64 / idempotency_checked as f64 };
+    let idempotency_handled_ratio = if idempotency_checked == 0 {
+        0.0
+    } else {
+        idempotency_handled as f64 / idempotency_checked as f64
+    };
+    let idempotency_expired_ratio = if idempotency_checked == 0 {
+        0.0
+    } else {
+        idempotency_expired as f64 / idempotency_checked as f64
+    };
     let bus_enabled = if bus_metrics.enabled { 1 } else { 0 };
     let reject_invalid_qty = state.reject_invalid_qty.load(Ordering::Relaxed);
+    let reject_rate_limit = state.reject_rate_limit.load(Ordering::Relaxed);
     let reject_risk = state.reject_risk.load(Ordering::Relaxed);
     let reject_invalid_symbol = state.reject_invalid_symbol.load(Ordering::Relaxed);
     let reject_queue_full = state.reject_queue_full.load(Ordering::Relaxed);
@@ -55,7 +62,11 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let inflight_limit_dynamic = state.inflight_controller.current_limit();
     let durable_commit_rate_ewma_milli = state.inflight_controller.rate_ewma_milli();
     let soft_reject_rate_ewma_milli = state.inflight_controller.soft_reject_rate_ewma_milli();
-    let inflight_dynamic_enabled = if state.inflight_controller.enabled() { 1 } else { 0 };
+    let inflight_dynamic_enabled = if state.inflight_controller.enabled() {
+        1
+    } else {
+        0
+    };
     let ack_p50 = state.ack_hist.snapshot().percentile(50.0);
     let ack_p99 = state.ack_hist.snapshot().percentile(99.0);
     let ack_p999 = state.ack_hist.snapshot().percentile(99.9);
@@ -68,6 +79,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let fdatasync_p50 = state.fdatasync_hist.snapshot().percentile(50.0);
     let fdatasync_p99 = state.fdatasync_hist.snapshot().percentile(99.0);
     let fdatasync_p999 = state.fdatasync_hist.snapshot().percentile(99.9);
+    let durable_notify_p50 = state.durable_notify_hist.snapshot().percentile(50.0);
+    let durable_notify_p99 = state.durable_notify_hist.snapshot().percentile(99.0);
+    let durable_notify_p999 = state.durable_notify_hist.snapshot().percentile(99.9);
     let fast_path_processing_p50 = state.engine.processing_p50() / 1_000;
     let fast_path_processing_p99 = state.engine.processing_p99() / 1_000;
     let fast_path_processing_p999 = state.engine.processing_p999() / 1_000;
@@ -142,6 +156,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_reject_invalid_qty_total Total rejects due to invalid quantity\n\
          # TYPE gateway_reject_invalid_qty_total counter\n\
          gateway_reject_invalid_qty_total {}\n\
+         # HELP gateway_reject_rate_limit_total Total rejects due to rate limit\n\
+         # TYPE gateway_reject_rate_limit_total counter\n\
+         gateway_reject_rate_limit_total {}\n\
          # HELP gateway_reject_risk_total Total rejects due to risk limits\n\
          # TYPE gateway_reject_risk_total counter\n\
          gateway_reject_risk_total {}\n\
@@ -226,6 +243,15 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_fdatasync_p999_us fdatasync latency p999 in microseconds\n\
          # TYPE gateway_fdatasync_p999_us gauge\n\
          gateway_fdatasync_p999_us {}\n\
+         # HELP gateway_durable_notify_p50_us Durable notify latency p50 in microseconds\n\
+         # TYPE gateway_durable_notify_p50_us gauge\n\
+         gateway_durable_notify_p50_us {}\n\
+         # HELP gateway_durable_notify_p99_us Durable notify latency p99 in microseconds\n\
+         # TYPE gateway_durable_notify_p99_us gauge\n\
+         gateway_durable_notify_p99_us {}\n\
+         # HELP gateway_durable_notify_p999_us Durable notify latency p999 in microseconds\n\
+         # TYPE gateway_durable_notify_p999_us gauge\n\
+         gateway_durable_notify_p999_us {}\n\
          # HELP gateway_fast_path_processing_p50_us Fast path risk processing latency p50 in microseconds\n\
          # TYPE gateway_fast_path_processing_p50_us gauge\n\
          gateway_fast_path_processing_p50_us {}\n\
@@ -279,6 +305,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         idempotency_handled_ratio,
         idempotency_expired_ratio,
         reject_invalid_qty,
+        reject_rate_limit,
         reject_risk,
         reject_invalid_symbol,
         reject_queue_full,
@@ -307,6 +334,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         fdatasync_p50,
         fdatasync_p99,
         fdatasync_p999,
+        durable_notify_p50,
+        durable_notify_p99,
+        durable_notify_p999,
         fast_path_processing_p50,
         fast_path_processing_p99,
         fast_path_processing_p999,

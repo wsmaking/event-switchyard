@@ -44,6 +44,7 @@ use crate::backpressure::BackpressureConfig;
 use crate::bus::BusPublisher;
 use crate::engine::FastPathEngine;
 use crate::inflight::InflightControllerHandle;
+use crate::rate_limit::AccountRateLimiter;
 use crate::sse::SseHub;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
 use gateway_core::LatencyHistogram;
@@ -74,14 +75,17 @@ pub(super) struct AppState {
     pub(super) bus_mode_outbox: bool,
     pub(super) backpressure: BackpressureConfig,
     pub(super) inflight_controller: InflightControllerHandle,
+    pub(super) rate_limiter: Option<Arc<AccountRateLimiter>>,
     pub(super) ack_hist: Arc<LatencyHistogram>,
     pub(super) wal_enqueue_hist: Arc<LatencyHistogram>,
     pub(super) durable_ack_hist: Arc<LatencyHistogram>,
     pub(super) fdatasync_hist: Arc<LatencyHistogram>,
+    pub(super) durable_notify_hist: Arc<LatencyHistogram>,
     pub(super) idempotency_checked: Arc<AtomicU64>,
     pub(super) idempotency_hits: Arc<AtomicU64>,
     pub(super) idempotency_creates: Arc<AtomicU64>,
     pub(super) reject_invalid_qty: Arc<AtomicU64>,
+    pub(super) reject_rate_limit: Arc<AtomicU64>,
     pub(super) reject_risk: Arc<AtomicU64>,
     pub(super) reject_invalid_symbol: Arc<AtomicU64>,
     pub(super) reject_queue_full: Arc<AtomicU64>,
@@ -122,6 +126,7 @@ pub async fn run(
     if inflight_controller.enabled() {
         backpressure.inflight_max = None;
     }
+    let rate_limiter = crate::rate_limit::AccountRateLimiter::from_env().map(Arc::new);
 
     let audit_read_path = {
         let configured = std::env::var("AUDIT_LOG_PATH").ok().map(PathBuf::from);
@@ -157,14 +162,17 @@ pub async fn run(
         bus_mode_outbox,
         backpressure,
         inflight_controller,
+        rate_limiter,
         ack_hist: Arc::new(LatencyHistogram::new()),
         wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
         durable_ack_hist: Arc::new(LatencyHistogram::new()),
         fdatasync_hist: Arc::new(LatencyHistogram::new()),
+        durable_notify_hist: Arc::new(LatencyHistogram::new()),
         idempotency_checked: Arc::new(AtomicU64::new(0)),
         idempotency_hits: Arc::new(AtomicU64::new(0)),
         idempotency_creates: Arc::new(AtomicU64::new(0)),
         reject_invalid_qty: Arc::new(AtomicU64::new(0)),
+        reject_rate_limit: Arc::new(AtomicU64::new(0)),
         reject_risk: Arc::new(AtomicU64::new(0)),
         reject_invalid_symbol: Arc::new(AtomicU64::new(0)),
         reject_queue_full: Arc::new(AtomicU64::new(0)),
@@ -186,7 +194,10 @@ pub async fn run(
     let app = Router::new()
         .route("/orders", post(handle_order))
         .route("/orders/{order_id}", get(handle_get_order))
-        .route("/orders/client/{client_order_id}", get(handle_get_order_by_client_id))
+        .route(
+            "/orders/client/{client_order_id}",
+            get(handle_get_order_by_client_id),
+        )
         .route("/orders/{order_id}/cancel", post(handle_cancel_order))
         .route("/orders/{order_id}/events", get(handle_order_events))
         .route("/accounts/{account_id}/events", get(handle_account_events))
@@ -213,6 +224,7 @@ async fn run_durable_notifier(
     state: AppState,
 ) {
     while let Some(note) = rx.recv().await {
+        let notify_start_ns = gateway_core::now_nanos();
         if note.durable_done_ns >= note.request_start_ns && note.request_start_ns > 0 {
             let elapsed_us = (note.durable_done_ns - note.request_start_ns) / 1_000;
             state.durable_ack_hist.record(elapsed_us);
@@ -227,22 +239,33 @@ async fn run_durable_notifier(
             0
         };
         let data = serde_json::json!({
-            "eventType": note.event.event_type,
+            "eventType": note.event_type,
             "durableLatencyUs": durable_latency_us,
         })
         .to_string();
 
-        if note.event.event_type == "OrderAccepted" {
-            if let Some(order_id) = note.event.order_id.as_deref() {
+        if note.event_type == "OrderAccepted" {
+            if let Some(order_id) = note.order_id.as_deref() {
                 state
                     .sharded_store
-                    .mark_durable(order_id, &note.event.account_id, note.event.at);
+                    .mark_durable(order_id, &note.account_id, note.event_at);
                 state.inflight_controller.on_commit(1);
-                state.sse_hub.publish_order(order_id, "order_durable", &data);
+                state
+                    .sse_hub
+                    .publish_order(order_id, "order_durable", &data);
             }
             state
                 .sse_hub
-                .publish_account(&note.event.account_id, "order_durable", &data);
+                .publish_account(&note.account_id, "order_durable", &data);
+        }
+
+        // durable完了後の通知経路（channel受信〜SSE/状態更新）を観測。
+        if note.durable_done_ns > 0 {
+            let notify_us = gateway_core::now_nanos().saturating_sub(note.durable_done_ns) / 1_000;
+            state.durable_notify_hist.record(notify_us);
+        } else {
+            let notify_us = gateway_core::now_nanos().saturating_sub(notify_start_ns) / 1_000;
+            state.durable_notify_hist.record(notify_us);
         }
     }
 }
