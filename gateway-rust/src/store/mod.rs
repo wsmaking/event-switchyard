@@ -139,7 +139,12 @@ impl OrderStore {
 
     pub fn find_by_idempotency_key(&self, account_id: &str, key: &str) -> Option<OrderSnapshot> {
         let idx_key = Self::idempotency_key(account_id, key);
-        let order_id = self.idempotency_index.read().unwrap().get(&idx_key).cloned()?;
+        let order_id = self
+            .idempotency_index
+            .read()
+            .unwrap()
+            .get(&idx_key)
+            .cloned()?;
         self.find_by_id(&order_id)
     }
 
@@ -283,10 +288,16 @@ mod tests {
 
         store.put(order, Some("idem_key_1"));
 
-        let found = store.find_by_idempotency_key("acc_1", "idem_key_1").unwrap();
+        let found = store
+            .find_by_idempotency_key("acc_1", "idem_key_1")
+            .unwrap();
         assert_eq!(found.order_id, "ord_1");
 
-        assert!(store.find_by_idempotency_key("acc_1", "other_key").is_none());
+        assert!(
+            store
+                .find_by_idempotency_key("acc_1", "other_key")
+                .is_none()
+        );
     }
 
     #[test]

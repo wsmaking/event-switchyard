@@ -1,0 +1,4 @@
+[env]
+# rdkafka-sys の C++ ビルドが macOS 環境で c++ 標準未指定だと失敗するため固定する。
+CXXFLAGS = "-std=gnu++17"
+CMAKE_CXX_STANDARD = "17"

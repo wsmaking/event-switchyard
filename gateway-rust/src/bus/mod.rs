@@ -3,12 +3,12 @@
 //! Best-effort publish for downstream consumers.
 
 use chrono::{SecondsFormat, TimeZone, Utc};
-use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
-use std::sync::mpsc;
+use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -78,7 +78,8 @@ impl BusPublisher {
         let enabled = std::env::var("KAFKA_ENABLE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let bootstrap = std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".into());
+        let bootstrap =
+            std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".into());
         let topic = std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "events".into());
         let client_id = std::env::var("KAFKA_CLIENT_ID").unwrap_or_else(|_| "gateway-rust".into());
 
@@ -144,12 +145,11 @@ impl BusPublisher {
                 return;
             }
         };
-        let key = event.order_id.as_deref().unwrap_or(event.account_id.as_str());
-        match producer.send_result(
-            FutureRecord::to(&self.topic)
-                .payload(&payload)
-                .key(key),
-        ) {
+        let key = event
+            .order_id
+            .as_deref()
+            .unwrap_or(event.account_id.as_str());
+        match producer.send_result(FutureRecord::to(&self.topic).payload(&payload).key(key)) {
             Ok(delivery) => {
                 self.stats.publish_queued.fetch_add(1, Ordering::Relaxed);
                 if let Some(tx) = &self.delivery_tx {
@@ -195,26 +195,31 @@ impl BusPublisher {
                 return false;
             }
         };
-        let key = event.order_id.as_deref().unwrap_or(event.account_id.as_str());
-        match producer.send_result(
-            FutureRecord::to(&self.topic)
-                .payload(&payload)
-                .key(key),
-        ) {
+        let key = event
+            .order_id
+            .as_deref()
+            .unwrap_or(event.account_id.as_str());
+        match producer.send_result(FutureRecord::to(&self.topic).payload(&payload).key(key)) {
             Ok(delivery) => {
                 self.stats.publish_queued.fetch_add(1, Ordering::Relaxed);
                 match futures::executor::block_on(delivery) {
                     Ok(Ok(_)) => {
-                        self.stats.publish_delivery_ok.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .publish_delivery_ok
+                            .fetch_add(1, Ordering::Relaxed);
                         true
                     }
                     Ok(Err((err, _))) => {
-                        self.stats.publish_delivery_err.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .publish_delivery_err
+                            .fetch_add(1, Ordering::Relaxed);
                         warn!("kafka delivery failed: {}", err);
                         false
                     }
                     Err(err) => {
-                        self.stats.publish_delivery_err.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .publish_delivery_err
+                            .fetch_add(1, Ordering::Relaxed);
                         warn!("kafka delivery canceled: {}", err);
                         false
                     }

@@ -93,6 +93,9 @@ mod tests {
         // 検証
         assert_eq!(u64::from_le_bytes(resp_buf[0..8].try_into().unwrap()), 1);
         assert_eq!(resp_buf[8], status::ACCEPTED);
-        assert_eq!(u64::from_le_bytes(resp_buf[16..24].try_into().unwrap()), 500);
+        assert_eq!(
+            u64::from_le_bytes(resp_buf[16..24].try_into().unwrap()),
+            500
+        );
     }
 }

@@ -25,7 +25,10 @@ pub fn start_worker(
                 return;
             }
         };
-        eprintln!("Connected to exchange at {}:{}", exchange_host, exchange_port);
+        eprintln!(
+            "Connected to exchange at {}:{}",
+            exchange_host, exchange_port
+        );
 
         loop {
             // キューから注文を取り出す

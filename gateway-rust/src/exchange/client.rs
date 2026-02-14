@@ -27,7 +27,8 @@ impl ExchangeClient {
 
         let read_stream = stream.try_clone()?;
         let writer = Arc::new(Mutex::new(BufWriter::new(stream)));
-        let callbacks: Arc<Mutex<HashMap<String, ReportCallback>>> = Arc::new(Mutex::new(HashMap::new()));
+        let callbacks: Arc<Mutex<HashMap<String, ReportCallback>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let callbacks_clone = Arc::clone(&callbacks);
         let reader_thread = thread::spawn(move || {

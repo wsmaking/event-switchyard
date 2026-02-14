@@ -3,6 +3,11 @@
 実装途中
 ---
 
+## ドキュメント
+
+- アーキテクチャ全体: `docs/arch/overview.md`
+- Rate Limit設計: `docs/arch/rate_limit.md`
+
 ## クイックスタート（3分）
 
 ### 1. アプリケーション起動

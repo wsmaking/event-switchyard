@@ -3,12 +3,12 @@
 //! - 位置: 注文処理の結果を後から追跡・検証するための運用/調査パス。
 //! - 内包: 注文/アカウント別イベント取得 + 監査ログ検証/アンカー取得。
 
+use axum::http::HeaderMap;
 use axum::{
     extract::{Path, Query, State},
     http::{header::AUTHORIZATION, StatusCode},
     Json,
 };
-use axum::http::HeaderMap;
 
 use crate::audit::{self, AuditAnchor, AuditEvent, AuditVerifyResult};
 use crate::auth::{AuthError, AuthResult};
@@ -42,9 +42,7 @@ pub(super) async fn handle_order_events(
     Path(order_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<AuditEventsResponse>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let principal = match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(p) => p,
@@ -60,7 +58,9 @@ pub(super) async fn handle_order_events(
 
     let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
     let order = if let Some(ref acc_id) = account_id_from_map {
-        state.sharded_store.find_by_id_with_account(&order_id, acc_id)
+        state
+            .sharded_store
+            .find_by_id_with_account(&order_id, acc_id)
     } else {
         state.sharded_store.find_by_id(&order_id)
     };
@@ -117,9 +117,7 @@ pub(super) async fn handle_account_events(
     Path(account_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<AuditEventsResponse>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     let principal = match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(p) => p,
@@ -172,9 +170,7 @@ pub(super) async fn handle_audit_verify(
     headers: HeaderMap,
     Query(query): Query<AuditVerifyQuery>,
 ) -> Result<Json<AuditVerifyResult>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(_) => {
@@ -205,9 +201,7 @@ pub(super) async fn handle_audit_anchor(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<AuditAnchor>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
 
     match state.jwt_auth.authenticate(auth_header) {
         AuthResult::Ok(_) => match state.audit_log.anchor_snapshot() {

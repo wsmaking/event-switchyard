@@ -37,15 +37,22 @@ impl OrderIdMap {
     /// 新しい内部IDを発番し、外部IDとマッピングを登録
     pub fn register(&self, external_id: String, account_id: String) -> u64 {
         let internal_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.internal_to_external.insert(internal_id, external_id.clone());
+        self.internal_to_external
+            .insert(internal_id, external_id.clone());
         self.external_to_internal.insert(external_id, internal_id);
         self.internal_to_account.insert(internal_id, account_id);
         internal_id
     }
 
     /// 外部IDを指定して内部IDを登録（内部ID事前発番済みの場合）
-    pub fn register_with_internal(&self, internal_id: u64, external_id: String, account_id: String) {
-        self.internal_to_external.insert(internal_id, external_id.clone());
+    pub fn register_with_internal(
+        &self,
+        internal_id: u64,
+        external_id: String,
+        account_id: String,
+    ) {
+        self.internal_to_external
+            .insert(internal_id, external_id.clone());
         self.external_to_internal.insert(external_id, internal_id);
         self.internal_to_account.insert(internal_id, account_id);
     }
@@ -53,7 +60,9 @@ impl OrderIdMap {
     /// 内部ID -> 外部ID
     #[inline]
     pub fn to_external(&self, internal_id: u64) -> Option<String> {
-        self.internal_to_external.get(&internal_id).map(|v| v.clone())
+        self.internal_to_external
+            .get(&internal_id)
+            .map(|v| v.clone())
     }
 
     /// 外部ID -> 内部ID
@@ -65,7 +74,9 @@ impl OrderIdMap {
     /// 内部ID -> account_id
     #[inline]
     pub fn get_account_id(&self, internal_id: u64) -> Option<String> {
-        self.internal_to_account.get(&internal_id).map(|v| v.clone())
+        self.internal_to_account
+            .get(&internal_id)
+            .map(|v| v.clone())
     }
 
     /// 外部ID -> account_id（ショートカット）
