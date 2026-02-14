@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full preset-switch-gate fdatasync-ab fdatasync-adaptive-sweep adaptive-profile-search rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -53,6 +53,10 @@ help:
 	@echo "  make perf-gate-rust-ci - PR向け実測ゲート (strict + regression)"
 	@echo "  make perf-gate-rust-nightly - 夜間向け実測ゲート (full report)"
 	@echo "  make perf-gate-rust-bless - Rust Perf Gateのベースライン更新"
+	@echo "  make preset-switch-gate - Normal/Degraded切替シナリオのPASS/FAIL判定"
+	@echo "  make fdatasync-ab - fixed/adaptive の durability A/B比較"
+	@echo "  make fdatasync-adaptive-sweep - adaptiveパラメータの小規模スイープ"
+	@echo "  make adaptive-profile-search - durability+switch安定性を組み合わせた探索"
 	@echo ""
 	@echo "Rust Gateway (rootから実行):"
 	@echo "  make rust-check  - gateway-rust の cargo check"
@@ -208,6 +212,19 @@ perf-gate-rust-nightly:
 # Rust Perf Gate baseline update (明示的に実行)
 perf-gate-rust-bless:
 	@UPDATE_BASELINE=1 scripts/ops/perf_gate_rust_full.sh
+
+# Inflight preset switch gate (Normal -> Degraded -> Normal)
+preset-switch-gate:
+	@scripts/ops/check_preset_switch_gate.sh
+
+fdatasync-ab:
+	@scripts/ops/run_fdatasync_ab_compare.sh
+
+fdatasync-adaptive-sweep:
+	@scripts/ops/run_fdatasync_adaptive_sweep.sh
+
+adaptive-profile-search:
+	@scripts/ops/run_adaptive_profile_search.sh
 
 # Rust Gateway (rootから実行)
 rust-check:

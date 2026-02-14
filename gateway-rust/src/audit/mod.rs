@@ -2,24 +2,24 @@
 //!
 //! Minimal implementation for order/account event history.
 
+use aws_sdk_kms::primitives::Blob;
+use aws_sdk_kms::Client as KmsClient;
 use base64::Engine;
-use hmac::{Hmac, Mac};
 use gateway_core::now_nanos;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
-use aws_sdk_kms::primitives::Blob;
-use aws_sdk_kms::Client as KmsClient;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +53,12 @@ pub struct AuditLog {
     async_enabled: bool,
     fdatasync_max_wait_us: u64,
     fdatasync_max_batch: usize,
+    fdatasync_adaptive: bool,
+    fdatasync_adaptive_min_wait_us: u64,
+    fdatasync_adaptive_max_wait_us: u64,
+    fdatasync_adaptive_min_batch: usize,
+    fdatasync_adaptive_max_batch: usize,
+    fdatasync_adaptive_target_sync_us: u64,
     append_tx: Mutex<Option<Sender<AuditAppendRequest>>>,
 }
 
@@ -65,7 +71,10 @@ pub struct AuditAppendTimings {
 
 #[derive(Debug, Clone)]
 pub struct AuditDurableNotification {
-    pub event: AuditEvent,
+    pub event_type: String,
+    pub account_id: String,
+    pub order_id: Option<String>,
+    pub event_at: u64,
     pub request_start_ns: u64,
     pub enqueue_done_ns: u64,
     pub durable_done_ns: u64,
@@ -117,7 +126,32 @@ impl AuditLog {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64);
-        let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) = init_hash_chain(&path)?;
+        let fdatasync_adaptive = std::env::var("AUDIT_FDATASYNC_ADAPTIVE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let fdatasync_adaptive_max_wait_us = std::env::var("AUDIT_FDATASYNC_ADAPTIVE_MAX_WAIT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(fdatasync_max_wait_us);
+        let fdatasync_adaptive_min_wait_us = std::env::var("AUDIT_FDATASYNC_ADAPTIVE_MIN_WAIT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or((fdatasync_max_wait_us / 2).max(50));
+        let fdatasync_adaptive_max_batch = std::env::var("AUDIT_FDATASYNC_ADAPTIVE_MAX_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(fdatasync_max_batch);
+        let fdatasync_adaptive_min_batch = std::env::var("AUDIT_FDATASYNC_ADAPTIVE_MIN_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or((fdatasync_max_batch / 2).max(1));
+        let fdatasync_adaptive_target_sync_us =
+            std::env::var("AUDIT_FDATASYNC_ADAPTIVE_TARGET_SYNC_US")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(4_000);
+        let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) =
+            init_hash_chain(&path)?;
         let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
             .ok()
             .map(PathBuf::from)
@@ -149,6 +183,12 @@ impl AuditLog {
             async_enabled,
             fdatasync_max_wait_us,
             fdatasync_max_batch,
+            fdatasync_adaptive,
+            fdatasync_adaptive_min_wait_us,
+            fdatasync_adaptive_max_wait_us,
+            fdatasync_adaptive_min_batch,
+            fdatasync_adaptive_max_batch,
+            fdatasync_adaptive_target_sync_us,
             append_tx: Mutex::new(None),
         })
     }
@@ -157,7 +197,11 @@ impl AuditLog {
         let _ = self.append_with_timings(event, now_nanos());
     }
 
-    pub fn append_with_timings(&self, event: AuditEvent, request_start_ns: u64) -> AuditAppendTimings {
+    pub fn append_with_timings(
+        &self,
+        event: AuditEvent,
+        request_start_ns: u64,
+    ) -> AuditAppendTimings {
         if self.async_enabled {
             if let Ok(guard) = self.append_tx.lock() {
                 if let Some(tx) = guard.as_ref() {
@@ -184,7 +228,10 @@ impl AuditLog {
         self.append_sync_with_timings(event)
     }
 
-    pub fn start_async_writer(self: std::sync::Arc<Self>, durable_tx: Option<UnboundedSender<AuditDurableNotification>>) {
+    pub fn start_async_writer(
+        self: std::sync::Arc<Self>,
+        durable_tx: Option<UnboundedSender<AuditDurableNotification>>,
+    ) {
         if !self.async_enabled {
             return;
         }
@@ -202,8 +249,37 @@ impl AuditLog {
         let fdatasync_enabled = self.fdatasync_enabled;
         let max_wait_us = self.fdatasync_max_wait_us.max(1);
         let max_batch = self.fdatasync_max_batch.max(1);
+        let adaptive_cfg = if self.fdatasync_adaptive {
+            let min_wait_us = self
+                .fdatasync_adaptive_min_wait_us
+                .max(1)
+                .min(self.fdatasync_adaptive_max_wait_us.max(1));
+            let max_wait_us = self.fdatasync_adaptive_max_wait_us.max(min_wait_us);
+            let min_batch = self
+                .fdatasync_adaptive_min_batch
+                .max(1)
+                .min(self.fdatasync_adaptive_max_batch.max(1));
+            let max_batch = self.fdatasync_adaptive_max_batch.max(min_batch);
+            Some(FdatasyncAdaptiveConfig {
+                min_wait_us,
+                max_wait_us,
+                min_batch,
+                max_batch,
+                target_sync_us: self.fdatasync_adaptive_target_sync_us.max(100),
+            })
+        } else {
+            None
+        };
         std::thread::spawn(move || {
-            run_async_writer(self, rx, durable_tx, fdatasync_enabled, max_wait_us, max_batch);
+            run_async_writer(
+                self,
+                rx,
+                durable_tx,
+                fdatasync_enabled,
+                max_wait_us,
+                max_batch,
+                adaptive_cfg,
+            );
         });
     }
 
@@ -515,8 +591,16 @@ pub struct AuditAnchor {
 }
 
 fn init_hash_chain(
-    path: &Path
-) -> std::io::Result<(Option<PathBuf>, Option<Mutex<BufWriter<File>>>, HashMap<String, Vec<u8>>, Option<String>, Vec<u8>, u64, Option<String>)> {
+    path: &Path,
+) -> std::io::Result<(
+    Option<PathBuf>,
+    Option<Mutex<BufWriter<File>>>,
+    HashMap<String, Vec<u8>>,
+    Option<String>,
+    Vec<u8>,
+    u64,
+    Option<String>,
+)> {
     let (keys, active_id) = load_audit_keys();
     if keys.is_empty() || active_id.is_none() {
         return Ok((None, None, HashMap::new(), None, Vec::new(), 0, None));
@@ -572,13 +656,16 @@ fn load_last_hash(path: &Path) -> Result<(Vec<u8>, u64, Option<String>), String>
         Some(l) => l,
         None => return Ok((Vec::new(), 0, None)),
     };
-    let entry: AuditHashEntry = serde_json::from_str(line).map_err(|_| "hash entry parse failed".to_string())?;
+    let entry: AuditHashEntry =
+        serde_json::from_str(line).map_err(|_| "hash entry parse failed".to_string())?;
     let hash_bytes = decode_hash(&entry.hash).unwrap_or_default();
     Ok((hash_bytes, entry.seq, Some(entry.key_id)))
 }
 
 fn decode_hash(value: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD.decode(value.trim()).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .ok()
 }
 
 fn backup_corrupt_hash(path: &Path) -> std::io::Result<()> {
@@ -732,7 +819,9 @@ fn load_audit_keys() -> (HashMap<String, Vec<u8>>, Option<String>) {
             }
         }
     }
-    let active_id = std::env::var("AUDIT_KEY_ID").ok().filter(|v| !v.trim().is_empty());
+    let active_id = std::env::var("AUDIT_KEY_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let active_id = active_id.or_else(|| keys.keys().next().cloned());
     (keys, active_id)
 }
@@ -740,7 +829,9 @@ fn load_audit_keys() -> (HashMap<String, Vec<u8>>, Option<String>) {
 fn parse_key_value(raw: &str) -> Option<Vec<u8>> {
     let trimmed = raw.trim();
     if let Some(value) = trimmed.strip_prefix("base64:") {
-        return base64::engine::general_purpose::STANDARD.decode(value.trim()).ok();
+        return base64::engine::general_purpose::STANDARD
+            .decode(value.trim())
+            .ok();
     }
     Some(trimmed.as_bytes().to_vec())
 }
@@ -783,9 +874,24 @@ fn run_async_writer(
     fdatasync_enabled: bool,
     max_wait_us: u64,
     max_batch: usize,
+    adaptive_cfg: Option<FdatasyncAdaptiveConfig>,
 ) {
-    let max_wait = Duration::from_micros(max_wait_us);
-    let mut batch: Vec<AuditAppendRequest> = Vec::with_capacity(max_batch);
+    let mut cur_wait_us = adaptive_cfg
+        .as_ref()
+        .map(|c| c.min_wait_us)
+        .unwrap_or(max_wait_us)
+        .max(1);
+    let mut cur_batch = adaptive_cfg
+        .as_ref()
+        .map(|c| c.min_batch)
+        .unwrap_or(max_batch)
+        .max(1);
+    let mut batch: Vec<AuditAppendRequest> = Vec::with_capacity(max_batch.max(
+        adaptive_cfg
+            .as_ref()
+            .map(|c| c.max_batch)
+            .unwrap_or(max_batch),
+    ));
     loop {
         let first = match rx.recv() {
             Ok(v) => v,
@@ -793,9 +899,12 @@ fn run_async_writer(
         };
         batch.push(first);
         let started = Instant::now();
-        while batch.len() < max_batch {
+        let max_wait = Duration::from_micros(cur_wait_us);
+        while batch.len() < cur_batch {
             let elapsed = started.elapsed();
-            let remaining = max_wait.checked_sub(elapsed).unwrap_or(Duration::from_micros(0));
+            let remaining = max_wait
+                .checked_sub(elapsed)
+                .unwrap_or(Duration::from_micros(0));
             if remaining.is_zero() {
                 break;
             }
@@ -803,6 +912,16 @@ fn run_async_writer(
                 Ok(v) => batch.push(v),
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        // 同期直前にキューを軽くドレインして、fdatasync回数を抑える。
+        // 追加待機はせず try_recv のみ使うため、遅延を増やさずにバッチ効率だけ上げる。
+        while batch.len() < cur_batch {
+            match rx.try_recv() {
+                Ok(v) => batch.push(v),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
 
@@ -834,12 +953,33 @@ fn run_async_writer(
             }
         }
 
+        if let Some(cfg) = adaptive_cfg.as_ref() {
+            let sync_us = fdatasync_ns / 1_000;
+            let used_batch = batch.len().max(1);
+            if sync_us > cfg.target_sync_us {
+                cur_wait_us = (cur_wait_us + (cur_wait_us / 4).max(10)).min(cfg.max_wait_us);
+                cur_batch = (cur_batch + (cur_batch / 8).max(1)).min(cfg.max_batch);
+            } else if sync_us < (cfg.target_sync_us / 2)
+                && used_batch < (cur_batch.saturating_mul(2) / 3).max(1)
+            {
+                cur_wait_us = cur_wait_us
+                    .saturating_sub((cur_wait_us / 5).max(10))
+                    .max(cfg.min_wait_us);
+                cur_batch = cur_batch
+                    .saturating_sub((cur_batch / 10).max(1))
+                    .max(cfg.min_batch);
+            }
+        }
+
         let durable_done_ns = now_nanos();
         if fdatasync_enabled {
             if let Some(tx) = durable_tx.as_ref() {
                 for req in &batch {
                     let _ = tx.send(AuditDurableNotification {
-                        event: req.event.clone(),
+                        event_type: req.event.event_type.clone(),
+                        account_id: req.event.account_id.clone(),
+                        order_id: req.event.order_id.clone(),
+                        event_at: req.event.at,
                         request_start_ns: req.request_start_ns,
                         enqueue_done_ns: req.enqueue_done_ns,
                         durable_done_ns,
@@ -856,6 +996,15 @@ fn run_async_writer(
         }
         batch.clear();
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FdatasyncAdaptiveConfig {
+    min_wait_us: u64,
+    max_wait_us: u64,
+    min_batch: usize,
+    max_batch: usize,
+    target_sync_us: u64,
 }
 
 pub fn now_millis() -> u64 {

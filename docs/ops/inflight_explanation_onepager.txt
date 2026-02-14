@@ -1,0 +1,56 @@
+Inflight制御 1ページ説明（実測ベース）
+
+1. 結論
+- 採用プリセット:
+  - Normal: CAP=1024, ALPHA=0.8, WAIT_US=200, BATCH=128
+  - Degraded: CAP=512, ALPHA=0.8, BATCH=1
+- 運用方針:
+  - 劣化時は受理率より深部保護を優先する。
+  - 最上位KPIは queue_full_total=0。
+
+2. 何を守る設計か
+- 目的:
+  - 深部キュー飽和（queue full）を防ぎ、復帰可能な状態を維持する。
+- 制御:
+  - reserve: 入口で受入可否を判定
+  - tick: 動的limitを更新
+
+3. トレードオフ
+- 得るもの:
+  - 深部崩壊回避
+  - 復帰容易性
+  - 運用判断の明確化
+- 失うもの:
+  - 劣化時の受理率（reject増加）
+- 注意:
+  - throughput/ackはreject込みなので、単独評価しない。
+
+4. 実測サマリ
+
+[A/B比較（各5回中央値）]
+- A (1024,0.8): throughput=9299, p99=71843us, rejected=0, bp_inflight=0, queue_full=0
+- B (512,1.0): throughput=9021, p99=78243us, rejected=0, bp_inflight=156, queue_full=0
+- 判断: AをNormalとして採用
+
+[境界再試験（CAP=512, BATCH=1, 各5回中央値）]
+- wait=200:  rejected=101204, bp_inflight=133838, queue_full=0, wal_age=749ms, limit=270
+- wait=1000: rejected=97359,  bp_inflight=128500, queue_full=0, wal_age=770ms, limit=389
+- wait=5000: rejected=106898, bp_inflight=144191, queue_full=0, wal_age=751ms, limit=442
+- 判断: 入口遮断で深部保護を維持できる（queue_full=0）
+
+[切替検証（Normal -> Degraded -> Normal）]
+- baseline(normal):  queue_full=0, wal_age=0,   limit=1024
+- degraded(inject):  queue_full=0, wal_age=745, limit=267, rejected増
+- recovery(normal):  queue_full=0, wal_age=0,   limit=1024
+- 判断: 切替と復帰が機能する
+
+5. 切替ルール（暫定）
+- Normal -> Degraded:
+  - wal_age_ms >= 700 が継続（60秒目安）
+  - または backpressure_inflight_total 増分急増
+- Degraded -> Normal:
+  - wal_age_ms < 200 が継続（5分目安）
+  - かつ queue_full_total 増分 0
+
+6. 一言説明（実務/面接）
+- 「WAL劣化時は入口で能動的に絞って深部崩壊を防ぎ、回復したら通常設定に戻す。実測で queue_full=0 を維持できることを確認済み。」
