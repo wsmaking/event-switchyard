@@ -27,3 +27,119 @@ Durability Tuning 試験基準（固定）
 判定ポリシー:
 - 1つでも必須条件を満たさない場合は FAIL。
 - PASS 時のみ「候補を次段の採否判定へ進める」。
+
+直近実行メモ:
+- 日時: 2026-02-15
+- 実行コマンド: `scripts/ops/check_durability_tuning_criteria.sh`
+- 結果CSV: `var/results/durability_tuning_scan_20260215_094025.csv`
+- 判定: FAIL（candidate=`tuned_w150_b64`）
+- 要点:
+  - baseline acc_p99_us=96890.79, durable_ack_p99_us=10591
+  - candidate acc_p99_us=101477.17, durable_ack_p99_us=12735
+  - queue_full_total は baseline/candidate とも 0 を維持
+  - 支配区間は baseline/candidate とも `fdatasync`（dominant_interval_p99）
+
+追加比較メモ（2026-02-15）:
+- 固定（基準）:
+  - `var/results/durability_tuning_scan_20260215_095239.csv`
+  - throughput=8430.49, acc_p99_us=68702.21, fdatasync_p99_us=3563, durable_ack_p99_us=11423
+- adaptive (max_wait=200, max_batch=128, target_sync=4000):
+  - `var/results/durability_tuning_scan_20260215_095259.csv`
+  - throughput=7740.69, acc_p99_us=85655.58, fdatasync_p99_us=5847, durable_ack_p99_us=17455
+- adaptive (max_wait=500, max_batch=256, target_sync=8000):
+  - `var/results/durability_tuning_scan_20260215_095322.csv`
+  - throughput=7220.44, acc_p99_us=95774.92, fdatasync_p99_us=6387, durable_ack_p99_us=14847
+- 暫定結論:
+  - この負荷条件では adaptive は fixed 基準より悪化。
+  - 支配区間は依然 `fdatasync` のため、次は fsync 呼び出し頻度/粒度そのものを下げる実装改善を優先する。
+
+実装改善メモ（2026-02-15）:
+- 変更:
+  - `gateway-rust/src/audit/mod.rs` に `AUDIT_FDATASYNC_COALESCE_US` を追加。
+  - 短時間（us単位）で durable 通知を束ね、`fdatasync` 呼び出し回数を抑える。
+  - デフォルトは `0`（無効）で既存挙動を維持。
+- 比較（同条件: `CASES=baseline_w200_b64`）:
+  - fixed/coalesce=0:
+    - `var/results/durability_tuning_scan_20260215_095800.csv`
+    - throughput=8067.03, acc_p99_us=69898.00, fdatasync_p99_us=5175, durable_ack_p99_us=23039
+  - fixed/coalesce=1000:
+    - `var/results/durability_tuning_scan_20260215_095818.csv`
+    - throughput=8414.66, acc_p99_us=62910.46, fdatasync_p99_us=4291, durable_ack_p99_us=10279
+- 暫定結論:
+  - この1セットでは `coalesce=1000us` が改善傾向。
+  - 次は同条件で複数回（中央値）を取り、再現性を確認して採否を判定する。
+
+修正版再計測（2026-02-15）:
+- fixed/coalesce=0:
+  - `var/results/durability_tuning_scan_20260215_095919.csv`
+  - throughput=8127.05, acc_p99_us=66801.54, fdatasync_p99_us=3567, durable_ack_p99_us=11751
+- fixed/coalesce=1000:
+  - `var/results/durability_tuning_scan_20260215_095937.csv`
+  - throughput=8754.29, acc_p99_us=57445.67, fdatasync_p99_us=3497, durable_ack_p99_us=8087
+- 判定:
+  - `coalesce=1000us` で throughput 改善、accepted-only p99 改善、durable_ack p99 改善を同時に確認。
+
+再現性確認（各5回中央値, 2026-02-15）:
+- 実行リスト:
+  - `var/results/coalesce_ab_runs_20260215_100105.txt`
+- 集計:
+  - `var/results/coalesce_ab_summary_20260215_100105.csv`
+  - `var/results/coalesce_ab_summary_20260215_100105.md`
+- 中央値比較:
+  - coalesce=0:
+    - throughput_rps=8731.08
+    - acc_p99_us=59647.67
+    - fdatasync_p99_us=3801
+    - durable_ack_p99_us=16199
+    - rejected=0, queue_full_total=0
+  - coalesce=1000:
+    - throughput_rps=8813.16
+    - acc_p99_us=57837.71
+    - fdatasync_p99_us=3613
+    - durable_ack_p99_us=12167
+    - rejected=0, queue_full_total=0
+- 判定:
+  - `coalesce=1000us` は中央値でも改善傾向を再現。
+  - 次段では fixed の候補設定として採用し、nightly で継続監視する。
+
+検証補足（修正）:
+- `run_durability_tuning_scan.sh` が当初 `AUDIT_FDATASYNC_COALESCE_US` を gateway へ渡していなかったため、
+  上記の再現性確認は coalesce 未反映の可能性がある。
+- スクリプト修正:
+  - `scripts/ops/run_durability_tuning_scan.sh` に
+    `AUDIT_FDATASYNC_COALESCE_US=\"${AUDIT_FDATASYNC_COALESCE_US:-0}\"` を追加。
+
+再現性確認（修正後, 各5回中央値, 2026-02-15）:
+- 実行リスト:
+  - `var/results/coalesce_ab_runs_20260215_100426.txt`
+- 集計:
+  - `var/results/coalesce_ab_summary_20260215_100426.csv`
+  - `var/results/coalesce_ab_summary_20260215_100426.md`
+- 中央値比較:
+  - coalesce=0:
+    - throughput_rps=4515.43
+    - acc_p99_us=155908.63
+    - wal_enqueue_p99_us=18303
+    - fdatasync_p99_us=7863
+    - durable_ack_p99_us=28575
+    - rejected=0, queue_full_total=0
+  - coalesce=1000:
+    - throughput_rps=5499.38
+    - acc_p99_us=115052.21
+    - wal_enqueue_p99_us=7015
+    - fdatasync_p99_us=7379
+    - durable_ack_p99_us=20687
+    - rejected=0, queue_full_total=0
+- 判定:
+  - 修正後データでも `coalesce=1000us` の優位を確認（throughput/accepted-only p99/durable_ack p99）。
+  - nightly の durability criteria は `DURABILITY_COALESCE_US=1000` を既定運用とする。
+
+criteria実行確認（2026-02-15）:
+- 実行:
+  - `CAND_CASE=tuned_w200_b128 DURABILITY_COALESCE_US=1000 scripts/ops/check_durability_tuning_criteria.sh`
+- 評価対象:
+  - `var/results/durability_tuning_scan_20260215_100807.csv`
+- 結果:
+  - PASS（全チェック通過）
+  - baseline: acc_p99_us=137317.21, durable_ack_p99_us=25807
+  - candidate(tuned_w200_b128): acc_p99_us=104206.37, durable_ack_p99_us=24447
