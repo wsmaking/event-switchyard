@@ -41,7 +41,7 @@ jobs:
         run: make preset-switch-gate
 
       - name: Run durability criteria (nightly)
-        run: CAND_CASE=tuned_w200_b128 scripts/ops/check_durability_tuning_criteria.sh
+        run: CAND_CASE=tuned_w200_b128 DURABILITY_COALESCE_US=1000 scripts/ops/check_durability_tuning_criteria.sh
 
       - name: Upload perf artifacts
         if: always()

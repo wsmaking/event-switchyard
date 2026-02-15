@@ -59,6 +59,7 @@ pub struct AuditLog {
     fdatasync_adaptive_min_batch: usize,
     fdatasync_adaptive_max_batch: usize,
     fdatasync_adaptive_target_sync_us: u64,
+    fdatasync_coalesce_us: u64,
     append_tx: Mutex<Option<Sender<AuditAppendRequest>>>,
 }
 
@@ -81,7 +82,7 @@ pub struct AuditDurableNotification {
     pub fdatasync_ns: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AuditAppendRequest {
     event: AuditEvent,
     request_start_ns: u64,
@@ -150,6 +151,10 @@ impl AuditLog {
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(4_000);
+        let fdatasync_coalesce_us = std::env::var("AUDIT_FDATASYNC_COALESCE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
         let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) =
             init_hash_chain(&path)?;
         let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
@@ -189,6 +194,7 @@ impl AuditLog {
             fdatasync_adaptive_min_batch,
             fdatasync_adaptive_max_batch,
             fdatasync_adaptive_target_sync_us,
+            fdatasync_coalesce_us,
             append_tx: Mutex::new(None),
         })
     }
@@ -249,6 +255,7 @@ impl AuditLog {
         let fdatasync_enabled = self.fdatasync_enabled;
         let max_wait_us = self.fdatasync_max_wait_us.max(1);
         let max_batch = self.fdatasync_max_batch.max(1);
+        let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
         let adaptive_cfg = if self.fdatasync_adaptive {
             let min_wait_us = self
                 .fdatasync_adaptive_min_wait_us
@@ -278,6 +285,7 @@ impl AuditLog {
                 fdatasync_enabled,
                 max_wait_us,
                 max_batch,
+                fdatasync_coalesce_us,
                 adaptive_cfg,
             );
         });
@@ -874,6 +882,7 @@ fn run_async_writer(
     fdatasync_enabled: bool,
     max_wait_us: u64,
     max_batch: usize,
+    fdatasync_coalesce_us: u64,
     adaptive_cfg: Option<FdatasyncAdaptiveConfig>,
 ) {
     let mut cur_wait_us = adaptive_cfg
@@ -892,10 +901,38 @@ fn run_async_writer(
             .map(|c| c.max_batch)
             .unwrap_or(max_batch),
     ));
+    let mut pending_durable: Vec<AuditAppendRequest> = Vec::new();
+    let mut last_sync_ns = now_nanos();
     loop {
         let first = match rx.recv() {
             Ok(v) => v,
-            Err(_) => break,
+            Err(_) => {
+                // channel close直前に保留した通知がある場合は最後にdurable化して通知する。
+                if fdatasync_enabled && !pending_durable.is_empty() {
+                    let mut fdatasync_ns = 0;
+                    if let Ok(writer) = audit.writer.lock() {
+                        let sync_start = now_nanos();
+                        let _ = writer.get_ref().sync_data();
+                        fdatasync_ns = now_nanos().saturating_sub(sync_start);
+                    }
+                    let durable_done_ns = now_nanos();
+                    if let Some(tx) = durable_tx.as_ref() {
+                        for req in &pending_durable {
+                            let _ = tx.send(AuditDurableNotification {
+                                event_type: req.event.event_type.clone(),
+                                account_id: req.event.account_id.clone(),
+                                order_id: req.event.order_id.clone(),
+                                event_at: req.event.at,
+                                request_start_ns: req.request_start_ns,
+                                enqueue_done_ns: req.enqueue_done_ns,
+                                durable_done_ns,
+                                fdatasync_ns,
+                            });
+                        }
+                    }
+                }
+                break;
+            }
         };
         batch.push(first);
         let started = Instant::now();
@@ -925,6 +962,10 @@ fn run_async_writer(
             }
         }
 
+        let now_ns = now_nanos();
+        let should_defer_sync = fdatasync_enabled
+            && fdatasync_coalesce_us > 0
+            && now_ns.saturating_sub(last_sync_ns) < fdatasync_coalesce_us.saturating_mul(1_000);
         let mut fdatasync_ns = 0;
         let mut total_bytes = 0usize;
         if let Ok(mut writer) = audit.writer.lock() {
@@ -946,14 +987,15 @@ fn run_async_writer(
                 .wal_last_append_ms
                 .store(now_millis(), Ordering::Relaxed);
 
-            if fdatasync_enabled {
+            if fdatasync_enabled && !should_defer_sync {
                 let sync_start = now_nanos();
                 let _ = writer.get_ref().sync_data();
                 fdatasync_ns = now_nanos().saturating_sub(sync_start);
             }
         }
 
-        if let Some(cfg) = adaptive_cfg.as_ref() {
+        if !should_defer_sync {
+            if let Some(cfg) = adaptive_cfg.as_ref() {
             let sync_us = fdatasync_ns / 1_000;
             let used_batch = batch.len().max(1);
             if sync_us > cfg.target_sync_us {
@@ -970,26 +1012,39 @@ fn run_async_writer(
                     .max(cfg.min_batch);
             }
         }
+        }
 
-        let durable_done_ns = now_nanos();
-        if fdatasync_enabled {
-            if let Some(tx) = durable_tx.as_ref() {
-                for req in &batch {
-                    let _ = tx.send(AuditDurableNotification {
-                        event_type: req.event.event_type.clone(),
-                        account_id: req.event.account_id.clone(),
-                        order_id: req.event.order_id.clone(),
-                        event_at: req.event.at,
-                        request_start_ns: req.request_start_ns,
-                        enqueue_done_ns: req.enqueue_done_ns,
-                        durable_done_ns,
-                        fdatasync_ns,
-                    });
+        let processed_len = batch.len();
+        if should_defer_sync {
+            pending_durable.extend(batch.drain(..));
+        } else {
+            let durable_done_ns = now_ns;
+            if fdatasync_enabled {
+                last_sync_ns = durable_done_ns;
+                if !pending_durable.is_empty() {
+                    pending_durable.extend(batch.drain(..));
+                } else {
+                    pending_durable.extend(batch.iter().cloned());
                 }
+                if let Some(tx) = durable_tx.as_ref() {
+                    for req in &pending_durable {
+                        let _ = tx.send(AuditDurableNotification {
+                            event_type: req.event.event_type.clone(),
+                            account_id: req.event.account_id.clone(),
+                            order_id: req.event.order_id.clone(),
+                            event_at: req.event.at,
+                            request_start_ns: req.request_start_ns,
+                            enqueue_done_ns: req.enqueue_done_ns,
+                            durable_done_ns,
+                            fdatasync_ns,
+                        });
+                    }
+                }
+                pending_durable.clear();
             }
         }
         if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
-            let drain = batch.len().min(pending.len());
+            let drain = processed_len.min(pending.len());
             for _ in 0..drain {
                 let _ = pending.pop_front();
             }

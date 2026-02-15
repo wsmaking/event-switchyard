@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "==> run durability tuning scan"
+DURABILITY_COALESCE_US="${DURABILITY_COALESCE_US:-1000}"
+AUDIT_FDATASYNC_COALESCE_US="$DURABILITY_COALESCE_US" \
 scripts/ops/run_durability_tuning_scan.sh >/tmp/durability_tuning_scan_latest.log 2>&1
 
 latest_csv="$(ls -t var/results/durability_tuning_scan_*.csv | head -n1)"
