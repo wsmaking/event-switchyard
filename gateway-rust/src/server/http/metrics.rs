@@ -56,6 +56,71 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let backpressure_wal_bytes = state.backpressure_wal_bytes.load(Ordering::Relaxed);
     let backpressure_wal_age = state.backpressure_wal_age.load(Ordering::Relaxed);
     let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
+    let v3_accepted_total = state.v3_accepted_total.load(Ordering::Relaxed);
+    let v3_rejected_soft_total = state.v3_rejected_soft_total.load(Ordering::Relaxed);
+    let v3_rejected_killed_total = state.v3_rejected_killed_total.load(Ordering::Relaxed);
+    let v3_queue_depth = state.v3_ingress.depth();
+    let v3_queue_capacity = state.v3_ingress.max_depth();
+    let v3_soft_reject_pct = state.v3_soft_reject_pct;
+    let v3_kill_reject_pct = state.v3_kill_reject_pct;
+    let v3_queue_utilization_pct = if v3_queue_capacity == 0 {
+        0.0
+    } else {
+        (v3_queue_depth as f64 / v3_queue_capacity as f64) * 100.0
+    };
+    let v3_kill_switch = if state.v3_ingress.is_killed() { 1 } else { 0 };
+    let v3_kill_auto_recover = if state.v3_ingress.kill_auto_recover_enabled() {
+        1
+    } else {
+        0
+    };
+    let v3_kill_recover_pct = state.v3_ingress.kill_recover_pct();
+    let v3_kill_recover_after_ms = state.v3_ingress.kill_recover_after_ms();
+    let v3_kill_recovered_total = state.v3_kill_recovered_total.load(Ordering::Relaxed);
+    let v3_processed_total = state.v3_ingress.processed_total();
+    let v3_risk_profile_level = state.v3_risk_profile.as_metric_level();
+    let v3_risk_margin_mode_level = state.v3_risk_margin_mode.as_metric_level();
+    let v3_risk_profile_loops = state.v3_risk_loops;
+    let v3_risk_strict_symbols = if state.v3_risk_strict_symbols { 1 } else { 0 };
+    let v3_risk_max_order_qty = state.v3_risk_max_order_qty;
+    let v3_risk_max_notional = state.v3_risk_max_notional;
+    let v3_risk_daily_notional_limit = state.v3_risk_daily_notional_limit;
+    let v3_risk_max_abs_position_qty = state.v3_risk_max_abs_position_qty;
+    let v3_symbol_limits_count = state.v3_symbol_limits.len();
+    let v3_account_daily_notional_count = state.v3_account_daily_notional.len();
+    let v3_account_symbol_position_count = state.v3_account_symbol_position.len();
+    let v3_stage_parse_p50 = state.v3_stage_parse_hist.snapshot().percentile(50.0);
+    let v3_stage_parse_p99 = state.v3_stage_parse_hist.snapshot().percentile(99.0);
+    let v3_stage_risk_p50 = state.v3_stage_risk_hist.snapshot().percentile(50.0);
+    let v3_stage_risk_p99 = state.v3_stage_risk_hist.snapshot().percentile(99.0);
+    let v3_stage_risk_position_p50 = state
+        .v3_stage_risk_position_hist
+        .snapshot()
+        .percentile(50.0);
+    let v3_stage_risk_position_p99 = state
+        .v3_stage_risk_position_hist
+        .snapshot()
+        .percentile(99.0);
+    let v3_stage_risk_margin_p50 = state
+        .v3_stage_risk_margin_hist
+        .snapshot()
+        .percentile(50.0);
+    let v3_stage_risk_margin_p99 = state
+        .v3_stage_risk_margin_hist
+        .snapshot()
+        .percentile(99.0);
+    let v3_stage_risk_limits_p50 = state
+        .v3_stage_risk_limits_hist
+        .snapshot()
+        .percentile(50.0);
+    let v3_stage_risk_limits_p99 = state
+        .v3_stage_risk_limits_hist
+        .snapshot()
+        .percentile(99.0);
+    let v3_stage_enqueue_p50 = state.v3_stage_enqueue_hist.snapshot().percentile(50.0);
+    let v3_stage_enqueue_p99 = state.v3_stage_enqueue_hist.snapshot().percentile(99.0);
+    let v3_stage_serialize_p50 = state.v3_stage_serialize_hist.snapshot().percentile(50.0);
+    let v3_stage_serialize_p99 = state.v3_stage_serialize_hist.snapshot().percentile(99.0);
     let inflight = state.inflight_controller.inflight();
     let durable_inflight = state.inflight_controller.inflight();
     let wal_age_ms = state.audit_log.wal_age_ms();
@@ -86,7 +151,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let fast_path_processing_p99 = state.engine.processing_p99() / 1_000;
     let fast_path_processing_p999 = state.engine.processing_p999() / 1_000;
 
-    let snapshot = format!(
+    let mut snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
          # TYPE gateway_queue_len gauge\n\
          gateway_queue_len {}\n\
@@ -168,6 +233,36 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_reject_queue_full_total Total rejects due to queue full\n\
          # TYPE gateway_reject_queue_full_total counter\n\
          gateway_reject_queue_full_total {}\n\
+         # HELP gateway_v3_accepted_total Total /v3/orders volatile accepted\n\
+         # TYPE gateway_v3_accepted_total counter\n\
+         gateway_v3_accepted_total {}\n\
+         # HELP gateway_v3_rejected_soft_total Total /v3/orders soft rejects\n\
+         # TYPE gateway_v3_rejected_soft_total counter\n\
+         gateway_v3_rejected_soft_total {}\n\
+         # HELP gateway_v3_rejected_killed_total Total /v3/orders killed rejects\n\
+         # TYPE gateway_v3_rejected_killed_total counter\n\
+         gateway_v3_rejected_killed_total {}\n\
+         # HELP gateway_v3_queue_depth Current /v3 ingress queue depth\n\
+         # TYPE gateway_v3_queue_depth gauge\n\
+         gateway_v3_queue_depth {}\n\
+         # HELP gateway_v3_queue_capacity Configured /v3 ingress queue capacity\n\
+         # TYPE gateway_v3_queue_capacity gauge\n\
+         gateway_v3_queue_capacity {}\n\
+         # HELP gateway_v3_soft_reject_pct /v3 soft reject queue threshold percentage\n\
+         # TYPE gateway_v3_soft_reject_pct gauge\n\
+         gateway_v3_soft_reject_pct {}\n\
+         # HELP gateway_v3_kill_reject_pct /v3 kill reject queue threshold percentage\n\
+         # TYPE gateway_v3_kill_reject_pct gauge\n\
+         gateway_v3_kill_reject_pct {}\n\
+         # HELP gateway_v3_queue_utilization_pct /v3 ingress queue utilization percentage\n\
+         # TYPE gateway_v3_queue_utilization_pct gauge\n\
+         gateway_v3_queue_utilization_pct {}\n\
+         # HELP gateway_v3_kill_switch /v3 kill switch status (1/0)\n\
+         # TYPE gateway_v3_kill_switch gauge\n\
+         gateway_v3_kill_switch {}\n\
+         # HELP gateway_v3_processed_total Total /v3 tasks processed by single-writer\n\
+         # TYPE gateway_v3_processed_total counter\n\
+         gateway_v3_processed_total {}\n\
         # HELP gateway_backpressure_soft_wal_age_total Total soft rejects due to WAL age\n\
         # TYPE gateway_backpressure_soft_wal_age_total counter\n\
         gateway_backpressure_soft_wal_age_total {}\n\
@@ -309,6 +404,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         reject_risk,
         reject_invalid_symbol,
         reject_queue_full,
+        v3_accepted_total,
+        v3_rejected_soft_total,
+        v3_rejected_killed_total,
+        v3_queue_depth,
+        v3_queue_capacity,
+        v3_soft_reject_pct,
+        v3_kill_reject_pct,
+        v3_queue_utilization_pct,
+        v3_kill_switch,
+        v3_processed_total,
         backpressure_soft_wal_age,
         backpressure_soft_rate_decline,
         backpressure_inflight,
@@ -348,5 +453,123 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         state.engine.latency_count(),
         state.engine.latency_max(),
     );
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_risk_profile_level /v3 risk profile level (light=1, medium=2, heavy=3)\n\
+         # TYPE gateway_v3_risk_profile_level gauge\n\
+         gateway_v3_risk_profile_level {}\n\
+         # HELP gateway_v3_risk_profile_loops /v3 risk profile loop count per request\n\
+         # TYPE gateway_v3_risk_profile_loops gauge\n\
+         gateway_v3_risk_profile_loops {}\n\
+         # HELP gateway_v3_risk_strict_symbols /v3 strict symbol master enabled (1/0)\n\
+         # TYPE gateway_v3_risk_strict_symbols gauge\n\
+         gateway_v3_risk_strict_symbols {}\n\
+         # HELP gateway_v3_risk_max_order_qty /v3 real risk max order quantity\n\
+         # TYPE gateway_v3_risk_max_order_qty gauge\n\
+         gateway_v3_risk_max_order_qty {}\n\
+         # HELP gateway_v3_risk_max_notional /v3 real risk max notional\n\
+         # TYPE gateway_v3_risk_max_notional gauge\n\
+         gateway_v3_risk_max_notional {}\n\
+         # HELP gateway_v3_risk_daily_notional_limit /v3 per-account daily notional limit\n\
+         # TYPE gateway_v3_risk_daily_notional_limit gauge\n\
+         gateway_v3_risk_daily_notional_limit {}\n\
+         # HELP gateway_v3_risk_max_abs_position_qty /v3 per-account per-symbol max absolute position qty\n\
+         # TYPE gateway_v3_risk_max_abs_position_qty gauge\n\
+         gateway_v3_risk_max_abs_position_qty {}\n\
+         # HELP gateway_v3_symbol_limits_count Number of symbols in /v3 symbol master\n\
+         # TYPE gateway_v3_symbol_limits_count gauge\n\
+         gateway_v3_symbol_limits_count {}\n\
+         # HELP gateway_v3_account_daily_notional_count Number of /v3 account daily notional trackers\n\
+         # TYPE gateway_v3_account_daily_notional_count gauge\n\
+         gateway_v3_account_daily_notional_count {}\n\
+         # HELP gateway_v3_account_symbol_position_count Number of /v3 account-symbol position trackers\n\
+         # TYPE gateway_v3_account_symbol_position_count gauge\n\
+         gateway_v3_account_symbol_position_count {}\n\
+         # HELP gateway_v3_risk_margin_mode /v3 risk margin mode (legacy=1, incremental=2)\n\
+         # TYPE gateway_v3_risk_margin_mode gauge\n\
+         gateway_v3_risk_margin_mode {}\n\
+         # HELP gateway_v3_kill_auto_recover_enabled /v3 kill auto recover enabled (1/0)\n\
+         # TYPE gateway_v3_kill_auto_recover_enabled gauge\n\
+         gateway_v3_kill_auto_recover_enabled {}\n\
+         # HELP gateway_v3_kill_recover_pct /v3 kill recovery threshold percentage\n\
+         # TYPE gateway_v3_kill_recover_pct gauge\n\
+         gateway_v3_kill_recover_pct {}\n\
+         # HELP gateway_v3_kill_recover_after_ms /v3 kill recovery hold duration in milliseconds\n\
+         # TYPE gateway_v3_kill_recover_after_ms gauge\n\
+         gateway_v3_kill_recover_after_ms {}\n\
+         # HELP gateway_v3_kill_recovered_total Total /v3 auto recover transitions from kill to open\n\
+         # TYPE gateway_v3_kill_recovered_total counter\n\
+         gateway_v3_kill_recovered_total {}\n\
+         # HELP gateway_v3_stage_parse_p50_us /v3 parse stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_parse_p50_us gauge\n\
+         gateway_v3_stage_parse_p50_us {}\n\
+         # HELP gateway_v3_stage_parse_p99_us /v3 parse stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_parse_p99_us gauge\n\
+         gateway_v3_stage_parse_p99_us {}\n\
+         # HELP gateway_v3_stage_risk_p50_us /v3 risk stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_p50_us gauge\n\
+         gateway_v3_stage_risk_p50_us {}\n\
+         # HELP gateway_v3_stage_risk_p99_us /v3 risk stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_p99_us gauge\n\
+         gateway_v3_stage_risk_p99_us {}\n\
+         # HELP gateway_v3_stage_risk_position_p50_us /v3 risk position stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_position_p50_us gauge\n\
+         gateway_v3_stage_risk_position_p50_us {}\n\
+         # HELP gateway_v3_stage_risk_position_p99_us /v3 risk position stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_position_p99_us gauge\n\
+         gateway_v3_stage_risk_position_p99_us {}\n\
+         # HELP gateway_v3_stage_risk_margin_p50_us /v3 risk margin stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_margin_p50_us gauge\n\
+         gateway_v3_stage_risk_margin_p50_us {}\n\
+         # HELP gateway_v3_stage_risk_margin_p99_us /v3 risk margin stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_margin_p99_us gauge\n\
+         gateway_v3_stage_risk_margin_p99_us {}\n\
+         # HELP gateway_v3_stage_risk_limits_p50_us /v3 risk limits stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_limits_p50_us gauge\n\
+         gateway_v3_stage_risk_limits_p50_us {}\n\
+         # HELP gateway_v3_stage_risk_limits_p99_us /v3 risk limits stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_risk_limits_p99_us gauge\n\
+         gateway_v3_stage_risk_limits_p99_us {}\n\
+         # HELP gateway_v3_stage_enqueue_p50_us /v3 enqueue stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_enqueue_p50_us gauge\n\
+         gateway_v3_stage_enqueue_p50_us {}\n\
+         # HELP gateway_v3_stage_enqueue_p99_us /v3 enqueue stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_enqueue_p99_us gauge\n\
+         gateway_v3_stage_enqueue_p99_us {}\n\
+         # HELP gateway_v3_stage_serialize_p50_us /v3 serialize stage latency p50 in microseconds\n\
+         # TYPE gateway_v3_stage_serialize_p50_us gauge\n\
+         gateway_v3_stage_serialize_p50_us {}\n\
+         # HELP gateway_v3_stage_serialize_p99_us /v3 serialize stage latency p99 in microseconds\n\
+         # TYPE gateway_v3_stage_serialize_p99_us gauge\n\
+         gateway_v3_stage_serialize_p99_us {}\n",
+        v3_risk_profile_level,
+        v3_risk_profile_loops,
+        v3_risk_strict_symbols,
+        v3_risk_max_order_qty,
+        v3_risk_max_notional,
+        v3_risk_daily_notional_limit,
+        v3_risk_max_abs_position_qty,
+        v3_symbol_limits_count,
+        v3_account_daily_notional_count,
+        v3_account_symbol_position_count,
+        v3_risk_margin_mode_level,
+        v3_kill_auto_recover,
+        v3_kill_recover_pct,
+        v3_kill_recover_after_ms,
+        v3_kill_recovered_total,
+        v3_stage_parse_p50,
+        v3_stage_parse_p99,
+        v3_stage_risk_p50,
+        v3_stage_risk_p99,
+        v3_stage_risk_position_p50,
+        v3_stage_risk_position_p99,
+        v3_stage_risk_margin_p50,
+        v3_stage_risk_margin_p99,
+        v3_stage_risk_limits_p50,
+        v3_stage_risk_limits_p99,
+        v3_stage_enqueue_p50,
+        v3_stage_enqueue_p99,
+        v3_stage_serialize_p50,
+        v3_stage_serialize_p99,
+    ));
     snapshot
 }

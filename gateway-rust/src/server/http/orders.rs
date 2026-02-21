@@ -17,13 +17,20 @@ use axum::{
     Json,
 };
 use gateway_core::now_nanos;
-use std::sync::atomic::Ordering;
+use std::{
+    hint::black_box,
+    sync::{Arc, atomic::Ordering},
+};
 
-use super::{AppState, AuthErrorResponse};
+use super::{AppState, AuthErrorResponse, V3OrderTask, V3RiskMarginMode};
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
 type OrderResponseResult =
     Result<(StatusCode, Json<OrderResponse>), (StatusCode, Json<AuthErrorResponse>)>;
+type VolatileOrderResponseResult = Result<
+    (StatusCode, Json<VolatileOrderResponse>),
+    (StatusCode, Json<AuthErrorResponse>),
+>;
 
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
 
@@ -200,6 +207,370 @@ fn apply_backpressure(
         return Err((status, Json(OrderResponse::rejected(reason))));
     }
     Ok(())
+}
+
+fn simulate_v3_risk_position_seed(req: &OrderRequest, account_id: &str) -> u64 {
+    let mut acc = req
+        .qty
+        .wrapping_mul(31)
+        .wrapping_add(req.price.unwrap_or(0).wrapping_mul(17))
+        .wrapping_add(req.symbol.len() as u64);
+
+    for (i, b) in account_id.as_bytes().iter().enumerate() {
+        let shift = ((i & 7) * 8) as u32;
+        acc ^= (*b as u64) << shift;
+    }
+    black_box(acc)
+}
+
+fn simulate_v3_risk_margin(mut acc: u64, req: &OrderRequest, loops: u32) -> u64 {
+    let qty_mix = req.qty.rotate_left(7) ^ req.qty.rotate_right(11);
+    let price_mix = req.price.unwrap_or(0) ^ (req.price.unwrap_or(0) >> 3);
+
+    for i in 0..loops {
+        let i64 = i as u64;
+        acc = acc
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223)
+            .wrapping_add(i64 ^ qty_mix);
+        // 仮説: ループ内のrotate/mulを減らし、固定mixでtailを下げる。
+        acc ^= price_mix.wrapping_add(i64 & 0x3f);
+        black_box(acc);
+    }
+    black_box(acc)
+}
+
+fn simulate_v3_risk_margin_incremental(mut acc: u64, req: &OrderRequest, loops: u32) -> u64 {
+    let qty = req.qty;
+    let price = req.price.unwrap_or(0);
+    let mut rot = qty;
+    let mut rot_step: u32 = 0;
+    let mut price_factor: u64 = 97;
+    let mut price_term = price.wrapping_mul(price_factor);
+
+    for i in 0..loops {
+        let i64 = i as u64;
+        acc = acc
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223)
+            .wrapping_add(i64 ^ rot);
+        acc ^= price_term;
+        black_box(acc);
+
+        rot_step += 1;
+        if rot_step == 32 {
+            rot_step = 0;
+            rot = qty;
+        } else {
+            rot = rot.rotate_left(1);
+        }
+
+        price_factor += 1;
+        if price_factor > 160 {
+            price_factor = 97;
+            price_term = price.wrapping_mul(price_factor);
+        } else {
+            price_term = price_term.wrapping_add(price);
+        }
+    }
+    black_box(acc)
+}
+
+fn simulate_v3_risk_limits(acc: u64, req: &OrderRequest) -> bool {
+    let notional = req.qty.saturating_mul(req.price.unwrap_or(0));
+    let cap = (acc & 0xffff).saturating_mul(1_000).saturating_add(500_000);
+    let pass = notional <= cap;
+    black_box(pass)
+}
+
+#[derive(Clone)]
+struct V3RiskReservation {
+    position_key: (String, [u8; 8]),
+    prev_position: i64,
+    notional: u64,
+    account_daily: Arc<gateway_core::AccountPosition>,
+}
+
+fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
+    let symbol = raw.trim();
+    if symbol.is_empty() || symbol.len() > 8 {
+        return None;
+    }
+    let mut key = [0u8; 8];
+    for (i, b) in symbol.bytes().enumerate() {
+        let up = b.to_ascii_uppercase();
+        if !(up.is_ascii_uppercase() || up.is_ascii_digit() || matches!(up, b'_' | b'-' | b'.')) {
+            return None;
+        }
+        key[i] = up;
+    }
+    Some(key)
+}
+
+fn evaluate_v3_real_risk(
+    state: &AppState,
+    account_id: &str,
+    req: &OrderRequest,
+) -> Result<V3RiskReservation, &'static str> {
+    let side = req.side_byte();
+    if side != 1 && side != 2 {
+        return Err("INVALID_SIDE");
+    }
+    if req.qty == 0 || req.qty > state.v3_risk_max_order_qty {
+        return Err("INVALID_QTY");
+    }
+    let symbol_key = match parse_v3_symbol_key(&req.symbol) {
+        Some(v) => v,
+        None => return Err("INVALID_SYMBOL"),
+    };
+    let symbol_limits = state.v3_symbol_limits.get(&symbol_key).copied();
+    if state.v3_risk_strict_symbols && symbol_limits.is_none() {
+        return Err("INVALID_SYMBOL");
+    }
+    let symbol_limits = symbol_limits.unwrap_or(gateway_core::SymbolLimits {
+        max_order_qty: state.v3_risk_max_order_qty.min(u32::MAX as u64) as u32,
+        max_notional: state.v3_risk_max_notional,
+        tick_size: 1,
+    });
+    let max_qty = state
+        .v3_risk_max_order_qty
+        .min(symbol_limits.max_order_qty as u64);
+    if req.qty > max_qty {
+        return Err("INVALID_QTY");
+    }
+
+    let price = req.price.unwrap_or(0);
+    let notional = (req.qty as u128).saturating_mul(price as u128);
+    let max_notional = state.v3_risk_max_notional.min(symbol_limits.max_notional);
+    if notional > max_notional as u128 {
+        return Err("RISK_REJECT");
+    }
+
+    if req.qty > i64::MAX as u64 {
+        return Err("INVALID_QTY");
+    }
+    let delta = if side == 1 {
+        req.qty as i64
+    } else {
+        -(req.qty as i64)
+    };
+    let account_key = account_id.to_owned();
+    let position_key = (account_key.clone(), symbol_key);
+    let mut position = state
+        .v3_account_symbol_position
+        .entry(position_key.clone())
+        .or_insert(0);
+    let prev_position = *position;
+    let next_position = prev_position.saturating_add(delta);
+    if (next_position as i128).abs() as u128 > state.v3_risk_max_abs_position_qty as u128 {
+        return Err("RISK_POSITION_LIMIT");
+    }
+    *position = next_position;
+    drop(position);
+
+    let account_daily = state
+        .v3_account_daily_notional
+        .entry(account_key)
+        .or_insert_with(|| {
+            Arc::new(gateway_core::AccountPosition::new(
+                state.v3_risk_daily_notional_limit,
+            ))
+        })
+        .clone();
+    if !account_daily.try_add_notional(notional as u64) {
+        if let Some(mut rollback_pos) = state.v3_account_symbol_position.get_mut(&position_key) {
+            *rollback_pos = prev_position;
+        }
+        return Err("RISK_DAILY_LIMIT");
+    }
+
+    Ok(V3RiskReservation {
+        position_key,
+        prev_position,
+        notional: notional as u64,
+        account_daily,
+    })
+}
+
+fn rollback_v3_real_risk(state: &AppState, reservation: &V3RiskReservation) {
+    reservation.account_daily.sub_notional(reservation.notional);
+    if let Some(mut position) = state
+        .v3_account_symbol_position
+        .get_mut(&reservation.position_key)
+    {
+        *position = reservation.prev_position;
+    }
+}
+
+/// v3 注文受付（POST /v3/orders）
+/// - Phase1最小核: 認証 -> single-writer enqueue -> VOLATILE_ACCEPT 応答
+pub(super) async fn handle_order_v3(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OrderRequest>,
+) -> VolatileOrderResponseResult {
+    let t0 = now_nanos();
+    let principal = authenticate_request(&state, &headers, t0)?;
+    let ingress = &state.v3_ingress;
+    if ingress.maybe_recover(t0) {
+        state.v3_kill_recovered_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // parse段階: JSON展開済みリクエストから必要項目を取り出す。
+    let parse_t0 = now_nanos();
+    let symbol = req.symbol.as_str();
+    let qty = req.qty;
+    let price = req.price.unwrap_or(0);
+    let _ = (symbol, qty, price);
+    let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
+    state.v3_stage_parse_hist.record(parse_elapsed);
+
+    // risk段階: プロファイルに応じて計算量を変えて支配区間を観測する。
+    let risk_t0 = now_nanos();
+    let risk_position_t0 = now_nanos();
+    let risk_seed = simulate_v3_risk_position_seed(&req, &principal.account_id);
+    let risk_position_elapsed = now_nanos().saturating_sub(risk_position_t0) / 1_000;
+    state
+        .v3_stage_risk_position_hist
+        .record(risk_position_elapsed);
+
+    let risk_margin_t0 = now_nanos();
+    let risk_acc = match state.v3_risk_margin_mode {
+        V3RiskMarginMode::Legacy => simulate_v3_risk_margin(risk_seed, &req, state.v3_risk_loops),
+        V3RiskMarginMode::Incremental => {
+            simulate_v3_risk_margin_incremental(risk_seed, &req, state.v3_risk_loops)
+        }
+    };
+    let risk_margin_elapsed = now_nanos().saturating_sub(risk_margin_t0) / 1_000;
+    state.v3_stage_risk_margin_hist.record(risk_margin_elapsed);
+
+    let risk_limits_t0 = now_nanos();
+    let _risk_pass = simulate_v3_risk_limits(risk_acc, &req);
+    let risk_limits_elapsed = now_nanos().saturating_sub(risk_limits_t0) / 1_000;
+    state.v3_stage_risk_limits_hist.record(risk_limits_elapsed);
+
+    let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
+    state.v3_stage_risk_hist.record(risk_elapsed);
+
+    // /v3 でも実Risk（qty/notional/symbol/daily-limit/position-limit）を判定して業務拒否を返す。
+    let risk_reservation = match evaluate_v3_real_risk(&state, &principal.account_id, &req) {
+        Ok(res) => res,
+        Err(reason) => {
+            match reason {
+                "INVALID_QTY" | "INVALID_SIDE" => {
+                    state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+                }
+                "RISK_REJECT" | "RISK_DAILY_LIMIT" | "RISK_POSITION_LIMIT" => {
+                    state.reject_risk.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {
+                    state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            record_ack(&state, t0);
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(VolatileOrderResponse::rejected(
+                    &principal.account_id,
+                    "REJECTED",
+                    reason,
+                )),
+            ));
+        }
+    };
+
+    // kill判定（95%超 or 既にkill済み）は503。
+    let queue_pct = ingress.queue_utilization_pct();
+    if ingress.is_killed() || queue_pct >= state.v3_kill_reject_pct {
+        rollback_v3_real_risk(&state, &risk_reservation);
+        ingress.kill(t0);
+        state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
+        record_ack(&state, t0);
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(VolatileOrderResponse::rejected(
+                &principal.account_id,
+                "KILLED",
+                "V3_QUEUE_KILLED",
+            )),
+        ));
+    }
+
+    // ソフト水位（85%超）は429。
+    if queue_pct >= state.v3_soft_reject_pct {
+        rollback_v3_real_risk(&state, &risk_reservation);
+        state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+        record_ack(&state, t0);
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(VolatileOrderResponse::rejected(
+                &principal.account_id,
+                "REJECTED",
+                "V3_BACKPRESSURE_SOFT",
+            )),
+        ));
+    }
+
+    let session_seq = ingress.next_seq();
+    let attempt_id = format!("att_{}", session_seq);
+    let received_at_ns = now_nanos();
+    let task = V3OrderTask {
+        _session_seq: session_seq,
+        _received_at_ns: received_at_ns,
+    };
+
+    let enqueue_t0 = now_nanos();
+    match ingress.try_enqueue(task) {
+        Ok(()) => {
+            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            state.v3_accepted_total.fetch_add(1, Ordering::Relaxed);
+            let serialize_t0 = now_nanos();
+            let body = VolatileOrderResponse::accepted(
+                principal.account_id,
+                session_seq,
+                attempt_id,
+                received_at_ns,
+            );
+            let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
+            state.v3_stage_serialize_hist.record(serialize_elapsed);
+            record_ack(&state, t0);
+            Ok((StatusCode::ACCEPTED, Json(body)))
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            rollback_v3_real_risk(&state, &risk_reservation);
+            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            // 実際にfullならkillへ昇格。
+            ingress.kill(now_nanos());
+            state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
+            record_ack(&state, t0);
+            Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(VolatileOrderResponse::rejected(
+                    &principal.account_id,
+                    "KILLED",
+                    "V3_QUEUE_FULL",
+                )),
+            ))
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            rollback_v3_real_risk(&state, &risk_reservation);
+            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            ingress.kill(now_nanos());
+            state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
+            record_ack(&state, t0);
+            Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(VolatileOrderResponse::rejected(
+                    &principal.account_id,
+                    "KILLED",
+                    "V3_INGRESS_CLOSED",
+                )),
+            ))
+        }
+    }
 }
 
 /// 注文受付（POST /orders）
@@ -732,6 +1103,45 @@ pub(super) struct CancelResponse {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+/// v3 入口の即時応答（VOLATILE_ACCEPT）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VolatileOrderResponse {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<String>,
+    received_at_ns: u64,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl VolatileOrderResponse {
+    fn accepted(session_id: String, session_seq: u64, attempt_id: String, received_at_ns: u64) -> Self {
+        Self {
+            session_id,
+            session_seq: Some(session_seq),
+            attempt_id: Some(attempt_id),
+            received_at_ns,
+            status: "VOLATILE_ACCEPT".into(),
+            reason: None,
+        }
+    }
+
+    fn rejected(session_id: &str, status: &str, reason: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            session_seq: None,
+            attempt_id: None,
+            received_at_ns: now_nanos(),
+            status: status.into(),
+            reason: Some(reason.into()),
+        }
+    }
 }
 
 /// 注文スナップショットレスポンス

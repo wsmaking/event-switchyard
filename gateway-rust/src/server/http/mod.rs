@@ -30,10 +30,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::sync::atomic::AtomicU64;
+use gateway_core::SymbolLimits;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, error::TrySendError};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -52,8 +54,204 @@ use std::path::PathBuf;
 
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
-use orders::{handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_order};
+use orders::{
+    handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_order,
+    handle_order_v3,
+};
 use sse::{handle_account_stream, handle_order_stream};
+
+/// /v3/orders の single-writer に流す最小タスク。
+#[derive(Debug)]
+pub(super) struct V3OrderTask {
+    pub(super) _session_seq: u64,
+    pub(super) _received_at_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum V3RiskProfile {
+    Light,
+    Medium,
+    Heavy,
+}
+
+impl V3RiskProfile {
+    pub(super) fn from_env() -> Self {
+        match std::env::var("V3_RISK_PROFILE")
+            .unwrap_or_else(|_| "light".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "medium" => Self::Medium,
+            "heavy" => Self::Heavy,
+            _ => Self::Light,
+        }
+    }
+
+    pub(super) fn as_metric_level(self) -> u64 {
+        match self {
+            Self::Light => 1,
+            Self::Medium => 2,
+            Self::Heavy => 3,
+        }
+    }
+
+    pub(super) fn loops(self) -> u32 {
+        match self {
+            Self::Light => 16,
+            Self::Medium => 256,
+            Self::Heavy => 2_048,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum V3RiskMarginMode {
+    Legacy,
+    Incremental,
+}
+
+impl V3RiskMarginMode {
+    pub(super) fn from_env() -> Self {
+        match std::env::var("V3_RISK_MARGIN_MODE")
+            .unwrap_or_else(|_| "legacy".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "incremental" => Self::Incremental,
+            _ => Self::Legacy,
+        }
+    }
+
+    pub(super) fn as_metric_level(self) -> u64 {
+        match self {
+            Self::Legacy => 1,
+            Self::Incremental => 2,
+        }
+    }
+}
+
+/// /v3/orders の入口制御と single-writer キューを管理するハンドル。
+#[derive(Clone)]
+pub(super) struct V3Ingress {
+    tx: Sender<V3OrderTask>,
+    depth: Arc<AtomicU64>,
+    max_depth: u64,
+    seq: Arc<AtomicU64>,
+    kill_switch: Arc<AtomicBool>,
+    kill_since_ns: Arc<AtomicU64>,
+    kill_auto_recover: bool,
+    kill_recover_pct: u64,
+    kill_recover_after_ns: u64,
+    processed_total: Arc<AtomicU64>,
+}
+
+impl V3Ingress {
+    fn new(
+        tx: Sender<V3OrderTask>,
+        max_depth: u64,
+        kill_auto_recover: bool,
+        kill_recover_pct: u64,
+        kill_recover_after_ms: u64,
+    ) -> Self {
+        Self {
+            tx,
+            depth: Arc::new(AtomicU64::new(0)),
+            max_depth,
+            seq: Arc::new(AtomicU64::new(1)),
+            kill_switch: Arc::new(AtomicBool::new(false)),
+            kill_since_ns: Arc::new(AtomicU64::new(0)),
+            kill_auto_recover,
+            kill_recover_pct,
+            kill_recover_after_ns: kill_recover_after_ms.saturating_mul(1_000_000),
+            processed_total: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub(super) fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(super) fn depth(&self) -> u64 {
+        self.depth.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn max_depth(&self) -> u64 {
+        self.max_depth
+    }
+
+    pub(super) fn queue_utilization_pct(&self) -> u64 {
+        if self.max_depth == 0 {
+            100
+        } else {
+            self.depth().saturating_mul(100) / self.max_depth
+        }
+    }
+
+    pub(super) fn is_killed(&self) -> bool {
+        self.kill_switch.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn kill(&self, now_ns: u64) {
+        if !self.kill_switch.swap(true, Ordering::Relaxed) {
+            self.kill_since_ns.store(now_ns, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn maybe_recover(&self, now_ns: u64) -> bool {
+        if !self.kill_auto_recover || !self.is_killed() {
+            return false;
+        }
+        if self.queue_utilization_pct() > self.kill_recover_pct {
+            return false;
+        }
+        let since = self.kill_since_ns.load(Ordering::Relaxed);
+        if since == 0 {
+            return false;
+        }
+        if now_ns.saturating_sub(since) < self.kill_recover_after_ns {
+            return false;
+        }
+        if self.kill_switch.swap(false, Ordering::Relaxed) {
+            self.kill_since_ns.store(0, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn kill_auto_recover_enabled(&self) -> bool {
+        self.kill_auto_recover
+    }
+
+    pub(super) fn kill_recover_pct(&self) -> u64 {
+        self.kill_recover_pct
+    }
+
+    pub(super) fn kill_recover_after_ms(&self) -> u64 {
+        self.kill_recover_after_ns / 1_000_000
+    }
+
+    pub(super) fn processed_total(&self) -> u64 {
+        self.processed_total.load(Ordering::Relaxed)
+    }
+
+    fn on_processed_one(&self) {
+        let prev = self.depth.fetch_sub(1, Ordering::Relaxed);
+        if prev == 0 {
+            self.depth.store(0, Ordering::Relaxed);
+        }
+        self.processed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn try_enqueue(&self, task: V3OrderTask) -> Result<(), TrySendError<V3OrderTask>> {
+        match self.tx.try_send(task) {
+            Ok(()) => {
+                self.depth.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
 
 /// アプリケーション状態
 #[derive(Clone)]
@@ -95,12 +293,103 @@ pub(super) struct AppState {
     pub(super) backpressure_wal_bytes: Arc<AtomicU64>,
     pub(super) backpressure_wal_age: Arc<AtomicU64>,
     pub(super) backpressure_disk_free: Arc<AtomicU64>,
+    pub(super) v3_ingress: Arc<V3Ingress>,
+    pub(super) v3_accepted_total: Arc<AtomicU64>,
+    pub(super) v3_rejected_soft_total: Arc<AtomicU64>,
+    pub(super) v3_rejected_killed_total: Arc<AtomicU64>,
+    pub(super) v3_kill_recovered_total: Arc<AtomicU64>,
+    pub(super) v3_soft_reject_pct: u64,
+    pub(super) v3_kill_reject_pct: u64,
+    pub(super) v3_risk_profile: V3RiskProfile,
+    pub(super) v3_risk_margin_mode: V3RiskMarginMode,
+    pub(super) v3_risk_loops: u32,
+    pub(super) v3_risk_strict_symbols: bool,
+    pub(super) v3_risk_max_order_qty: u64,
+    pub(super) v3_risk_max_notional: u64,
+    pub(super) v3_risk_daily_notional_limit: u64,
+    pub(super) v3_risk_max_abs_position_qty: u64,
+    pub(super) v3_symbol_limits: Arc<HashMap<[u8; 8], SymbolLimits>>,
+    pub(super) v3_account_daily_notional:
+        Arc<dashmap::DashMap<String, Arc<gateway_core::AccountPosition>>>,
+    pub(super) v3_account_symbol_position: Arc<dashmap::DashMap<(String, [u8; 8]), i64>>,
+    pub(super) v3_stage_parse_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_risk_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_risk_position_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_risk_margin_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_risk_limits_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_enqueue_hist: Arc<LatencyHistogram>,
+    pub(super) v3_stage_serialize_hist: Arc<LatencyHistogram>,
 }
 
 /// 認証エラーレスポンス
 #[derive(serde::Serialize)]
 pub(super) struct AuthErrorResponse {
     pub(super) error: String,
+}
+
+fn parse_bool_env(key: &str) -> Option<bool> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| match v.to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+}
+
+fn parse_v3_symbol_limits(default_max_order_qty: u64, default_max_notional: u64) -> HashMap<[u8; 8], SymbolLimits> {
+    let raw = std::env::var("V3_RISK_SYMBOL_LIMITS").ok();
+    let mut limits = HashMap::new();
+
+    let fallback_symbols = ["AAPL", "MSFT", "NVDA", "BTC", "ETH", "SOL"];
+    let default_limit = SymbolLimits {
+        max_order_qty: default_max_order_qty.min(u32::MAX as u64) as u32,
+        max_notional: default_max_notional,
+        tick_size: 1,
+    };
+
+    match raw {
+        Some(spec) if !spec.trim().is_empty() => {
+            for item in spec.split(',') {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let mut parts = trimmed.split(':');
+                let symbol = parts.next().unwrap_or("").trim().to_uppercase();
+                if symbol.is_empty() || symbol.len() > 8 {
+                    continue;
+                }
+                let max_qty = parts
+                    .next()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(default_max_order_qty)
+                    .min(u32::MAX as u64) as u32;
+                let max_notional = parts
+                    .next()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(default_max_notional);
+
+                limits.insert(
+                    FastPathEngine::symbol_to_bytes(&symbol),
+                    SymbolLimits {
+                        max_order_qty: max_qty,
+                        max_notional,
+                        tick_size: 1,
+                    },
+                );
+            }
+        }
+        _ => {
+            for symbol in fallback_symbols {
+                limits.insert(FastPathEngine::symbol_to_bytes(symbol), default_limit);
+            }
+        }
+    }
+
+    limits
 }
 
 /// HTTPサーバーを起動
@@ -127,6 +416,75 @@ pub async fn run(
         backpressure.inflight_max = None;
     }
     let rate_limiter = crate::rate_limit::AccountRateLimiter::from_env().map(Arc::new);
+    let v3_risk_profile = V3RiskProfile::from_env();
+    let v3_risk_margin_mode = V3RiskMarginMode::from_env();
+    let v3_risk_loops = std::env::var("V3_RISK_LOOPS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(v3_risk_profile.loops());
+    let v3_risk_strict_symbols = parse_bool_env("V3_RISK_STRICT_SYMBOLS").unwrap_or(true);
+    let v3_risk_max_order_qty = std::env::var("MAX_ORDER_QTY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(10_000);
+    let v3_risk_max_notional = std::env::var("MAX_NOTIONAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1_000_000_000);
+    let v3_risk_daily_notional_limit = std::env::var("V3_RISK_DAILY_NOTIONAL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(v3_risk_max_notional.saturating_mul(1_000));
+    let v3_risk_max_abs_position_qty = std::env::var("V3_RISK_MAX_ABS_POSITION_QTY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(v3_risk_max_order_qty.saturating_mul(10_000));
+    let v3_symbol_limits = Arc::new(parse_v3_symbol_limits(
+        v3_risk_max_order_qty,
+        v3_risk_max_notional,
+    ));
+    let v3_kill_auto_recover = parse_bool_env("V3_KILL_AUTO_RECOVER").unwrap_or(true);
+    let v3_soft_reject_pct = std::env::var("V3_SOFT_REJECT_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.min(99))
+        .unwrap_or(85);
+    let mut v3_kill_reject_pct = std::env::var("V3_KILL_REJECT_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.min(100))
+        .unwrap_or(95);
+    if v3_kill_reject_pct <= v3_soft_reject_pct {
+        v3_kill_reject_pct = (v3_soft_reject_pct + 1).min(100);
+    }
+    let v3_kill_recover_pct = std::env::var("V3_KILL_RECOVER_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.min(94))
+        .unwrap_or(60);
+    let v3_kill_recover_after_ms = std::env::var("V3_KILL_RECOVER_AFTER_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(3_000);
+    let v3_queue_capacity = std::env::var("V3_INGRESS_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(65_536);
+    let (v3_tx, v3_rx) = tokio::sync::mpsc::channel(v3_queue_capacity);
+    let v3_ingress = Arc::new(V3Ingress::new(
+        v3_tx,
+        v3_queue_capacity as u64,
+        v3_kill_auto_recover,
+        v3_kill_recover_pct,
+        v3_kill_recover_after_ms,
+    ));
 
     let audit_read_path = {
         let configured = std::env::var("AUDIT_LOG_PATH").ok().map(PathBuf::from);
@@ -182,7 +540,36 @@ pub async fn run(
         backpressure_wal_bytes: Arc::new(AtomicU64::new(0)),
         backpressure_wal_age: Arc::new(AtomicU64::new(0)),
         backpressure_disk_free: Arc::new(AtomicU64::new(0)),
+        v3_ingress: Arc::clone(&v3_ingress),
+        v3_accepted_total: Arc::new(AtomicU64::new(0)),
+        v3_rejected_soft_total: Arc::new(AtomicU64::new(0)),
+        v3_rejected_killed_total: Arc::new(AtomicU64::new(0)),
+        v3_kill_recovered_total: Arc::new(AtomicU64::new(0)),
+        v3_soft_reject_pct,
+        v3_kill_reject_pct,
+        v3_risk_profile,
+        v3_risk_margin_mode,
+        v3_risk_loops,
+        v3_risk_strict_symbols,
+        v3_risk_max_order_qty,
+        v3_risk_max_notional,
+        v3_risk_daily_notional_limit,
+        v3_risk_max_abs_position_qty,
+        v3_symbol_limits,
+        v3_account_daily_notional: Arc::new(dashmap::DashMap::new()),
+        v3_account_symbol_position: Arc::new(dashmap::DashMap::new()),
+        v3_stage_parse_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_risk_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_risk_position_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_risk_margin_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_risk_limits_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_enqueue_hist: Arc::new(LatencyHistogram::new()),
+        v3_stage_serialize_hist: Arc::new(LatencyHistogram::new()),
     };
+
+    tokio::spawn(async move {
+        run_v3_single_writer(v3_rx, v3_ingress).await;
+    });
 
     if let Some(rx) = durable_rx {
         let durable_state = state.clone();
@@ -193,12 +580,20 @@ pub async fn run(
 
     let app = Router::new()
         .route("/orders", post(handle_order))
+        .route("/v2/orders", post(handle_order))
+        .route("/v3/orders", post(handle_order_v3))
         .route("/orders/{order_id}", get(handle_get_order))
+        .route("/v2/orders/{order_id}", get(handle_get_order))
         .route(
             "/orders/client/{client_order_id}",
             get(handle_get_order_by_client_id),
         )
+        .route(
+            "/v2/orders/client/{client_order_id}",
+            get(handle_get_order_by_client_id),
+        )
         .route("/orders/{order_id}/cancel", post(handle_cancel_order))
+        .route("/v2/orders/{order_id}/cancel", post(handle_cancel_order))
         .route("/orders/{order_id}/events", get(handle_order_events))
         .route("/accounts/{account_id}/events", get(handle_account_events))
         .route("/orders/{order_id}/stream", get(handle_order_stream))
@@ -217,6 +612,14 @@ pub async fn run(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// /v3/orders の single-writer worker。
+/// Phase1ではキュー整合と入口計測を成立させるため、直列消費のみを行う。
+async fn run_v3_single_writer(mut rx: Receiver<V3OrderTask>, ingress: Arc<V3Ingress>) {
+    while let Some(_task) = rx.recv().await {
+        ingress.on_processed_one();
+    }
 }
 
 async fn run_durable_notifier(
