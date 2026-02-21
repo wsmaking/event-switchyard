@@ -81,6 +81,148 @@ fn build_request_id(accept_seq: Option<u64>) -> Option<String> {
     accept_seq.map(|seq| format!("req_{}", seq))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrderIngressContract {
+    Legacy,
+    V2,
+}
+
+fn map_existing_response(
+    contract: OrderIngressContract,
+    state: &AppState,
+    existing: &OrderSnapshot,
+    accept_seq: Option<u64>,
+    request_id: Option<String>,
+) -> (StatusCode, OrderResponse) {
+    match contract {
+        OrderIngressContract::Legacy => (
+            StatusCode::ACCEPTED,
+            OrderResponse::accepted(
+                &existing.order_id,
+                accept_seq,
+                request_id,
+                existing.client_order_id.clone(),
+            ),
+        ),
+        OrderIngressContract::V2 => {
+            if state
+                .sharded_store
+                .is_durable(&existing.order_id, &existing.account_id)
+            {
+                (
+                    StatusCode::OK,
+                    OrderResponse::durable(
+                        &existing.order_id,
+                        accept_seq,
+                        request_id,
+                        existing.client_order_id.clone(),
+                    ),
+                )
+            } else {
+                (
+                    StatusCode::ACCEPTED,
+                    OrderResponse::pending(
+                        &existing.order_id,
+                        accept_seq,
+                        request_id,
+                        existing.client_order_id.clone(),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn map_created_response(
+    contract: OrderIngressContract,
+    snapshot: &OrderSnapshot,
+    accept_seq: Option<u64>,
+    request_id: Option<String>,
+) -> (StatusCode, OrderResponse) {
+    match contract {
+        OrderIngressContract::Legacy => (
+            StatusCode::ACCEPTED,
+            OrderResponse::accepted(
+                &snapshot.order_id,
+                accept_seq,
+                request_id,
+                snapshot.client_order_id.clone(),
+            ),
+        ),
+        OrderIngressContract::V2 => (
+            StatusCode::ACCEPTED,
+            OrderResponse::pending(
+                &snapshot.order_id,
+                accept_seq,
+                request_id,
+                snapshot.client_order_id.clone(),
+            ),
+        ),
+    }
+}
+
+fn finalize_sync_durable_v2(
+    state: &AppState,
+    snapshot: &OrderSnapshot,
+    event_at_ms: u64,
+    start_ns: u64,
+    timings: audit::AuditAppendTimings,
+    inflight_guard: &mut Option<ControllerInflightGuard>,
+) {
+    if let Some(guard) = inflight_guard.as_mut() {
+        guard.disarm();
+    }
+    state.inflight_controller.on_commit(1);
+
+    if timings.durable_done_ns >= start_ns && start_ns > 0 {
+        let elapsed_us = (timings.durable_done_ns - start_ns) / 1_000;
+        state.durable_ack_hist.record(elapsed_us);
+    }
+    if timings.fdatasync_ns > 0 {
+        state.fdatasync_hist.record(timings.fdatasync_ns / 1_000);
+    }
+
+    state
+        .sharded_store
+        .mark_durable(&snapshot.order_id, &snapshot.account_id, event_at_ms);
+
+    let durable_latency_us = if timings.durable_done_ns >= start_ns {
+        (timings.durable_done_ns - start_ns) / 1_000
+    } else {
+        0
+    };
+    let data = serde_json::json!({
+        "eventType": "OrderAccepted",
+        "durableLatencyUs": durable_latency_us,
+    })
+    .to_string();
+    state
+        .sse_hub
+        .publish_order(&snapshot.order_id, "order_durable", &data);
+    state
+        .sse_hub
+        .publish_account(&snapshot.account_id, "order_durable", &data);
+
+    if timings.durable_done_ns > 0 {
+        let notify_us = now_nanos().saturating_sub(timings.durable_done_ns) / 1_000;
+        state.durable_notify_hist.record(notify_us);
+    }
+}
+
+fn map_snapshot_status_to_v2(state: &AppState, snapshot: &mut OrderSnapshotResponse) {
+    if snapshot.status == "REJECTED" {
+        return;
+    }
+    if state
+        .sharded_store
+        .is_durable(&snapshot.order_id, &snapshot.account_id)
+    {
+        snapshot.status = "DURABLE".into();
+    } else {
+        snapshot.status = "PENDING".into();
+    }
+}
+
 fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -580,6 +722,15 @@ pub(super) async fn handle_order(
     headers: HeaderMap,
     Json(req): Json<OrderRequest>,
 ) -> OrderResponseResult {
+    handle_order_with_contract(state, headers, req, OrderIngressContract::Legacy).await
+}
+
+async fn handle_order_with_contract(
+    state: AppState,
+    headers: HeaderMap,
+    req: OrderRequest,
+    contract: OrderIngressContract,
+) -> OrderResponseResult {
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
     let client_order_id = req.client_order_id.clone();
@@ -671,16 +822,10 @@ pub(super) async fn handle_order(
             state.idempotency_hits.fetch_add(1, Ordering::Relaxed);
             let accept_seq = state.order_id_map.to_internal(&existing.order_id);
             let request_id = build_request_id(accept_seq);
+            let (status, response) =
+                map_existing_response(contract, &state, &existing, accept_seq, request_id);
             record_ack(&state, t0);
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(OrderResponse::accepted(
-                    &existing.order_id,
-                    accept_seq,
-                    request_id,
-                    existing.client_order_id.clone(),
-                )),
-            ))
+            Ok((status, Json(response)))
         }
         crate::store::IdempotencyOutcome::Created(snapshot) => {
             // 初回受理。以降は「ID登録 -> 監査記録 -> (必要なら)Bus送信 -> ACK」の順で進める。
@@ -691,11 +836,9 @@ pub(super) async fn handle_order(
                 account_id,
             );
 
-            let bus_account_id = snapshot.account_id.clone();
-            let bus_order_id = snapshot.order_id.clone();
-            let bus_data = serde_json::json!({
-                "symbol": snapshot.symbol,
-                "side": snapshot.side,
+            let order_payload = serde_json::json!({
+                "symbol": snapshot.symbol.clone(),
+                "side": snapshot.side.clone(),
                 "type": match snapshot.order_type {
                     crate::order::OrderType::Limit => "LIMIT",
                     crate::order::OrderType::Market => "MARKET",
@@ -707,39 +850,53 @@ pub(super) async fn handle_order(
                     crate::order::TimeInForce::Gtd => "GTD",
                 },
                 "expireAt": snapshot.expire_at,
-                "clientOrderId": snapshot.client_order_id,
+                "clientOrderId": snapshot.client_order_id.clone(),
             });
+            let bus_account_id = snapshot.account_id.clone();
+            let bus_order_id = snapshot.order_id.clone();
+            let bus_data = order_payload.clone();
 
             // 受理イベントを監査ログ(WAL)へ追記する。
             // t0 は入口時刻で、enqueue完了までの遅延計測に使う。
-            let timings = state.audit_log.append_with_timings(
-                AuditEvent {
-                    event_type: "OrderAccepted".into(),
-                    at: audit::now_millis(),
-                    account_id: snapshot.account_id.clone(),
-                    order_id: Some(snapshot.order_id.clone()),
-                    data: serde_json::json!({
-                        "symbol": snapshot.symbol,
-                        "side": snapshot.side,
-                        "type": match snapshot.order_type {
-                            crate::order::OrderType::Limit => "LIMIT",
-                            crate::order::OrderType::Market => "MARKET",
-                        },
-                        "qty": snapshot.qty,
-                        "price": snapshot.price,
-                        "timeInForce": match snapshot.time_in_force {
-                            crate::order::TimeInForce::Gtc => "GTC",
-                            crate::order::TimeInForce::Gtd => "GTD",
-                        },
-                        "expireAt": snapshot.expire_at,
-                        "clientOrderId": snapshot.client_order_id,
-                    }),
-                },
-                t0,
-            );
+            let audit_event_at = audit::now_millis();
+            let audit_event = AuditEvent {
+                event_type: "OrderAccepted".into(),
+                at: audit_event_at,
+                account_id: snapshot.account_id.clone(),
+                order_id: Some(snapshot.order_id.clone()),
+                data: order_payload,
+            };
+            let timings = if contract == OrderIngressContract::V2 {
+                state.audit_log.append_durable_with_timings(audit_event)
+            } else {
+                state.audit_log.append_with_timings(audit_event, t0)
+            };
             // WAL enqueue までの遅延を別ヒストグラムで観測する。
             record_wal_enqueue(&state, t0, timings);
-            if state.audit_log.async_enabled() {
+            if contract == OrderIngressContract::V2 {
+                if timings.durable_done_ns == 0 {
+                    // durable 化できなかった場合は作成済みエントリを巻き戻し、再試行可能にする。
+                    state.sharded_store.remove(
+                        &snapshot.order_id,
+                        &snapshot.account_id,
+                        Some(key.as_str()),
+                    );
+                    state.order_id_map.remove(internal_order_id);
+                    record_ack(&state, t0);
+                    return Ok((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
+                    ));
+                }
+                finalize_sync_durable_v2(
+                    &state,
+                    &snapshot,
+                    audit_event_at,
+                    t0,
+                    timings,
+                    &mut inflight_guard,
+                );
+            } else if state.audit_log.async_enabled() {
                 if let Some(guard) = inflight_guard.as_mut() {
                     // 非同期WAL時はDrop時releaseを止め、durable通知側のon_commitで減算する。
                     guard.disarm();
@@ -759,15 +916,8 @@ pub(super) async fn handle_order(
             record_ack(&state, t0);
             let accept_seq = Some(internal_order_id);
             let request_id = build_request_id(accept_seq);
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(OrderResponse::accepted(
-                    &snapshot.order_id,
-                    accept_seq,
-                    request_id,
-                    snapshot.client_order_id.clone(),
-                )),
-            ))
+            let (status, response) = map_created_response(contract, &snapshot, accept_seq, request_id);
+            Ok((status, Json(response)))
         }
         crate::store::IdempotencyOutcome::NotCreated => {
             // 初回処理は走ったが受理されず、snapshotが作られなかったケース。
@@ -840,6 +990,16 @@ pub(super) async fn handle_order(
     }
 }
 
+/// v2 注文受付（POST /v2/orders）
+/// - `PendingAccepted` の durable 完了まで待って `PENDING` で返す。
+pub(super) async fn handle_order_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OrderRequest>,
+) -> OrderResponseResult {
+    handle_order_with_contract(state, headers, req, OrderIngressContract::V2).await
+}
+
 /// 注文詳細取得（GET /orders/{order_id}）
 /// - 外部ID→account_id でシャード検索、所有権を検証
 pub(super) async fn handle_get_order(
@@ -900,6 +1060,19 @@ pub(super) async fn handle_get_order(
     }
 
     Ok(Json(OrderSnapshotResponse::from(order)))
+}
+
+/// v2 注文詳細取得（GET /v2/orders/{order_id}）
+/// - 状態を `PENDING/DURABLE/REJECTED` に正規化して返す。
+pub(super) async fn handle_get_order_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<Json<OrderSnapshotResponse>, (StatusCode, Json<AuthErrorResponse>)> {
+    let inner_state = state.clone();
+    let Json(mut snapshot) = handle_get_order(State(inner_state), headers, Path(order_id)).await?;
+    map_snapshot_status_to_v2(&state, &mut snapshot);
+    Ok(Json(snapshot))
 }
 
 /// クライアント注文ID照会（GET /orders/client/{client_order_id}）

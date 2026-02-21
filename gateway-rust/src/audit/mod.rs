@@ -234,6 +234,11 @@ impl AuditLog {
         self.append_sync_with_timings(event)
     }
 
+    /// 非同期WAL設定に関わらず、呼び出しスレッドで durable まで同期実行する。
+    pub fn append_durable_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
+        self.append_sync_with_timings(event)
+    }
+
     pub fn start_async_writer(
         self: std::sync::Arc<Self>,
         durable_tx: Option<UnboundedSender<AuditDurableNotification>>,

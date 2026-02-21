@@ -55,8 +55,8 @@ use std::path::PathBuf;
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
 use orders::{
-    handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_order,
-    handle_order_v3,
+    handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_get_order_v2,
+    handle_order, handle_order_v2, handle_order_v3,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -580,10 +580,10 @@ pub async fn run(
 
     let app = Router::new()
         .route("/orders", post(handle_order))
-        .route("/v2/orders", post(handle_order))
+        .route("/v2/orders", post(handle_order_v2))
         .route("/v3/orders", post(handle_order_v3))
         .route("/orders/{order_id}", get(handle_get_order))
-        .route("/v2/orders/{order_id}", get(handle_get_order))
+        .route("/v2/orders/{order_id}", get(handle_get_order_v2))
         .route(
             "/orders/client/{client_order_id}",
             get(handle_get_order_by_client_id),
