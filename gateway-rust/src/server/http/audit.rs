@@ -5,9 +5,9 @@
 
 use axum::http::HeaderMap;
 use axum::{
-    extract::{Path, Query, State},
-    http::{header::AUTHORIZATION, StatusCode},
     Json,
+    extract::{Path, Query, State},
+    http::{StatusCode, header::AUTHORIZATION},
 };
 
 use crate::audit::{self, AuditAnchor, AuditEvent, AuditVerifyResult};

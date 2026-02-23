@@ -12,25 +12,22 @@ use crate::order::{OrderRequest, OrderResponse};
 use crate::store::OrderSnapshot;
 use axum::http::HeaderMap;
 use axum::{
-    extract::{Path, State},
-    http::{header::AUTHORIZATION, StatusCode},
     Json,
+    extract::{Path, State},
+    http::{StatusCode, header::AUTHORIZATION},
 };
 use gateway_core::now_nanos;
-use std::{
-    hint::black_box,
-    sync::{Arc, atomic::Ordering},
-};
+use std::{sync::atomic::Ordering, time::Duration};
 
-use super::{AppState, AuthErrorResponse, V3OrderTask, V3RiskMarginMode};
+use super::{AppState, AuthErrorResponse, V3OrderTask};
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
 type OrderResponseResult =
     Result<(StatusCode, Json<OrderResponse>), (StatusCode, Json<AuthErrorResponse>)>;
-type VolatileOrderResponseResult = Result<
-    (StatusCode, Json<VolatileOrderResponse>),
-    (StatusCode, Json<AuthErrorResponse>),
->;
+type VolatileOrderResponseResult =
+    Result<(StatusCode, Json<VolatileOrderResponse>), (StatusCode, Json<AuthErrorResponse>)>;
+type DurableOrderStatusResult =
+    Result<Json<DurableOrderStatusResponse>, (StatusCode, Json<AuthErrorResponse>)>;
 
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
 
@@ -66,6 +63,17 @@ impl Drop for ControllerInflightGuard {
 fn record_ack(state: &AppState, start_ns: u64) {
     let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
     state.ack_hist.record(elapsed_us);
+}
+
+fn record_v3_ack(state: &AppState, start_ns: u64) {
+    let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
+    state.ack_hist.record(elapsed_us);
+    state.v3_live_ack_hist.record(elapsed_us);
+}
+
+fn record_v3_ack_accepted(state: &AppState, start_ns: u64) {
+    let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
+    state.v3_live_ack_accepted_hist.record(elapsed_us);
 }
 
 // WAL enqueue完了までの遅延を観測。
@@ -172,7 +180,6 @@ fn finalize_sync_durable_v2(
     if let Some(guard) = inflight_guard.as_mut() {
         guard.disarm();
     }
-    state.inflight_controller.on_commit(1);
 
     if timings.durable_done_ns >= start_ns && start_ns > 0 {
         let elapsed_us = (timings.durable_done_ns - start_ns) / 1_000;
@@ -182,9 +189,13 @@ fn finalize_sync_durable_v2(
         state.fdatasync_hist.record(timings.fdatasync_ns / 1_000);
     }
 
-    state
+    if !state
         .sharded_store
-        .mark_durable(&snapshot.order_id, &snapshot.account_id, event_at_ms);
+        .mark_durable(&snapshot.order_id, &snapshot.account_id, event_at_ms)
+    {
+        return;
+    }
+    state.inflight_controller.on_commit(1);
 
     let durable_latency_us = if timings.durable_done_ns >= start_ns {
         (timings.durable_done_ns - start_ns) / 1_000
@@ -351,88 +362,6 @@ fn apply_backpressure(
     Ok(())
 }
 
-fn simulate_v3_risk_position_seed(req: &OrderRequest, account_id: &str) -> u64 {
-    let mut acc = req
-        .qty
-        .wrapping_mul(31)
-        .wrapping_add(req.price.unwrap_or(0).wrapping_mul(17))
-        .wrapping_add(req.symbol.len() as u64);
-
-    for (i, b) in account_id.as_bytes().iter().enumerate() {
-        let shift = ((i & 7) * 8) as u32;
-        acc ^= (*b as u64) << shift;
-    }
-    black_box(acc)
-}
-
-fn simulate_v3_risk_margin(mut acc: u64, req: &OrderRequest, loops: u32) -> u64 {
-    let qty_mix = req.qty.rotate_left(7) ^ req.qty.rotate_right(11);
-    let price_mix = req.price.unwrap_or(0) ^ (req.price.unwrap_or(0) >> 3);
-
-    for i in 0..loops {
-        let i64 = i as u64;
-        acc = acc
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223)
-            .wrapping_add(i64 ^ qty_mix);
-        // 仮説: ループ内のrotate/mulを減らし、固定mixでtailを下げる。
-        acc ^= price_mix.wrapping_add(i64 & 0x3f);
-        black_box(acc);
-    }
-    black_box(acc)
-}
-
-fn simulate_v3_risk_margin_incremental(mut acc: u64, req: &OrderRequest, loops: u32) -> u64 {
-    let qty = req.qty;
-    let price = req.price.unwrap_or(0);
-    let mut rot = qty;
-    let mut rot_step: u32 = 0;
-    let mut price_factor: u64 = 97;
-    let mut price_term = price.wrapping_mul(price_factor);
-
-    for i in 0..loops {
-        let i64 = i as u64;
-        acc = acc
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223)
-            .wrapping_add(i64 ^ rot);
-        acc ^= price_term;
-        black_box(acc);
-
-        rot_step += 1;
-        if rot_step == 32 {
-            rot_step = 0;
-            rot = qty;
-        } else {
-            rot = rot.rotate_left(1);
-        }
-
-        price_factor += 1;
-        if price_factor > 160 {
-            price_factor = 97;
-            price_term = price.wrapping_mul(price_factor);
-        } else {
-            price_term = price_term.wrapping_add(price);
-        }
-    }
-    black_box(acc)
-}
-
-fn simulate_v3_risk_limits(acc: u64, req: &OrderRequest) -> bool {
-    let notional = req.qty.saturating_mul(req.price.unwrap_or(0));
-    let cap = (acc & 0xffff).saturating_mul(1_000).saturating_add(500_000);
-    let pass = notional <= cap;
-    black_box(pass)
-}
-
-#[derive(Clone)]
-struct V3RiskReservation {
-    position_key: (String, [u8; 8]),
-    prev_position: i64,
-    notional: u64,
-    account_daily: Arc<gateway_core::AccountPosition>,
-}
-
 fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
     let symbol = raw.trim();
     if symbol.is_empty() || symbol.len() > 8 {
@@ -449,11 +378,8 @@ fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
     Some(key)
 }
 
-fn evaluate_v3_real_risk(
-    state: &AppState,
-    account_id: &str,
-    req: &OrderRequest,
-) -> Result<V3RiskReservation, &'static str> {
+fn evaluate_v3_hot_risk(state: &AppState, req: &OrderRequest) -> Result<(), &'static str> {
+    let position_t0 = now_nanos();
     let side = req.side_byte();
     if side != 1 && side != 2 {
         return Err("INVALID_SIDE");
@@ -480,72 +406,34 @@ fn evaluate_v3_real_risk(
     if req.qty > max_qty {
         return Err("INVALID_QTY");
     }
+    let position_elapsed = now_nanos().saturating_sub(position_t0) / 1_000;
+    state.v3_stage_risk_position_hist.record(position_elapsed);
 
     let price = req.price.unwrap_or(0);
+    if req.order_type == crate::order::OrderType::Limit && price == 0 {
+        return Err("INVALID_PRICE");
+    }
+
+    let margin_t0 = now_nanos();
     let notional = (req.qty as u128).saturating_mul(price as u128);
     let max_notional = state.v3_risk_max_notional.min(symbol_limits.max_notional);
+    let margin_elapsed = now_nanos().saturating_sub(margin_t0) / 1_000;
+    state.v3_stage_risk_margin_hist.record(margin_elapsed);
+
+    let limits_t0 = now_nanos();
     if notional > max_notional as u128 {
+        let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
+        state.v3_stage_risk_limits_hist.record(limits_elapsed);
         return Err("RISK_REJECT");
     }
+    let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
+    state.v3_stage_risk_limits_hist.record(limits_elapsed);
 
-    if req.qty > i64::MAX as u64 {
-        return Err("INVALID_QTY");
-    }
-    let delta = if side == 1 {
-        req.qty as i64
-    } else {
-        -(req.qty as i64)
-    };
-    let account_key = account_id.to_owned();
-    let position_key = (account_key.clone(), symbol_key);
-    let mut position = state
-        .v3_account_symbol_position
-        .entry(position_key.clone())
-        .or_insert(0);
-    let prev_position = *position;
-    let next_position = prev_position.saturating_add(delta);
-    if (next_position as i128).abs() as u128 > state.v3_risk_max_abs_position_qty as u128 {
-        return Err("RISK_POSITION_LIMIT");
-    }
-    *position = next_position;
-    drop(position);
-
-    let account_daily = state
-        .v3_account_daily_notional
-        .entry(account_key)
-        .or_insert_with(|| {
-            Arc::new(gateway_core::AccountPosition::new(
-                state.v3_risk_daily_notional_limit,
-            ))
-        })
-        .clone();
-    if !account_daily.try_add_notional(notional as u64) {
-        if let Some(mut rollback_pos) = state.v3_account_symbol_position.get_mut(&position_key) {
-            *rollback_pos = prev_position;
-        }
-        return Err("RISK_DAILY_LIMIT");
-    }
-
-    Ok(V3RiskReservation {
-        position_key,
-        prev_position,
-        notional: notional as u64,
-        account_daily,
-    })
-}
-
-fn rollback_v3_real_risk(state: &AppState, reservation: &V3RiskReservation) {
-    reservation.account_daily.sub_notional(reservation.notional);
-    if let Some(mut position) = state
-        .v3_account_symbol_position
-        .get_mut(&reservation.position_key)
-    {
-        *position = reservation.prev_position;
-    }
+    Ok(())
 }
 
 /// v3 注文受付（POST /v3/orders）
-/// - Phase1最小核: 認証 -> single-writer enqueue -> VOLATILE_ACCEPT 応答
+/// - hot path 最小化: parse -> risk -> shard enqueue -> VOLATILE_ACCEPT 応答
 pub(super) async fn handle_order_v3(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -553,9 +441,13 @@ pub(super) async fn handle_order_v3(
 ) -> VolatileOrderResponseResult {
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
+    let session_id = principal.session_id;
     let ingress = &state.v3_ingress;
-    if ingress.maybe_recover(t0) {
-        state.v3_kill_recovered_total.fetch_add(1, Ordering::Relaxed);
+    let shard_id = ingress.shard_for_session(&session_id);
+    if ingress.maybe_recover_shard(shard_id, t0) {
+        state
+            .v3_kill_recovered_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     // parse段階: JSON展開済みリクエストから必要項目を取り出す。
@@ -567,152 +459,247 @@ pub(super) async fn handle_order_v3(
     let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
     state.v3_stage_parse_hist.record(parse_elapsed);
 
-    // risk段階: プロファイルに応じて計算量を変えて支配区間を観測する。
+    if ingress.is_global_killed() {
+        state
+            .v3_rejected_killed_total
+            .fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(VolatileOrderResponse::rejected(
+                &session_id,
+                "KILLED",
+                "V3_GLOBAL_KILLED",
+            )),
+        ));
+    }
+    if ingress.is_session_killed(&session_id) {
+        state
+            .v3_rejected_killed_total
+            .fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(VolatileOrderResponse::rejected(
+                &session_id,
+                "KILLED",
+                "V3_SESSION_KILLED",
+            )),
+        ));
+    }
+    if ingress.is_shard_killed(shard_id) {
+        state
+            .v3_rejected_killed_total
+            .fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(VolatileOrderResponse::rejected(
+                &session_id,
+                "KILLED",
+                "V3_SHARD_KILLED",
+            )),
+        ));
+    }
+
+    // risk段階: 最小の stateless チェックのみ実行し、共有ロックを避ける。
     let risk_t0 = now_nanos();
-    let risk_position_t0 = now_nanos();
-    let risk_seed = simulate_v3_risk_position_seed(&req, &principal.account_id);
-    let risk_position_elapsed = now_nanos().saturating_sub(risk_position_t0) / 1_000;
-    state
-        .v3_stage_risk_position_hist
-        .record(risk_position_elapsed);
-
-    let risk_margin_t0 = now_nanos();
-    let risk_acc = match state.v3_risk_margin_mode {
-        V3RiskMarginMode::Legacy => simulate_v3_risk_margin(risk_seed, &req, state.v3_risk_loops),
-        V3RiskMarginMode::Incremental => {
-            simulate_v3_risk_margin_incremental(risk_seed, &req, state.v3_risk_loops)
-        }
-    };
-    let risk_margin_elapsed = now_nanos().saturating_sub(risk_margin_t0) / 1_000;
-    state.v3_stage_risk_margin_hist.record(risk_margin_elapsed);
-
-    let risk_limits_t0 = now_nanos();
-    let _risk_pass = simulate_v3_risk_limits(risk_acc, &req);
-    let risk_limits_elapsed = now_nanos().saturating_sub(risk_limits_t0) / 1_000;
-    state.v3_stage_risk_limits_hist.record(risk_limits_elapsed);
-
+    let risk_result = evaluate_v3_hot_risk(&state, &req);
     let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
     state.v3_stage_risk_hist.record(risk_elapsed);
 
-    // /v3 でも実Risk（qty/notional/symbol/daily-limit/position-limit）を判定して業務拒否を返す。
-    let risk_reservation = match evaluate_v3_real_risk(&state, &principal.account_id, &req) {
-        Ok(res) => res,
+    match risk_result {
+        Ok(()) => {}
         Err(reason) => {
             match reason {
-                "INVALID_QTY" | "INVALID_SIDE" => {
+                "INVALID_QTY" | "INVALID_SIDE" | "INVALID_PRICE" => {
                     state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
                 }
-                "RISK_REJECT" | "RISK_DAILY_LIMIT" | "RISK_POSITION_LIMIT" => {
+                "RISK_REJECT" => {
                     state.reject_risk.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
                     state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            record_ack(&state, t0);
+            record_v3_ack(&state, t0);
             return Ok((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(VolatileOrderResponse::rejected(
-                    &principal.account_id,
+                    &session_id,
                     "REJECTED",
                     reason,
                 )),
             ));
         }
-    };
+    }
 
-    // kill判定（95%超 or 既にkill済み）は503。
-    let queue_pct = ingress.queue_utilization_pct();
-    if ingress.is_killed() || queue_pct >= state.v3_kill_reject_pct {
-        rollback_v3_real_risk(&state, &risk_reservation);
-        ingress.kill(t0);
-        state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
-        record_ack(&state, t0);
+    // SOFT/HARD/KILL の3段水位。
+    let queue_pct = ingress.queue_utilization_pct(shard_id);
+    if queue_pct >= state.v3_kill_reject_pct {
+        if ingress.kill_shard_due_to_watermark(shard_id, t0) {
+            state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
+        }
+        state
+            .v3_rejected_killed_total
+            .fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(VolatileOrderResponse::rejected(
-                &principal.account_id,
+                &session_id,
                 "KILLED",
                 "V3_QUEUE_KILLED",
             )),
         ));
     }
+    if queue_pct >= state.v3_hard_reject_pct {
+        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(VolatileOrderResponse::rejected(
+                &session_id,
+                "REJECTED",
+                "V3_BACKPRESSURE_HARD",
+            )),
+        ));
+    }
 
-    // ソフト水位（85%超）は429。
     if queue_pct >= state.v3_soft_reject_pct {
-        rollback_v3_real_risk(&state, &risk_reservation);
         state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
-        record_ack(&state, t0);
+        record_v3_ack(&state, t0);
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
             Json(VolatileOrderResponse::rejected(
-                &principal.account_id,
+                &session_id,
                 "REJECTED",
                 "V3_BACKPRESSURE_SOFT",
             )),
         ));
     }
 
-    let session_seq = ingress.next_seq();
-    let attempt_id = format!("att_{}", session_seq);
+    let session_seq = ingress.next_seq(&session_id);
     let received_at_ns = now_nanos();
     let task = V3OrderTask {
-        _session_seq: session_seq,
-        _received_at_ns: received_at_ns,
+        session_id: session_id.clone(),
+        session_seq,
+        attempt_seq: session_seq,
+        received_at_ns,
+        shard_id,
     };
 
     let enqueue_t0 = now_nanos();
-    match ingress.try_enqueue(task) {
+    match ingress.try_enqueue(shard_id, task) {
         Ok(()) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
             state.v3_accepted_total.fetch_add(1, Ordering::Relaxed);
             let serialize_t0 = now_nanos();
-            let body = VolatileOrderResponse::accepted(
-                principal.account_id,
-                session_seq,
-                attempt_id,
-                received_at_ns,
-            );
+            let body = VolatileOrderResponse::accepted(session_id, session_seq, received_at_ns);
             let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
             state.v3_stage_serialize_hist.record(serialize_elapsed);
-            record_ack(&state, t0);
+            record_v3_ack(&state, t0);
+            record_v3_ack_accepted(&state, t0);
             Ok((StatusCode::ACCEPTED, Json(body)))
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            rollback_v3_real_risk(&state, &risk_reservation);
+        Err(tokio::sync::mpsc::error::TrySendError::Full(task)) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
-            // 実際にfullならkillへ昇格。
-            ingress.kill(now_nanos());
-            state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
-            record_ack(&state, t0);
+            if ingress.kill_shard_due_to_watermark(shard_id, now_nanos()) {
+                state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
+            }
+            state.register_v3_loss_suspect(
+                &task.session_id,
+                task.session_seq,
+                task.shard_id,
+                "V3_INGRESS_QUEUE_FULL",
+                now_nanos(),
+            );
+            state
+                .v3_rejected_killed_total
+                .fetch_add(1, Ordering::Relaxed);
+            record_v3_ack(&state, t0);
             Ok((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(VolatileOrderResponse::rejected(
-                    &principal.account_id,
+                    &session_id,
                     "KILLED",
                     "V3_QUEUE_FULL",
                 )),
             ))
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            rollback_v3_real_risk(&state, &risk_reservation);
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
-            ingress.kill(now_nanos());
-            state.v3_rejected_killed_total.fetch_add(1, Ordering::Relaxed);
-            record_ack(&state, t0);
+            if ingress.kill_shard_due_to_watermark(shard_id, now_nanos()) {
+                state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
+            }
+            state.register_v3_loss_suspect(
+                &task.session_id,
+                task.session_seq,
+                task.shard_id,
+                "V3_INGRESS_CLOSED",
+                now_nanos(),
+            );
+            state
+                .v3_rejected_killed_total
+                .fetch_add(1, Ordering::Relaxed);
+            record_v3_ack(&state, t0);
             Ok((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(VolatileOrderResponse::rejected(
-                    &principal.account_id,
+                    &session_id,
                     "KILLED",
                     "V3_INGRESS_CLOSED",
                 )),
             ))
         }
     }
+}
+
+/// v3 durable confirm 照会（GET /v3/orders/{sessionId}/{sessionSeq}）。
+pub(super) async fn handle_get_order_v3(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session_id, session_seq)): Path<(String, u64)>,
+) -> DurableOrderStatusResult {
+    let t0 = now_nanos();
+    let principal = authenticate_request(&state, &headers, t0)?;
+    if principal.session_id != session_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(AuthErrorResponse {
+                error: "forbidden".to_string(),
+            }),
+        ));
+    }
+
+    let body = if let Some(snapshot) = state.v3_confirm_store.snapshot(&session_id, session_seq) {
+        DurableOrderStatusResponse {
+            session_id: session_id.clone(),
+            session_seq,
+            status: snapshot.status.as_str().to_string(),
+            attempt_id: Some(format!("att_{}", snapshot.attempt_seq)),
+            reason: snapshot.reason,
+            received_at_ns: Some(snapshot.received_at_ns),
+            updated_at_ns: snapshot.updated_at_ns,
+            shard_id: snapshot.shard_id as u64,
+        }
+    } else {
+        DurableOrderStatusResponse {
+            session_id: session_id.clone(),
+            session_seq,
+            status: "UNKNOWN".to_string(),
+            attempt_id: None,
+            reason: None,
+            received_at_ns: None,
+            updated_at_ns: now_nanos(),
+            shard_id: state.v3_ingress.shard_for_session(&session_id) as u64,
+        }
+    };
+
+    Ok(Json(body))
 }
 
 /// 注文受付（POST /orders）
@@ -731,6 +718,9 @@ async fn handle_order_with_contract(
     req: OrderRequest,
     contract: OrderIngressContract,
 ) -> OrderResponseResult {
+    if contract == OrderIngressContract::V2 {
+        state.v2_requests_total.fetch_add(1, Ordering::Relaxed);
+    }
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
     let client_order_id = req.client_order_id.clone();
@@ -866,15 +856,106 @@ async fn handle_order_with_contract(
                 order_id: Some(snapshot.order_id.clone()),
                 data: order_payload,
             };
-            let timings = if contract == OrderIngressContract::V2 {
-                state.audit_log.append_durable_with_timings(audit_event)
+            let (timings, durable_receipt_rx) = if contract == OrderIngressContract::V2 {
+                let append = state.audit_log.append_with_durable_receipt(audit_event, t0);
+                (append.timings, append.durable_rx)
             } else {
-                state.audit_log.append_with_timings(audit_event, t0)
+                (state.audit_log.append_with_timings(audit_event, t0), None)
             };
             // WAL enqueue までの遅延を別ヒストグラムで観測する。
             record_wal_enqueue(&state, t0, timings);
             if contract == OrderIngressContract::V2 {
-                if timings.durable_done_ns == 0 {
+                if timings.durable_done_ns > 0 {
+                    finalize_sync_durable_v2(
+                        &state,
+                        &snapshot,
+                        audit_event_at,
+                        t0,
+                        timings,
+                        &mut inflight_guard,
+                    );
+                } else if timings.enqueue_done_ns == 0 {
+                    // enqueueもdurableも0の場合は、WAL書き込み自体に失敗している。
+                    state.sharded_store.remove(
+                        &snapshot.order_id,
+                        &snapshot.account_id,
+                        Some(key.as_str()),
+                    );
+                    state.order_id_map.remove(internal_order_id);
+                    record_ack(&state, t0);
+                    return Ok((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
+                    ));
+                } else if state.audit_log.async_enabled() {
+                    if let Some(guard) = inflight_guard.as_mut() {
+                        // 非同期 durable 経路は notifier の on_commit で減算する。
+                        guard.disarm();
+                    }
+                    if let Some(rx) = durable_receipt_rx {
+                        let timeout =
+                            Duration::from_millis(state.v2_durable_wait_timeout_ms.max(1));
+                        match tokio::time::timeout(timeout, rx).await {
+                            Ok(Ok(receipt)) => {
+                                if receipt.durable_done_ns == 0 {
+                                    state.sharded_store.remove(
+                                        &snapshot.order_id,
+                                        &snapshot.account_id,
+                                        Some(key.as_str()),
+                                    );
+                                    state.order_id_map.remove(internal_order_id);
+                                    record_ack(&state, t0);
+                                    return Ok((
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
+                                    ));
+                                }
+                                finalize_sync_durable_v2(
+                                    &state,
+                                    &snapshot,
+                                    audit_event_at,
+                                    t0,
+                                    audit::AuditAppendTimings {
+                                        enqueue_done_ns: timings.enqueue_done_ns,
+                                        durable_done_ns: receipt.durable_done_ns,
+                                        fdatasync_ns: receipt.fdatasync_ns,
+                                    },
+                                    &mut inflight_guard,
+                                );
+                            }
+                            Ok(Err(_)) => {
+                                record_ack(&state, t0);
+                                return Ok((
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
+                                ));
+                            }
+                            Err(_) => {
+                                state
+                                    .v2_durable_wait_timeout_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                                record_ack(&state, t0);
+                                return Ok((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(OrderResponse::rejected("DURABILITY_WAIT_TIMEOUT")),
+                                ));
+                            }
+                        }
+                    } else {
+                        // 非同期writerのreceiptを受け取れない場合は契約を満たせないため失敗扱い。
+                        state.sharded_store.remove(
+                            &snapshot.order_id,
+                            &snapshot.account_id,
+                            Some(key.as_str()),
+                        );
+                        state.order_id_map.remove(internal_order_id);
+                        record_ack(&state, t0);
+                        return Ok((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
+                        ));
+                    }
+                } else {
                     // durable 化できなかった場合は作成済みエントリを巻き戻し、再試行可能にする。
                     state.sharded_store.remove(
                         &snapshot.order_id,
@@ -888,14 +969,6 @@ async fn handle_order_with_contract(
                         Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
                     ));
                 }
-                finalize_sync_durable_v2(
-                    &state,
-                    &snapshot,
-                    audit_event_at,
-                    t0,
-                    timings,
-                    &mut inflight_guard,
-                );
             } else if state.audit_log.async_enabled() {
                 if let Some(guard) = inflight_guard.as_mut() {
                     // 非同期WAL時はDrop時releaseを止め、durable通知側のon_commitで減算する。
@@ -916,7 +989,8 @@ async fn handle_order_with_contract(
             record_ack(&state, t0);
             let accept_seq = Some(internal_order_id);
             let request_id = build_request_id(accept_seq);
-            let (status, response) = map_created_response(contract, &snapshot, accept_seq, request_id);
+            let (status, response) =
+                map_created_response(contract, &snapshot, accept_seq, request_id);
             Ok((status, Json(response)))
         }
         crate::store::IdempotencyOutcome::NotCreated => {
@@ -1294,11 +1368,15 @@ pub(super) struct VolatileOrderResponse {
 }
 
 impl VolatileOrderResponse {
-    fn accepted(session_id: String, session_seq: u64, attempt_id: String, received_at_ns: u64) -> Self {
+    fn accepted(
+        session_id: String,
+        session_seq: u64,
+        received_at_ns: u64,
+    ) -> Self {
         Self {
             session_id,
             session_seq: Some(session_seq),
-            attempt_id: Some(attempt_id),
+            attempt_id: Some(format!("att_{}", session_seq)),
             received_at_ns,
             status: "VOLATILE_ACCEPT".into(),
             reason: None,
@@ -1315,6 +1393,23 @@ impl VolatileOrderResponse {
             reason: Some(reason.into()),
         }
     }
+}
+
+/// v3 durable confirm 照会レスポンス。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DurableOrderStatusResponse {
+    session_id: String,
+    session_seq: u64,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    received_at_ns: Option<u64>,
+    updated_at_ns: u64,
+    shard_id: u64,
 }
 
 /// 注文スナップショットレスポンス
@@ -1375,5 +1470,410 @@ impl From<OrderSnapshot> for OrderSnapshotResponse {
             last_update_at: o.last_update_at,
             filled_qty: o.filled_qty,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::AuditLog;
+    use crate::backpressure::BackpressureConfig;
+    use crate::bus::BusPublisher;
+    use crate::engine::FastPathEngine;
+    use crate::order::{OrderType, TimeInForce};
+    use crate::sse::SseHub;
+    use crate::store::{OrderIdMap, OrderStatus, OrderStore, ShardedOrderStore};
+    use axum::http::HeaderValue;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use gateway_core::LatencyHistogram;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    const TEST_JWT_SECRET: &str = "orders-v2-test-secret";
+
+    fn build_test_state() -> AppState {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-orders-test-{}.log", now_nanos()));
+        let audit_log = Arc::new(AuditLog::new(wal_path).expect("create audit log"));
+        build_test_state_with_audit_log(audit_log)
+    }
+
+    fn build_test_state_with_audit_log(audit_log: Arc<AuditLog>) -> AppState {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1024);
+        let shard = super::super::V3ShardIngress::new(tx, 1024);
+        let v3_ingress = Arc::new(super::super::V3Ingress::new(
+            vec![shard],
+            false,
+            60,
+            3_000,
+            60,
+            1,
+            3,
+            6,
+        ));
+        audit_log.clone().start_async_writer(None);
+        let audit_read_path = Arc::new(audit_log.path().to_path_buf());
+
+        AppState {
+            engine: FastPathEngine::new(16_384),
+            jwt_auth: Arc::new(crate::auth::JwtAuth::for_test(TEST_JWT_SECRET)),
+            order_store: Arc::new(OrderStore::new()),
+            sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_and_shards(86_400_000, 64)),
+            order_id_map: Arc::new(OrderIdMap::new()),
+            sse_hub: Arc::new(SseHub::new()),
+            order_id_seq: Arc::new(AtomicU64::new(1)),
+            audit_log,
+            audit_read_path,
+            bus_publisher: Arc::new(BusPublisher::disabled_for_test()),
+            bus_mode_outbox: true,
+            backpressure: BackpressureConfig {
+                inflight_max: None,
+                soft_wal_age_ms_max: None,
+                wal_bytes_max: None,
+                wal_age_ms_max: None,
+                disk_free_pct_min: None,
+            },
+            inflight_controller: crate::inflight::InflightController::spawn_from_env(),
+            rate_limiter: None,
+            ack_hist: Arc::new(LatencyHistogram::new()),
+            wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
+            durable_ack_hist: Arc::new(LatencyHistogram::new()),
+            fdatasync_hist: Arc::new(LatencyHistogram::new()),
+            durable_notify_hist: Arc::new(LatencyHistogram::new()),
+            v2_durable_wait_timeout_ms: 1_000,
+            v2_requests_total: Arc::new(AtomicU64::new(0)),
+            v2_durable_wait_timeout_total: Arc::new(AtomicU64::new(0)),
+            idempotency_checked: Arc::new(AtomicU64::new(0)),
+            idempotency_hits: Arc::new(AtomicU64::new(0)),
+            idempotency_creates: Arc::new(AtomicU64::new(0)),
+            reject_invalid_qty: Arc::new(AtomicU64::new(0)),
+            reject_rate_limit: Arc::new(AtomicU64::new(0)),
+            reject_risk: Arc::new(AtomicU64::new(0)),
+            reject_invalid_symbol: Arc::new(AtomicU64::new(0)),
+            reject_queue_full: Arc::new(AtomicU64::new(0)),
+            backpressure_soft_wal_age: Arc::new(AtomicU64::new(0)),
+            backpressure_soft_rate_decline: Arc::new(AtomicU64::new(0)),
+            backpressure_inflight: Arc::new(AtomicU64::new(0)),
+            backpressure_wal_bytes: Arc::new(AtomicU64::new(0)),
+            backpressure_wal_age: Arc::new(AtomicU64::new(0)),
+            backpressure_disk_free: Arc::new(AtomicU64::new(0)),
+            v3_ingress: Arc::clone(&v3_ingress),
+            v3_accepted_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_soft_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_hard_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_kill_recovered_total: Arc::new(AtomicU64::new(0)),
+            v3_loss_suspect_total: Arc::new(AtomicU64::new(0)),
+            v3_session_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_shard_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_global_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_accepted_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
+            v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
+            v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
+            v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
+            v3_soft_reject_pct: 85,
+            v3_hard_reject_pct: 90,
+            v3_kill_reject_pct: 95,
+            v3_confirm_store: Arc::new(super::super::V3ConfirmStore::new()),
+            v3_loss_gap_timeout_ms: 500,
+            v3_loss_scan_interval_ms: 50,
+            v3_loss_scan_batch: 128,
+            v3_risk_profile: super::super::V3RiskProfile::Light,
+            v3_risk_margin_mode: super::super::V3RiskMarginMode::Legacy,
+            v3_risk_loops: 16,
+            v3_risk_strict_symbols: false,
+            v3_risk_max_order_qty: 10_000,
+            v3_risk_max_notional: 1_000_000_000,
+            v3_risk_daily_notional_limit: 1_000_000_000_000,
+            v3_risk_max_abs_position_qty: 100_000_000,
+            v3_symbol_limits: Arc::new(HashMap::new()),
+            v3_account_daily_notional: Arc::new(dashmap::DashMap::new()),
+            v3_account_symbol_position: Arc::new(dashmap::DashMap::new()),
+            v3_stage_parse_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_risk_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_risk_position_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_risk_margin_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_risk_limits_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_enqueue_hist: Arc::new(LatencyHistogram::new()),
+            v3_stage_serialize_hist: Arc::new(LatencyHistogram::new()),
+        }
+    }
+
+    fn make_token(account_id: &str) -> String {
+        let header = r#"{"alg":"HS256","typ":"JWT"}"#;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let payload = format!(
+            r#"{{"accountId":"{}","sub":"{}","iat":{},"exp":{}}}"#,
+            account_id,
+            account_id,
+            now,
+            now + 3600
+        );
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(header.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+        let mut mac = HmacSha256::new_from_slice(TEST_JWT_SECRET.as_bytes()).expect("hmac");
+        mac.update(signing_input.as_bytes());
+        let sig = mac.finalize().into_bytes();
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
+
+        format!("{}.{}.{}", header_b64, payload_b64, sig_b64)
+    }
+
+    fn headers(account_id: &str, idempotency_key: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        let auth = format!("Bearer {}", make_token(account_id));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth).expect("authorization header"),
+        );
+        if let Some(key) = idempotency_key {
+            headers.insert(
+                "Idempotency-Key",
+                HeaderValue::from_str(key).expect("idem header"),
+            );
+        }
+        headers
+    }
+
+    fn request_with_client_id(client_order_id: &str) -> OrderRequest {
+        OrderRequest {
+            symbol: "AAPL".into(),
+            side: "BUY".into(),
+            order_type: OrderType::Limit,
+            qty: 100,
+            price: Some(15_000),
+            time_in_force: TimeInForce::Gtc,
+            expire_at: None,
+            client_order_id: Some(client_order_id.to_string()),
+        }
+    }
+
+    fn put_order(
+        state: &AppState,
+        order_id: &str,
+        account_id: &str,
+        client_order_id: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) {
+        let order = OrderSnapshot::new(
+            order_id.to_string(),
+            account_id.to_string(),
+            "AAPL".into(),
+            "BUY".into(),
+            OrderType::Limit,
+            100,
+            Some(15_000),
+            TimeInForce::Gtc,
+            None,
+            client_order_id.map(|v| v.to_string()),
+        );
+        state.sharded_store.put(order, idempotency_key);
+        state.order_id_map.register_with_internal(
+            state.order_id_seq.fetch_add(1, Ordering::Relaxed),
+            order_id.to_string(),
+            account_id.to_string(),
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_new_and_resend_returns_pending_then_durable() {
+        let state = build_test_state();
+        let req = request_with_client_id("cid_v2_resend");
+        let idem_key = "idem_v2_resend";
+        let account_id = "1001";
+
+        let (status1, Json(resp1)) = handle_order_v2(
+            State(state.clone()),
+            headers(account_id, Some(idem_key)),
+            Json(req.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("first request failed"));
+        assert_eq!(status1, StatusCode::ACCEPTED);
+        assert_eq!(resp1.status, "PENDING");
+        assert!(!resp1.order_id.is_empty());
+        let order_id = resp1.order_id.clone();
+
+        let (status2, Json(resp2)) =
+            handle_order_v2(State(state), headers(account_id, Some(idem_key)), Json(req))
+                .await
+                .unwrap_or_else(|_| panic!("second request failed"));
+        assert_eq!(status2, StatusCode::OK);
+        assert_eq!(resp2.status, "DURABLE");
+        assert_eq!(resp2.order_id, order_id);
+    }
+
+    #[tokio::test]
+    async fn v2_get_order_normalizes_pending_durable_rejected() {
+        let state = build_test_state();
+        let account_id = "2001";
+        let order_id = "ord_v2_norm_1";
+
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_v2_norm_1"),
+            Some("idem_v2_norm_1"),
+        );
+
+        let Json(pending) = handle_get_order_v2(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("pending lookup failed"));
+        assert_eq!(pending.status, "PENDING");
+
+        assert!(
+            state
+                .sharded_store
+                .mark_durable(order_id, account_id, audit::now_millis())
+        );
+        let Json(durable) = handle_get_order_v2(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("durable lookup failed"));
+        assert_eq!(durable.status, "DURABLE");
+
+        let _ = state.sharded_store.update(order_id, account_id, |prev| {
+            let mut next = prev.clone();
+            next.status = OrderStatus::Rejected;
+            next
+        });
+        let Json(rejected) = handle_get_order_v2(
+            State(state),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("rejected lookup failed"));
+        assert_eq!(rejected.status, "REJECTED");
+    }
+
+    #[tokio::test]
+    async fn v2_get_order_by_client_id_normalizes_states() {
+        let state = build_test_state();
+        let account_id = "3001";
+        let client_order_id = "cid_v2_client_1";
+        let order_id = "ord_v2_client_1";
+
+        let Json(unknown) = handle_get_order_by_client_id(
+            State(state.clone()),
+            headers(account_id, None),
+            Path("cid_v2_unknown".to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("unknown lookup failed"));
+        assert_eq!(unknown.status, "UNKNOWN");
+
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some(client_order_id),
+            Some("idem_v2_client_1"),
+        );
+        let Json(pending) = handle_get_order_by_client_id(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(client_order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("pending client lookup failed"));
+        assert_eq!(pending.status, "PENDING");
+
+        assert!(
+            state
+                .sharded_store
+                .mark_durable(order_id, account_id, audit::now_millis())
+        );
+        let Json(durable) = handle_get_order_by_client_id(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(client_order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("durable client lookup failed"));
+        assert_eq!(durable.status, "DURABLE");
+
+        state
+            .sharded_store
+            .mark_rejected_client_order(account_id, "cid_v2_rejected");
+        let Json(rejected) = handle_get_order_by_client_id(
+            State(state),
+            headers(account_id, None),
+            Path("cid_v2_rejected".to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("rejected client lookup failed"));
+        assert_eq!(rejected.status, "REJECTED");
+    }
+
+    #[tokio::test]
+    async fn v3_get_order_returns_unknown_and_durable_status() {
+        let state = build_test_state();
+        let account_id = "5001";
+
+        let Json(unknown) = handle_get_order_v3(
+            State(state.clone()),
+            headers(account_id, None),
+            Path((account_id.to_string(), 1_u64)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("unknown v3 status lookup failed"));
+        assert_eq!(unknown.status, "UNKNOWN");
+
+        state
+            .v3_confirm_store
+            .mark_durable_accepted(account_id, 2, now_nanos());
+        let Json(durable) = handle_get_order_v3(
+            State(state),
+            headers(account_id, None),
+            Path((account_id.to_string(), 2_u64)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("durable v3 status lookup failed"));
+        assert_eq!(durable.status, "DURABLE_ACCEPTED");
+    }
+
+    #[tokio::test]
+    async fn v2_rolls_back_when_wal_durability_fails() {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-orders-poison-{}.log", now_nanos()));
+        let audit_log = Arc::new(AuditLog::new(wal_path).expect("create audit log"));
+        audit_log.poison_writer_for_test();
+        let state = build_test_state_with_audit_log(audit_log);
+
+        let req = request_with_client_id("cid_v2_poison");
+        let (status, Json(resp)) = handle_order_v2(
+            State(state.clone()),
+            headers("4001", Some("idem_v2_poison")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("poison response failed"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("WAL_DURABILITY_FAILED"));
+        assert_eq!(state.sharded_store.count(), 0);
+        assert_eq!(state.order_id_map.count(), 0);
     }
 }

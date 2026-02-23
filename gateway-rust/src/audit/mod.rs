@@ -2,8 +2,8 @@
 //!
 //! Minimal implementation for order/account event history.
 
-use aws_sdk_kms::primitives::Blob;
 use aws_sdk_kms::Client as KmsClient;
+use aws_sdk_kms::primitives::Blob;
 use base64::Engine;
 use gateway_core::now_nanos;
 use hmac::{Hmac, Mac};
@@ -14,13 +14,13 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +70,17 @@ pub struct AuditAppendTimings {
     pub fdatasync_ns: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AuditDurableReceipt {
+    pub durable_done_ns: u64,
+    pub fdatasync_ns: u64,
+}
+
+pub struct AuditAppendWithReceipt {
+    pub timings: AuditAppendTimings,
+    pub durable_rx: Option<oneshot::Receiver<AuditDurableReceipt>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuditDurableNotification {
     pub event_type: String,
@@ -82,11 +93,11 @@ pub struct AuditDurableNotification {
     pub fdatasync_ns: u64,
 }
 
-#[derive(Debug, Clone)]
 struct AuditAppendRequest {
     event: AuditEvent,
     request_start_ns: u64,
     enqueue_done_ns: u64,
+    durable_reply: Option<oneshot::Sender<AuditDurableReceipt>>,
 }
 
 impl AuditLog {
@@ -216,6 +227,7 @@ impl AuditLog {
                         event: event.clone(),
                         request_start_ns,
                         enqueue_done_ns: send_start_ns,
+                        durable_reply: None,
                     };
                     if tx.send(request).is_ok() {
                         let enqueue_done_ns = now_nanos();
@@ -234,9 +246,67 @@ impl AuditLog {
         self.append_sync_with_timings(event)
     }
 
+    /// `/v2` 契約向け: PendingAccepted の durable 完了を待つための receipt を返す。
+    /// 非同期WAL有効時は専用writerキューに必ず積み、HTTPスレッドでの同期書き込みへはフォールバックしない。
+    pub fn append_with_durable_receipt(
+        &self,
+        event: AuditEvent,
+        request_start_ns: u64,
+    ) -> AuditAppendWithReceipt {
+        if self.async_enabled {
+            if let Ok(guard) = self.append_tx.lock() {
+                if let Some(tx) = guard.as_ref() {
+                    let send_start_ns = now_nanos();
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let request = AuditAppendRequest {
+                        event,
+                        request_start_ns,
+                        enqueue_done_ns: send_start_ns,
+                        durable_reply: Some(reply_tx),
+                    };
+                    if tx.send(request).is_ok() {
+                        let enqueue_done_ns = now_nanos();
+                        if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
+                            pending.push_back(now_millis());
+                        }
+                        return AuditAppendWithReceipt {
+                            timings: AuditAppendTimings {
+                                enqueue_done_ns,
+                                durable_done_ns: 0,
+                                fdatasync_ns: 0,
+                            },
+                            durable_rx: Some(reply_rx),
+                        };
+                    }
+                }
+            }
+            return AuditAppendWithReceipt {
+                timings: AuditAppendTimings {
+                    enqueue_done_ns: 0,
+                    durable_done_ns: 0,
+                    fdatasync_ns: 0,
+                },
+                durable_rx: None,
+            };
+        }
+
+        AuditAppendWithReceipt {
+            timings: self.append_sync_with_timings(event),
+            durable_rx: None,
+        }
+    }
+
     /// 非同期WAL設定に関わらず、呼び出しスレッドで durable まで同期実行する。
     pub fn append_durable_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
         self.append_sync_with_timings(event)
+    }
+
+    #[cfg(test)]
+    pub fn poison_writer_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.writer.lock().expect("writer lock");
+            panic!("poison writer mutex for test");
+        }));
     }
 
     pub fn start_async_writer(
@@ -261,6 +331,34 @@ impl AuditLog {
         let max_wait_us = self.fdatasync_max_wait_us.max(1);
         let max_batch = self.fdatasync_max_batch.max(1);
         let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
+        let target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024)
+            .max(1_024);
+        let min_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
+            .max(1_024);
+        let max_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
+            .max(min_target_batch_bytes);
+        let coalesce_min_us = std::env::var("AUDIT_FDATASYNC_COALESCE_MIN_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or((fdatasync_coalesce_us / 4).max(50));
+        let coalesce_max_us = std::env::var("AUDIT_FDATASYNC_COALESCE_MAX_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(
+                fdatasync_coalesce_us
+                    .max(max_wait_us.saturating_mul(4))
+                    .max(coalesce_min_us),
+            )
+            .max(coalesce_min_us);
         let adaptive_cfg = if self.fdatasync_adaptive {
             let min_wait_us = self
                 .fdatasync_adaptive_min_wait_us
@@ -291,6 +389,11 @@ impl AuditLog {
                 max_wait_us,
                 max_batch,
                 fdatasync_coalesce_us,
+                coalesce_min_us,
+                coalesce_max_us,
+                target_batch_bytes,
+                min_target_batch_bytes,
+                max_target_batch_bytes,
                 adaptive_cfg,
             );
         });
@@ -888,8 +991,47 @@ fn run_async_writer(
     max_wait_us: u64,
     max_batch: usize,
     fdatasync_coalesce_us: u64,
+    coalesce_min_us: u64,
+    coalesce_max_us: u64,
+    target_batch_bytes: usize,
+    min_target_batch_bytes: usize,
+    max_target_batch_bytes: usize,
     adaptive_cfg: Option<FdatasyncAdaptiveConfig>,
 ) {
+    fn notify_durable_batch(
+        batch: &mut Vec<AuditAppendRequest>,
+        durable_tx: &Option<UnboundedSender<AuditDurableNotification>>,
+        durable_done_ns: u64,
+        fdatasync_ns: u64,
+        success: bool,
+    ) {
+        if success {
+            if let Some(tx) = durable_tx.as_ref() {
+                for req in batch.iter() {
+                    let _ = tx.send(AuditDurableNotification {
+                        event_type: req.event.event_type.clone(),
+                        account_id: req.event.account_id.clone(),
+                        order_id: req.event.order_id.clone(),
+                        event_at: req.event.at,
+                        request_start_ns: req.request_start_ns,
+                        enqueue_done_ns: req.enqueue_done_ns,
+                        durable_done_ns,
+                        fdatasync_ns,
+                    });
+                }
+            }
+        }
+        for req in batch.iter_mut() {
+            if let Some(reply) = req.durable_reply.take() {
+                let _ = reply.send(AuditDurableReceipt {
+                    durable_done_ns: if success { durable_done_ns } else { 0 },
+                    fdatasync_ns: if success { fdatasync_ns } else { 0 },
+                });
+            }
+        }
+        batch.clear();
+    }
+
     let mut cur_wait_us = adaptive_cfg
         .as_ref()
         .map(|c| c.min_wait_us)
@@ -900,41 +1042,44 @@ fn run_async_writer(
         .map(|c| c.min_batch)
         .unwrap_or(max_batch)
         .max(1);
-    let mut batch: Vec<AuditAppendRequest> = Vec::with_capacity(max_batch.max(
-        adaptive_cfg
-            .as_ref()
-            .map(|c| c.max_batch)
-            .unwrap_or(max_batch),
-    ));
+    let mut batch: Vec<AuditAppendRequest> = Vec::with_capacity(
+        max_batch.max(
+            adaptive_cfg
+                .as_ref()
+                .map(|c| c.max_batch)
+                .unwrap_or(max_batch),
+        ),
+    );
     let mut pending_durable: Vec<AuditAppendRequest> = Vec::new();
+    let mut cur_coalesce_us = fdatasync_coalesce_us;
+    let mut cur_target_batch_bytes = target_batch_bytes.max(min_target_batch_bytes);
+    let mut pending_bytes_since_sync = 0usize;
     let mut last_sync_ns = now_nanos();
     loop {
         let first = match rx.recv() {
             Ok(v) => v,
             Err(_) => {
                 // channel close直前に保留した通知がある場合は最後にdurable化して通知する。
-                if fdatasync_enabled && !pending_durable.is_empty() {
+                if !pending_durable.is_empty() {
                     let mut fdatasync_ns = 0;
-                    if let Ok(writer) = audit.writer.lock() {
-                        let sync_start = now_nanos();
-                        let _ = writer.get_ref().sync_data();
-                        fdatasync_ns = now_nanos().saturating_sub(sync_start);
-                    }
-                    let durable_done_ns = now_nanos();
-                    if let Some(tx) = durable_tx.as_ref() {
-                        for req in &pending_durable {
-                            let _ = tx.send(AuditDurableNotification {
-                                event_type: req.event.event_type.clone(),
-                                account_id: req.event.account_id.clone(),
-                                order_id: req.event.order_id.clone(),
-                                event_at: req.event.at,
-                                request_start_ns: req.request_start_ns,
-                                enqueue_done_ns: req.enqueue_done_ns,
-                                durable_done_ns,
-                                fdatasync_ns,
-                            });
+                    let mut sync_ok = true;
+                    if fdatasync_enabled {
+                        if let Ok(writer) = audit.writer.lock() {
+                            let sync_start = now_nanos();
+                            sync_ok = writer.get_ref().sync_data().is_ok();
+                            fdatasync_ns = now_nanos().saturating_sub(sync_start);
+                        } else {
+                            sync_ok = false;
                         }
                     }
+                    let durable_done_ns = if sync_ok { now_nanos() } else { 0 };
+                    notify_durable_batch(
+                        &mut pending_durable,
+                        &durable_tx,
+                        durable_done_ns,
+                        fdatasync_ns,
+                        sync_ok,
+                    );
                 }
                 break;
             }
@@ -968,86 +1113,150 @@ fn run_async_writer(
         }
 
         let now_ns = now_nanos();
-        let should_defer_sync = fdatasync_enabled
-            && fdatasync_coalesce_us > 0
-            && now_ns.saturating_sub(last_sync_ns) < fdatasync_coalesce_us.saturating_mul(1_000);
-        let mut fdatasync_ns = 0;
+        let within_coalesce_window = fdatasync_enabled
+            && cur_coalesce_us > 0
+            && now_ns.saturating_sub(last_sync_ns) < cur_coalesce_us.saturating_mul(1_000);
         let mut total_bytes = 0usize;
+        let processed_len = batch.len();
+        let mut fdatasync_ns = 0;
+        let mut write_ok = true;
         if let Ok(mut writer) = audit.writer.lock() {
             for req in &batch {
-                if let Ok(line) = serde_json::to_string(&req.event) {
-                    let mut line_bytes = line.into_bytes();
-                    line_bytes.push(b'\n');
-                    let _ = writer.write_all(&line_bytes);
-                    audit.append_hash_chain(&line_bytes);
-                    total_bytes += line_bytes.len();
+                match serde_json::to_string(&req.event) {
+                    Ok(line) => {
+                        let mut line_bytes = line.into_bytes();
+                        line_bytes.push(b'\n');
+                        if writer.write_all(&line_bytes).is_err() {
+                            write_ok = false;
+                            break;
+                        }
+                        audit.append_hash_chain(&line_bytes);
+                        total_bytes += line_bytes.len();
+                    }
+                    Err(_) => {
+                        write_ok = false;
+                        break;
+                    }
                 }
             }
-            let _ = writer.flush();
-
-            audit
-                .wal_bytes
-                .fetch_add(total_bytes as u64, Ordering::Relaxed);
-            audit
-                .wal_last_append_ms
-                .store(now_millis(), Ordering::Relaxed);
-
-            if fdatasync_enabled && !should_defer_sync {
-                let sync_start = now_nanos();
-                let _ = writer.get_ref().sync_data();
-                fdatasync_ns = now_nanos().saturating_sub(sync_start);
+            if write_ok && writer.flush().is_err() {
+                write_ok = false;
             }
+            if write_ok {
+                audit
+                    .wal_bytes
+                    .fetch_add(total_bytes as u64, Ordering::Relaxed);
+                audit
+                    .wal_last_append_ms
+                    .store(now_millis(), Ordering::Relaxed);
+            }
+        } else {
+            write_ok = false;
+        }
+
+        if !write_ok {
+            pending_durable.append(&mut batch);
+            notify_durable_batch(&mut pending_durable, &durable_tx, 0, 0, false);
+            if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
+                let drain = processed_len.min(pending.len());
+                for _ in 0..drain {
+                    let _ = pending.pop_front();
+                }
+            }
+            continue;
+        }
+
+        let candidate_pending_bytes = pending_bytes_since_sync.saturating_add(total_bytes);
+        let should_defer_sync =
+            within_coalesce_window && candidate_pending_bytes < cur_target_batch_bytes;
+        if fdatasync_enabled && !should_defer_sync {
+            if let Ok(writer) = audit.writer.lock() {
+                let sync_start = now_nanos();
+                if writer.get_ref().sync_data().is_err() {
+                    write_ok = false;
+                }
+                fdatasync_ns = now_nanos().saturating_sub(sync_start);
+            } else {
+                write_ok = false;
+            }
+        }
+
+        if !write_ok {
+            pending_durable.append(&mut batch);
+            notify_durable_batch(&mut pending_durable, &durable_tx, 0, 0, false);
+            if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
+                let drain = processed_len.min(pending.len());
+                for _ in 0..drain {
+                    let _ = pending.pop_front();
+                }
+            }
+            continue;
+        }
+
+        if should_defer_sync {
+            pending_bytes_since_sync = candidate_pending_bytes;
+            pending_durable.append(&mut batch);
+        } else {
+            let durable_done_ns = now_nanos();
+            if fdatasync_enabled {
+                last_sync_ns = durable_done_ns;
+            }
+            pending_bytes_since_sync = 0;
+            pending_durable.append(&mut batch);
+            notify_durable_batch(
+                &mut pending_durable,
+                &durable_tx,
+                durable_done_ns,
+                fdatasync_ns,
+                true,
+            );
         }
 
         if !should_defer_sync {
             if let Some(cfg) = adaptive_cfg.as_ref() {
-            let sync_us = fdatasync_ns / 1_000;
-            let used_batch = batch.len().max(1);
-            if sync_us > cfg.target_sync_us {
-                cur_wait_us = (cur_wait_us + (cur_wait_us / 4).max(10)).min(cfg.max_wait_us);
-                cur_batch = (cur_batch + (cur_batch / 8).max(1)).min(cfg.max_batch);
-            } else if sync_us < (cfg.target_sync_us / 2)
-                && used_batch < (cur_batch.saturating_mul(2) / 3).max(1)
-            {
-                cur_wait_us = cur_wait_us
-                    .saturating_sub((cur_wait_us / 5).max(10))
-                    .max(cfg.min_wait_us);
-                cur_batch = cur_batch
-                    .saturating_sub((cur_batch / 10).max(1))
-                    .max(cfg.min_batch);
-            }
-        }
-        }
+                let sync_us = fdatasync_ns / 1_000;
+                let used_batch = processed_len.max(1);
+                let high_fill = used_batch >= (cur_batch.saturating_mul(9) / 10).max(1);
+                let low_fill = used_batch <= (cur_batch / 2).max(1);
 
-        let processed_len = batch.len();
-        if should_defer_sync {
-            pending_durable.extend(batch.drain(..));
-        } else {
-            let durable_done_ns = now_ns;
-            if fdatasync_enabled {
-                last_sync_ns = durable_done_ns;
-                if !pending_durable.is_empty() {
-                    pending_durable.extend(batch.drain(..));
-                } else {
-                    pending_durable.extend(batch.iter().cloned());
-                }
-                if let Some(tx) = durable_tx.as_ref() {
-                    for req in &pending_durable {
-                        let _ = tx.send(AuditDurableNotification {
-                            event_type: req.event.event_type.clone(),
-                            account_id: req.event.account_id.clone(),
-                            order_id: req.event.order_id.clone(),
-                            event_at: req.event.at,
-                            request_start_ns: req.request_start_ns,
-                            enqueue_done_ns: req.enqueue_done_ns,
-                            durable_done_ns,
-                            fdatasync_ns,
-                        });
+                if sync_us > cfg.target_sync_us || high_fill {
+                    cur_wait_us = (cur_wait_us + (cur_wait_us / 4).max(10)).min(cfg.max_wait_us);
+                    cur_batch = (cur_batch + (cur_batch / 8).max(1)).min(cfg.max_batch);
+                    cur_target_batch_bytes = (cur_target_batch_bytes
+                        + (cur_target_batch_bytes / 5).max(1024))
+                    .min(max_target_batch_bytes);
+                    if cur_coalesce_us > 0 {
+                        cur_coalesce_us =
+                            (cur_coalesce_us + (cur_coalesce_us / 6).max(10)).min(coalesce_max_us);
+                    }
+                } else if sync_us < (cfg.target_sync_us / 2) && low_fill {
+                    cur_wait_us = cur_wait_us
+                        .saturating_sub((cur_wait_us / 5).max(10))
+                        .max(cfg.min_wait_us);
+                    cur_batch = cur_batch
+                        .saturating_sub((cur_batch / 10).max(1))
+                        .max(cfg.min_batch);
+                    cur_target_batch_bytes = cur_target_batch_bytes
+                        .saturating_sub((cur_target_batch_bytes / 6).max(1024))
+                        .max(min_target_batch_bytes);
+                    if cur_coalesce_us > 0 {
+                        cur_coalesce_us = cur_coalesce_us
+                            .saturating_sub((cur_coalesce_us / 6).max(10))
+                            .max(coalesce_min_us);
                     }
                 }
-                pending_durable.clear();
             }
         }
+
+        if cur_target_batch_bytes < min_target_batch_bytes {
+            cur_target_batch_bytes = min_target_batch_bytes;
+        } else if cur_target_batch_bytes > max_target_batch_bytes {
+            cur_target_batch_bytes = max_target_batch_bytes;
+        }
+        if cur_coalesce_us > 0 {
+            cur_coalesce_us = cur_coalesce_us.clamp(coalesce_min_us, coalesce_max_us);
+        }
+
         if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
             let drain = processed_len.min(pending.len());
             for _ in 0..drain {

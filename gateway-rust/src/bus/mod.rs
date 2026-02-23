@@ -118,6 +118,18 @@ impl BusPublisher {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Self {
+        Self {
+            enabled: false,
+            topic: "events".into(),
+            producer: Mutex::new(None),
+            stats: Arc::new(BusStats::new()),
+            delivery_tx: None,
+            warned_missing_producer: AtomicBool::new(false),
+        }
+    }
+
     pub fn publish(&self, event: BusEvent) {
         if !self.enabled {
             self.stats.publish_dropped.fetch_add(1, Ordering::Relaxed);

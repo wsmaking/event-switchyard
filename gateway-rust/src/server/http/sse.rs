@@ -6,16 +6,16 @@
 
 use axum::http::HeaderMap;
 use axum::{
-    extract::{Path, State},
-    http::{header::AUTHORIZATION, StatusCode},
-    response::sse::{Event, Sse},
     Json,
+    extract::{Path, State},
+    http::{StatusCode, header::AUTHORIZATION},
+    response::sse::{Event, Sse},
 };
 use futures::stream::Stream;
 use std::convert::Infallible;
 use std::time::Duration;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::auth::AuthResult;
 

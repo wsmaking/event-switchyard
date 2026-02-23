@@ -3,7 +3,7 @@
 //! - 位置: 運用監視のための読み取り専用パス。
 //! - 内包: health と Prometheus metrics の出力。
 
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use std::sync::atomic::Ordering;
 
 use crate::order::HealthResponse;
@@ -49,6 +49,13 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let reject_risk = state.reject_risk.load(Ordering::Relaxed);
     let reject_invalid_symbol = state.reject_invalid_symbol.load(Ordering::Relaxed);
     let reject_queue_full = state.reject_queue_full.load(Ordering::Relaxed);
+    let v2_requests_total = state.v2_requests_total.load(Ordering::Relaxed);
+    let v2_durable_wait_timeout_total = state.v2_durable_wait_timeout_total.load(Ordering::Relaxed);
+    let v2_durable_wait_timeout_ratio = if v2_requests_total == 0 {
+        0.0
+    } else {
+        v2_durable_wait_timeout_total as f64 / v2_requests_total as f64
+    };
     let backpressure_soft_wal_age = state.backpressure_soft_wal_age.load(Ordering::Relaxed);
     let backpressure_soft_rate_decline =
         state.backpressure_soft_rate_decline.load(Ordering::Relaxed);
@@ -58,17 +65,23 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
     let v3_accepted_total = state.v3_accepted_total.load(Ordering::Relaxed);
     let v3_rejected_soft_total = state.v3_rejected_soft_total.load(Ordering::Relaxed);
+    let v3_rejected_hard_total = state.v3_rejected_hard_total.load(Ordering::Relaxed);
     let v3_rejected_killed_total = state.v3_rejected_killed_total.load(Ordering::Relaxed);
-    let v3_queue_depth = state.v3_ingress.depth();
-    let v3_queue_capacity = state.v3_ingress.max_depth();
+    let v3_queue_depth = state.v3_ingress.total_depth();
+    let v3_queue_capacity = state
+        .v3_ingress
+        .max_depth_per_shard()
+        .saturating_mul(state.v3_ingress.shard_count() as u64);
     let v3_soft_reject_pct = state.v3_soft_reject_pct;
+    let v3_hard_reject_pct = state.v3_hard_reject_pct;
     let v3_kill_reject_pct = state.v3_kill_reject_pct;
-    let v3_queue_utilization_pct = if v3_queue_capacity == 0 {
-        0.0
+    let v3_queue_utilization_pct = state.v3_ingress.queue_utilization_pct_max() as f64;
+    let v3_kill_switch = if state.v3_ingress.is_global_killed() {
+        1
     } else {
-        (v3_queue_depth as f64 / v3_queue_capacity as f64) * 100.0
+        0
     };
-    let v3_kill_switch = if state.v3_ingress.is_killed() { 1 } else { 0 };
+    let v3_shard_kill_switches = state.v3_ingress.shard_kill_switch_count();
     let v3_kill_auto_recover = if state.v3_ingress.kill_auto_recover_enabled() {
         1
     } else {
@@ -77,7 +90,29 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_kill_recover_pct = state.v3_ingress.kill_recover_pct();
     let v3_kill_recover_after_ms = state.v3_ingress.kill_recover_after_ms();
     let v3_kill_recovered_total = state.v3_kill_recovered_total.load(Ordering::Relaxed);
+    let v3_loss_suspect_total = state.v3_loss_suspect_total.load(Ordering::Relaxed);
+    let v3_session_loss_suspect_threshold = state.v3_ingress.session_loss_suspect_threshold() as u64;
+    let v3_session_killed_total = state.v3_session_killed_total.load(Ordering::Relaxed);
+    let v3_shard_killed_total = state.v3_shard_killed_total.load(Ordering::Relaxed);
+    let v3_global_killed_total = state.v3_global_killed_total.load(Ordering::Relaxed);
+    let v3_durable_accepted_total = state.v3_durable_accepted_total.load(Ordering::Relaxed);
+    let v3_durable_rejected_total = state.v3_durable_rejected_total.load(Ordering::Relaxed);
     let v3_processed_total = state.v3_ingress.processed_total();
+    let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
+    let v3_live_ack_accepted_p99 = state
+        .v3_live_ack_accepted_hist
+        .snapshot()
+        .percentile(99.0);
+    let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
+    let v3_total = v3_accepted_total
+        + v3_rejected_soft_total
+        + v3_rejected_hard_total
+        + v3_rejected_killed_total;
+    let v3_accepted_rate = if v3_total == 0 {
+        0.0
+    } else {
+        v3_accepted_total as f64 / v3_total as f64
+    };
     let v3_risk_profile_level = state.v3_risk_profile.as_metric_level();
     let v3_risk_margin_mode_level = state.v3_risk_margin_mode.as_metric_level();
     let v3_risk_profile_loops = state.v3_risk_loops;
@@ -101,22 +136,10 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_stage_risk_position_hist
         .snapshot()
         .percentile(99.0);
-    let v3_stage_risk_margin_p50 = state
-        .v3_stage_risk_margin_hist
-        .snapshot()
-        .percentile(50.0);
-    let v3_stage_risk_margin_p99 = state
-        .v3_stage_risk_margin_hist
-        .snapshot()
-        .percentile(99.0);
-    let v3_stage_risk_limits_p50 = state
-        .v3_stage_risk_limits_hist
-        .snapshot()
-        .percentile(50.0);
-    let v3_stage_risk_limits_p99 = state
-        .v3_stage_risk_limits_hist
-        .snapshot()
-        .percentile(99.0);
+    let v3_stage_risk_margin_p50 = state.v3_stage_risk_margin_hist.snapshot().percentile(50.0);
+    let v3_stage_risk_margin_p99 = state.v3_stage_risk_margin_hist.snapshot().percentile(99.0);
+    let v3_stage_risk_limits_p50 = state.v3_stage_risk_limits_hist.snapshot().percentile(50.0);
+    let v3_stage_risk_limits_p99 = state.v3_stage_risk_limits_hist.snapshot().percentile(99.0);
     let v3_stage_enqueue_p50 = state.v3_stage_enqueue_hist.snapshot().percentile(50.0);
     let v3_stage_enqueue_p99 = state.v3_stage_enqueue_hist.snapshot().percentile(99.0);
     let v3_stage_serialize_p50 = state.v3_stage_serialize_hist.snapshot().percentile(50.0);
@@ -453,6 +476,90 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         state.engine.latency_count(),
         state.engine.latency_max(),
     );
+    snapshot.push_str(&format!(
+        "# HELP gateway_live_ack_p99_us Contract live ACK latency p99 in microseconds (/v3 hot path)\n\
+         # TYPE gateway_live_ack_p99_us gauge\n\
+         gateway_live_ack_p99_us {}\n\
+         # HELP gateway_live_ack_accepted_p99_us Contract live ACK latency p99 in microseconds (accepted-only /v3 hot path)\n\
+         # TYPE gateway_live_ack_accepted_p99_us gauge\n\
+         gateway_live_ack_accepted_p99_us {}\n\
+         # HELP gateway_v3_live_ack_p99_us /v3 ACK latency p99 in microseconds\n\
+         # TYPE gateway_v3_live_ack_p99_us gauge\n\
+         gateway_v3_live_ack_p99_us {}\n\
+         # HELP gateway_v3_live_ack_accepted_p99_us /v3 ACK latency p99 in microseconds (accepted-only)\n\
+         # TYPE gateway_v3_live_ack_accepted_p99_us gauge\n\
+         gateway_v3_live_ack_accepted_p99_us {}\n\
+         # HELP gateway_v3_durable_confirm_p99_us /v3 durable confirm latency p99 in microseconds\n\
+         # TYPE gateway_v3_durable_confirm_p99_us gauge\n\
+         gateway_v3_durable_confirm_p99_us {}\n\
+         # HELP gateway_v3_accepted_rate /v3 accepted ratio against total responses\n\
+         # TYPE gateway_v3_accepted_rate gauge\n\
+         gateway_v3_accepted_rate {}\n\
+         # HELP gateway_v3_rejected_hard_total Total /v3/orders hard rejects (503)\n\
+         # TYPE gateway_v3_rejected_hard_total counter\n\
+         gateway_v3_rejected_hard_total {}\n\
+         # HELP gateway_v3_hard_reject_pct /v3 hard reject queue threshold percentage\n\
+         # TYPE gateway_v3_hard_reject_pct gauge\n\
+         gateway_v3_hard_reject_pct {}\n\
+         # HELP gateway_v3_shard_kill_switches Number of shards in kill state\n\
+         # TYPE gateway_v3_shard_kill_switches gauge\n\
+         gateway_v3_shard_kill_switches {}\n\
+         # HELP gateway_v3_loss_suspect_total Total /v3 LOSS_SUSPECT detections\n\
+         # TYPE gateway_v3_loss_suspect_total counter\n\
+         gateway_v3_loss_suspect_total {}\n\
+         # HELP gateway_v3_session_loss_suspect_threshold Session-level LOSS_SUSPECT escalation threshold within loss window\n\
+         # TYPE gateway_v3_session_loss_suspect_threshold gauge\n\
+         gateway_v3_session_loss_suspect_threshold {}\n\
+         # HELP gateway_v3_session_killed_total Total session kill escalations\n\
+         # TYPE gateway_v3_session_killed_total counter\n\
+         gateway_v3_session_killed_total {}\n\
+         # HELP gateway_v3_shard_killed_total Total shard kill escalations\n\
+         # TYPE gateway_v3_shard_killed_total counter\n\
+         gateway_v3_shard_killed_total {}\n\
+         # HELP gateway_v3_global_killed_total Total global kill escalations\n\
+         # TYPE gateway_v3_global_killed_total counter\n\
+         gateway_v3_global_killed_total {}\n\
+         # HELP gateway_v3_durable_accepted_total Total /v3 durable accepted outcomes\n\
+         # TYPE gateway_v3_durable_accepted_total counter\n\
+         gateway_v3_durable_accepted_total {}\n\
+         # HELP gateway_v3_durable_rejected_total Total /v3 durable rejected outcomes\n\
+         # TYPE gateway_v3_durable_rejected_total counter\n\
+         gateway_v3_durable_rejected_total {}\n",
+        v3_live_ack_p99,
+        v3_live_ack_accepted_p99,
+        v3_live_ack_p99,
+        v3_live_ack_accepted_p99,
+        v3_durable_confirm_p99,
+        v3_accepted_rate,
+        v3_rejected_hard_total,
+        v3_hard_reject_pct,
+        v3_shard_kill_switches,
+        v3_loss_suspect_total,
+        v3_session_loss_suspect_threshold,
+        v3_session_killed_total,
+        v3_shard_killed_total,
+        v3_global_killed_total,
+        v3_durable_accepted_total,
+        v3_durable_rejected_total,
+    ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v2_requests_total Total POST /v2/orders requests\n\
+         # TYPE gateway_v2_requests_total counter\n\
+         gateway_v2_requests_total {}\n\
+         # HELP gateway_v2_durable_wait_timeout_total Total /v2/orders rejects due to durable wait timeout\n\
+         # TYPE gateway_v2_durable_wait_timeout_total counter\n\
+         gateway_v2_durable_wait_timeout_total {}\n\
+         # HELP gateway_v2_durable_wait_timeout_ratio /v2 durable wait timeout ratio against /v2 requests\n\
+         # TYPE gateway_v2_durable_wait_timeout_ratio gauge\n\
+         gateway_v2_durable_wait_timeout_ratio {}\n\
+         # HELP gateway_v2_durable_wait_timeout_ms Configured /v2 durable wait timeout in milliseconds\n\
+         # TYPE gateway_v2_durable_wait_timeout_ms gauge\n\
+         gateway_v2_durable_wait_timeout_ms {}\n",
+        v2_requests_total,
+        v2_durable_wait_timeout_total,
+        v2_durable_wait_timeout_ratio,
+        state.v2_durable_wait_timeout_ms,
+    ));
     snapshot.push_str(&format!(
         "# HELP gateway_v3_risk_profile_level /v3 risk profile level (light=1, medium=2, heavy=3)\n\
          # TYPE gateway_v3_risk_profile_level gauge\n\
