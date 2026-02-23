@@ -97,6 +97,16 @@ impl AccountPosition {
     pub fn reset(&self) {
         self.daily_notional.store(0, Ordering::SeqCst);
     }
+
+    /// 加算済み想定元本の補正（ロールバック用途）。
+    #[inline]
+    pub fn sub_notional(&self, notional: u64) {
+        let _ = self.daily_notional.fetch_update(
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+            |cur| Some(cur.saturating_sub(notional)),
+        );
+    }
 }
 
 /// リスクチェッカー

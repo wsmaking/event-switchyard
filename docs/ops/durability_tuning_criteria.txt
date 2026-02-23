@@ -143,3 +143,65 @@ criteria実行確認（2026-02-15）:
   - PASS（全チェック通過）
   - baseline: acc_p99_us=137317.21, durable_ack_p99_us=25807
   - candidate(tuned_w200_b128): acc_p99_us=104206.37, durable_ack_p99_us=24447
+
+追加仮説検証（coalesce 上限件数, 2026-02-15）:
+- 仮説:
+  - `AUDIT_FDATASYNC_COALESCE_MAX_EVENTS` で保留件数上限を入れると enqueue tail が安定する。
+- 実行:
+  - `var/results/coalesce_cap_ab_20260215_102659.csv`（各3回）
+- 中央値比較:
+  - uncapped:
+    - throughput_rps=8791.02
+    - acc_p99_us=57643.88
+    - wal_enqueue_p99_us=1515
+    - durable_ack_p99_us=11159
+  - capped128:
+    - throughput_rps=8489.47
+    - acc_p99_us=62764.54
+    - wal_enqueue_p99_us=1966
+    - durable_ack_p99_us=14431
+- 判定:
+  - capped128 は uncapped より悪化。
+  - 本案は不採用（コード反映しない）。
+
+探索（coalesce 窓幅, 2026-02-15）:
+- 実行:
+  - `var/results/coalesce_window_sweep_20260215_102911.csv`（各3回）
+- 中央値比較:
+  - coalesce=500:
+    - throughput_rps=7696.70
+    - acc_p99_us=78476.29
+    - wal_enqueue_p99_us=3501
+    - fdatasync_p99_us=5311
+    - durable_ack_p99_us=17439
+  - coalesce=1000:
+    - throughput_rps=7980.75
+    - acc_p99_us=70755.87
+    - wal_enqueue_p99_us=1964
+    - fdatasync_p99_us=3607
+    - durable_ack_p99_us=9279
+  - coalesce=1500:
+    - throughput_rps=7325.84
+    - acc_p99_us=89652.04
+    - wal_enqueue_p99_us=15119
+    - fdatasync_p99_us=4037
+    - durable_ack_p99_us=26767
+- 判定:
+  - 500/1500 に対して 1000 が最もバランス良好。
+  - 現時点の coalesce 窓幅は 1000us 維持。
+
+候補再判定（順次実行, 2026-02-15）:
+- 実行:
+  - `CAND_CASE=tuned_w100_b64 DURABILITY_COALESCE_US=1000 scripts/ops/check_durability_tuning_criteria.sh`
+  - `CAND_CASE=tuned_w150_b64 DURABILITY_COALESCE_US=1000 scripts/ops/check_durability_tuning_criteria.sh`
+- 結果:
+  - `tuned_w100_b64`: FAIL
+    - baseline acc_p99_us=91059.46, durable_ack_p99_us=26639
+    - candidate acc_p99_us=77956.12, durable_ack_p99_us=30687
+    - fail理由: durable_ack_p99 が baseline*1.10 を超過
+  - `tuned_w150_b64`: FAIL
+    - baseline acc_p99_us=57157.88, durable_ack_p99_us=9095
+    - candidate acc_p99_us=54636.46, durable_ack_p99_us=8583
+    - fail理由: acc_p99 改善率が 5% 未達
+- 判定:
+  - 現行 criteria のままでは両候補とも不採用。

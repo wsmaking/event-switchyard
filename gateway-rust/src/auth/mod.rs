@@ -1,6 +1,6 @@
 //! JWT 認証モジュール
 //!
-//! HS256 署名を検証し、accountId を抽出する。
+//! HS256 署名を検証し、accountId / sub を抽出する。
 //! Kotlin Gateway と同じ環境変数・ロジックを使用。
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -15,6 +15,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub account_id: String,
+    pub session_id: String,
 }
 
 /// 認証結果
@@ -69,6 +70,16 @@ impl JwtAuth {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(secret: &str) -> Self {
+        Self {
+            secret: secret.as_bytes().to_vec(),
+            issuer: None,
+            audience: None,
+            clock_skew_sec: 30,
         }
     }
 
@@ -178,22 +189,27 @@ impl JwtAuth {
             }
         }
 
-        // accountId 抽出
+        // accountId と sub(session) 抽出。
+        let sub = payload_json
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
         let account_id = payload_json
             .get("accountId")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .or_else(|| {
-                payload_json
-                    .get("sub")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-            });
+            .map(ToString::to_string)
+            .or_else(|| sub.clone());
 
         match account_id {
-            Some(id) => AuthResult::Ok(Principal {
-                account_id: id.to_string(),
-            }),
+            Some(id) => {
+                let session_id = sub.unwrap_or_else(|| id.clone());
+                AuthResult::Ok(Principal {
+                    account_id: id,
+                    session_id,
+                })
+            }
             None => AuthResult::Err(AuthError::MissingAccountId),
         }
     }
@@ -270,7 +286,40 @@ mod tests {
         };
 
         match auth.authenticate(Some(&format!("Bearer {}", token))) {
-            AuthResult::Ok(principal) => assert_eq!(principal.account_id, "acc123"),
+            AuthResult::Ok(principal) => {
+                assert_eq!(principal.account_id, "acc123");
+                assert_eq!(principal.session_id, "acc123");
+            }
+            AuthResult::Err(e) => panic!("Expected Ok, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_sub_is_used_as_session_id() {
+        let secret = "test-secret";
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let payload = format!(
+            r#"{{"accountId":"acc123","sub":"sess-a","exp":{}}}"#,
+            exp
+        );
+        let token = make_test_token(secret, &payload);
+
+        let auth = JwtAuth {
+            secret: secret.as_bytes().to_vec(),
+            issuer: None,
+            audience: None,
+            clock_skew_sec: 30,
+        };
+
+        match auth.authenticate(Some(&format!("Bearer {}", token))) {
+            AuthResult::Ok(principal) => {
+                assert_eq!(principal.account_id, "acc123");
+                assert_eq!(principal.session_id, "sess-a");
+            }
             AuthResult::Err(e) => panic!("Expected Ok, got {:?}", e),
         }
     }

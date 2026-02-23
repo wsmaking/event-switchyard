@@ -1,4 +1,4 @@
-.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full preset-switch-gate fdatasync-ab fdatasync-adaptive-sweep adaptive-profile-search rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
+.PHONY: help run run-gateway run-backoffice dev-bench metrics stats health dashboard grafana grafana-up grafana-down clean stop build test all bench gate check check-lite check-full bless compose-gateway compose-gateway-down backoffice-recovery gateway-backoffice-e2e perf-gate-rust perf-gate-rust-full preset-switch-gate pure-hft-absolute-gate pure-hft-absolute-gate-loop fdatasync-ab fdatasync-adaptive-sweep adaptive-profile-search rust-check rust-test rust-run gateway-run gateway-check gateway-test backoffice-run backoffice-check backoffice-test app-run app-check app-test
 
 # デフォルトターゲット: ヘルプ表示
 .DEFAULT_GOAL := help
@@ -54,6 +54,8 @@ help:
 	@echo "  make perf-gate-rust-nightly - 夜間向け実測ゲート (full report)"
 	@echo "  make perf-gate-rust-bless - Rust Perf Gateのベースライン更新"
 	@echo "  make preset-switch-gate - Normal/Degraded切替シナリオのPASS/FAIL判定"
+	@echo "  make pure-hft-absolute-gate - /v3 absolute gateをLinux条件で1回実行"
+	@echo "  make pure-hft-absolute-gate-loop - /v3 absolute gateを複数回定常実行"
 	@echo "  make fdatasync-ab - fixed/adaptive の durability A/B比較"
 	@echo "  make fdatasync-adaptive-sweep - adaptiveパラメータの小規模スイープ"
 	@echo "  make adaptive-profile-search - durability+switch安定性を組み合わせた探索"
@@ -216,6 +218,12 @@ perf-gate-rust-bless:
 # Inflight preset switch gate (Normal -> Degraded -> Normal)
 preset-switch-gate:
 	@scripts/ops/check_preset_switch_gate.sh
+
+pure-hft-absolute-gate:
+	@scripts/ops/check_pure_hft_absolute_gate.sh
+
+pure-hft-absolute-gate-loop:
+	@scripts/ops/run_pure_hft_absolute_gate_loop.sh
 
 fdatasync-ab:
 	@scripts/ops/run_fdatasync_ab_compare.sh

@@ -142,8 +142,10 @@ impl ShardedOrderStore {
         let idx = self.shard_index(account_id);
         let mut guard = self.shards[idx].write().unwrap();
         if guard.by_id.contains_key(order_id) {
-            guard.durable_index.insert(order_id.to_string(), at_ms);
-            return true;
+            return guard
+                .durable_index
+                .insert(order_id.to_string(), at_ms)
+                .is_none();
         }
         false
     }

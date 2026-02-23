@@ -83,7 +83,7 @@ pub struct OrderResponse {
     /// クライアント注文ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_order_id: Option<String>,
-    /// ステータス: "ACCEPTED", "REJECTED"
+    /// ステータス: "ACCEPTED", "PENDING", "DURABLE", "REJECTED"
     pub status: String,
     /// 拒否理由（REJECTEDの場合のみ）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +103,38 @@ impl OrderResponse {
             request_id,
             client_order_id,
             status: "ACCEPTED".into(),
+            reason: None,
+        }
+    }
+
+    pub fn pending(
+        order_id: &str,
+        accept_seq: Option<u64>,
+        request_id: Option<String>,
+        client_order_id: Option<String>,
+    ) -> Self {
+        Self {
+            order_id: order_id.to_string(),
+            accept_seq,
+            request_id,
+            client_order_id,
+            status: "PENDING".into(),
+            reason: None,
+        }
+    }
+
+    pub fn durable(
+        order_id: &str,
+        accept_seq: Option<u64>,
+        request_id: Option<String>,
+        client_order_id: Option<String>,
+    ) -> Self {
+        Self {
+            order_id: order_id.to_string(),
+            accept_seq,
+            request_id,
+            client_order_id,
+            status: "DURABLE".into(),
             reason: None,
         }
     }
