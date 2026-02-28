@@ -4,10 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-29001}"
+TCP_PORT="${TCP_PORT:-30001}"
 TARGET_RPS="${TARGET_RPS:-10000}"
 DURATION="${DURATION:-30}"
-LOAD_WORKERS="${LOAD_WORKERS:-64}"
-LOAD_ACCOUNTS="${LOAD_ACCOUNTS:-16}"
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-openloop}"
 REQUEST_TIMEOUT_SEC="${REQUEST_TIMEOUT_SEC:-2}"
 DRAIN_TIMEOUT_SEC="${DRAIN_TIMEOUT_SEC:-5}"
@@ -15,6 +14,7 @@ BUILD_RELEASE="${BUILD_RELEASE:-0}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/var/results}"
 TARGET_COMPLETED_RPS="${TARGET_COMPLETED_RPS:-$TARGET_RPS}"
 TARGET_ACK_P99_US="${TARGET_ACK_P99_US:-100}"
+TARGET_ACK_ACCEPTED_P99_US="${TARGET_ACK_ACCEPTED_P99_US:-40}"
 TARGET_ACCEPTED_RATE="${TARGET_ACCEPTED_RATE:-0.99}"
 TARGET_REJECTED_KILLED_MAX="${TARGET_REJECTED_KILLED_MAX:-0}"
 TARGET_LOSS_SUSPECT_MAX="${TARGET_LOSS_SUSPECT_MAX:-0}"
@@ -29,33 +29,86 @@ V3_HARD_REJECT_PCT="${V3_HARD_REJECT_PCT:-92}"
 V3_KILL_REJECT_PCT="${V3_KILL_REJECT_PCT:-98}"
 V3_KILL_AUTO_RECOVER="${V3_KILL_AUTO_RECOVER:-false}"
 V3_INGRESS_QUEUE_CAPACITY="${V3_INGRESS_QUEUE_CAPACITY:-131072}"
-V3_DURABILITY_QUEUE_CAPACITY="${V3_DURABILITY_QUEUE_CAPACITY:-200000}"
-V3_SHARD_COUNT="${V3_SHARD_COUNT:-4}"
+V3_DURABILITY_QUEUE_CAPACITY="${V3_DURABILITY_QUEUE_CAPACITY:-4000000}"
 V3_LOSS_GAP_TIMEOUT_MS="${V3_LOSS_GAP_TIMEOUT_MS:-2000}"
 V3_SESSION_LOSS_SUSPECT_THRESHOLD="${V3_SESSION_LOSS_SUSPECT_THRESHOLD:-1}"
 V3_SHARD_LOSS_SUSPECT_THRESHOLD="${V3_SHARD_LOSS_SUSPECT_THRESHOLD:-3}"
 V3_GLOBAL_LOSS_SUSPECT_THRESHOLD="${V3_GLOBAL_LOSS_SUSPECT_THRESHOLD:-6}"
+V3_DURABLE_WORKER_BATCH_MAX="${V3_DURABLE_WORKER_BATCH_MAX:-12}"
+V3_DURABLE_WORKER_BATCH_MIN="${V3_DURABLE_WORKER_BATCH_MIN:-6}"
+V3_DURABLE_WORKER_BATCH_WAIT_US="${V3_DURABLE_WORKER_BATCH_WAIT_US:-80}"
+V3_DURABLE_WORKER_BATCH_WAIT_MIN_US="${V3_DURABLE_WORKER_BATCH_WAIT_MIN_US:-40}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE="${V3_DURABLE_WORKER_BATCH_ADAPTIVE:-false}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT:-10}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT:-60}"
+V3_DURABLE_ADMISSION_CONTROLLER_ENABLED="${V3_DURABLE_ADMISSION_CONTROLLER_ENABLED:-true}"
+V3_DURABLE_ADMISSION_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_SUSTAIN_TICKS:-4}"
+V3_DURABLE_ADMISSION_RECOVER_TICKS="${V3_DURABLE_ADMISSION_RECOVER_TICKS:-8}"
+V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US="${V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US:-6000}"
+V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US="${V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US:-12000}"
+V3_CONFIRM_REBUILD_ON_START="${V3_CONFIRM_REBUILD_ON_START:-false}"
+V3_CONFIRM_REBUILD_MAX_LINES="${V3_CONFIRM_REBUILD_MAX_LINES:-500000}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
+
+# For 12k+ exploration, prefer a higher default load generator profile.
+is_high_target="$(awk -v r="$TARGET_RPS" 'BEGIN{print ((r+0)>=12000)?1:0}')"
+if [[ -z "${LOAD_WORKERS:-}" ]]; then
+  if [[ "$is_high_target" == "1" ]]; then
+    LOAD_WORKERS=192
+  else
+    LOAD_WORKERS=64
+  fi
+fi
+if [[ -z "${LOAD_ACCOUNTS:-}" ]]; then
+  if [[ "$is_high_target" == "1" ]]; then
+    LOAD_ACCOUNTS=24
+  else
+    LOAD_ACCOUNTS=16
+  fi
+fi
 
 if [[ -z "${LOAD_QUEUE_CAPACITY:-}" ]]; then
   LOAD_QUEUE_CAPACITY=$((TARGET_RPS * 2))
+fi
+LOAD_MAX_BURST_PER_TICK="${LOAD_MAX_BURST_PER_TICK:-2000}"
+LOAD_FINAL_CATCHUP="${LOAD_FINAL_CATCHUP:-false}"
+if [[ -z "${V3_SHARD_COUNT:-}" ]]; then
+  if [[ "$is_high_target" == "1" ]]; then
+    V3_SHARD_COUNT=8
+  else
+    V3_SHARD_COUNT=4
+  fi
+fi
+if [[ "$is_high_target" == "1" ]]; then
+  if [[ "${V3_LOSS_GAP_TIMEOUT_MS}" == "2000" ]]; then
+    V3_LOSS_GAP_TIMEOUT_MS=360000
+  fi
+  if [[ "${V3_SESSION_LOSS_SUSPECT_THRESHOLD}" == "1" ]]; then
+    V3_SESSION_LOSS_SUSPECT_THRESHOLD=4096
+  fi
+  if [[ "${V3_SHARD_LOSS_SUSPECT_THRESHOLD}" == "3" ]]; then
+    V3_SHARD_LOSS_SUSPECT_THRESHOLD=32768
+  fi
+  if [[ "${V3_GLOBAL_LOSS_SUSPECT_THRESHOLD}" == "6" ]]; then
+    V3_GLOBAL_LOSS_SUSPECT_THRESHOLD=131072
+  fi
 fi
 
 mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_FILE="$OUT_DIR/pure_hft_open_loop_${STAMP}.gateway.log"
-LOAD_OUT="$OUT_DIR/pure_hft_open_loop_${STAMP}.load.txt"
-METRICS_OUT="$OUT_DIR/pure_hft_open_loop_${STAMP}.metrics.prom"
-SUMMARY_OUT="$OUT_DIR/pure_hft_open_loop_${STAMP}.summary.txt"
+LOG_FILE="$OUT_DIR/v3_open_loop_${STAMP}.gateway.log"
+LOAD_OUT="$OUT_DIR/v3_open_loop_${STAMP}.load.txt"
+METRICS_OUT="$OUT_DIR/v3_open_loop_${STAMP}.metrics.prom"
+SUMMARY_OUT="$OUT_DIR/v3_open_loop_${STAMP}.summary.txt"
 
 if [[ "$BUILD_RELEASE" == "1" ]]; then
   echo "[build] building release binary..."
-  scripts/ops/build_gateway_rust_release.sh >/tmp/pure_hft_open_loop_build.log 2>&1
+  scripts/ops/build_gateway_rust_release.sh >/tmp/v3_open_loop_build.log 2>&1
 elif [[ ! -x ./gateway-rust/target/release/gateway-rust ]]; then
   echo "[build] release binary not found. building..."
-  scripts/ops/build_gateway_rust_release.sh >/tmp/pure_hft_open_loop_build.log 2>&1
+  scripts/ops/build_gateway_rust_release.sh >/tmp/v3_open_loop_build.log 2>&1
 fi
 
 cleanup() {
@@ -78,8 +131,22 @@ V3_LOSS_GAP_TIMEOUT_MS="$V3_LOSS_GAP_TIMEOUT_MS" \
 V3_SESSION_LOSS_SUSPECT_THRESHOLD="$V3_SESSION_LOSS_SUSPECT_THRESHOLD" \
 V3_SHARD_LOSS_SUSPECT_THRESHOLD="$V3_SHARD_LOSS_SUSPECT_THRESHOLD" \
 V3_GLOBAL_LOSS_SUSPECT_THRESHOLD="$V3_GLOBAL_LOSS_SUSPECT_THRESHOLD" \
+V3_DURABLE_WORKER_BATCH_MAX="$V3_DURABLE_WORKER_BATCH_MAX" \
+V3_DURABLE_WORKER_BATCH_MIN="$V3_DURABLE_WORKER_BATCH_MIN" \
+V3_DURABLE_WORKER_BATCH_WAIT_US="$V3_DURABLE_WORKER_BATCH_WAIT_US" \
+V3_DURABLE_WORKER_BATCH_WAIT_MIN_US="$V3_DURABLE_WORKER_BATCH_WAIT_MIN_US" \
+V3_DURABLE_WORKER_BATCH_ADAPTIVE="$V3_DURABLE_WORKER_BATCH_ADAPTIVE" \
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT="$V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT" \
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT="$V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT" \
+V3_DURABLE_ADMISSION_CONTROLLER_ENABLED="$V3_DURABLE_ADMISSION_CONTROLLER_ENABLED" \
+V3_DURABLE_ADMISSION_SUSTAIN_TICKS="$V3_DURABLE_ADMISSION_SUSTAIN_TICKS" \
+V3_DURABLE_ADMISSION_RECOVER_TICKS="$V3_DURABLE_ADMISSION_RECOVER_TICKS" \
+V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US="$V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US" \
+V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US="$V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US" \
+V3_CONFIRM_REBUILD_ON_START="$V3_CONFIRM_REBUILD_ON_START" \
+V3_CONFIRM_REBUILD_MAX_LINES="$V3_CONFIRM_REBUILD_MAX_LINES" \
 GATEWAY_PORT="$PORT" \
-GATEWAY_TCP_PORT=0 \
+GATEWAY_TCP_PORT="$TCP_PORT" \
 JWT_HS256_SECRET=secret123 \
 KAFKA_ENABLE=0 \
 FASTPATH_DRAIN_ENABLE=1 \
@@ -99,6 +166,10 @@ if ! curl -sS "http://${HOST}:${PORT}/health" >/dev/null 2>&1; then
 fi
 
 echo "[load] open-loop /v3/orders target_rps=${TARGET_RPS} duration=${DURATION}s workers=${LOAD_WORKERS} accounts=${LOAD_ACCOUNTS}"
+load_final_catchup_flag=()
+if [[ "${LOAD_FINAL_CATCHUP}" == "1" || "${LOAD_FINAL_CATCHUP}" == "true" || "${LOAD_FINAL_CATCHUP}" == "TRUE" ]]; then
+  load_final_catchup_flag+=(--final-catchup)
+fi
 python3 scripts/ops/open_loop_v3_load.py \
   --host "$HOST" \
   --port "$PORT" \
@@ -110,8 +181,10 @@ python3 scripts/ops/open_loop_v3_load.py \
   --account-prefix "$ACCOUNT_PREFIX" \
   --jwt-secret secret123 \
   --queue-capacity "$LOAD_QUEUE_CAPACITY" \
+  --max-burst-per-tick "$LOAD_MAX_BURST_PER_TICK" \
   --request-timeout-sec "$REQUEST_TIMEOUT_SEC" \
-  --drain-timeout-sec "$DRAIN_TIMEOUT_SEC" >"$LOAD_OUT"
+  --drain-timeout-sec "$DRAIN_TIMEOUT_SEC" \
+  "${load_final_catchup_flag[@]}" >"$LOAD_OUT"
 
 curl -sS "http://${HOST}:${PORT}/metrics" >"$METRICS_OUT"
 
@@ -148,6 +221,20 @@ server_rejected_soft_total="$(metric_value gateway_v3_rejected_soft_total)"
 server_rejected_hard_total="$(metric_value gateway_v3_rejected_hard_total)"
 server_rejected_killed_total="$(metric_value gateway_v3_rejected_killed_total)"
 server_loss_suspect_total="$(metric_value gateway_v3_loss_suspect_total)"
+server_durable_backpressure_soft_total="$(metric_value gateway_v3_durable_backpressure_soft_total)"
+server_durable_backpressure_hard_total="$(metric_value gateway_v3_durable_backpressure_hard_total)"
+server_durable_admission_controller_enabled="$(metric_value gateway_v3_durable_admission_controller_enabled)"
+server_durable_admission_level="$(metric_value gateway_v3_durable_admission_level)"
+server_durable_admission_soft_trip_total="$(metric_value gateway_v3_durable_admission_soft_trip_total)"
+server_durable_admission_hard_trip_total="$(metric_value gateway_v3_durable_admission_hard_trip_total)"
+server_durable_admission_sustain_ticks="$(metric_value gateway_v3_durable_admission_sustain_ticks)"
+server_durable_admission_recover_ticks="$(metric_value gateway_v3_durable_admission_recover_ticks)"
+server_durable_admission_soft_fsync_p99_us="$(metric_value gateway_v3_durable_admission_soft_fsync_p99_us)"
+server_durable_admission_hard_fsync_p99_us="$(metric_value gateway_v3_durable_admission_hard_fsync_p99_us)"
+server_durable_soft_reject_pct="$(metric_value gateway_v3_durable_soft_reject_pct)"
+server_durable_hard_reject_pct="$(metric_value gateway_v3_durable_hard_reject_pct)"
+server_durable_backlog_soft_reject_per_sec="$(metric_value gateway_v3_durable_backlog_soft_reject_per_sec)"
+server_durable_backlog_hard_reject_per_sec="$(metric_value gateway_v3_durable_backlog_hard_reject_per_sec)"
 
 completed_rps="${completed_rps:-0}"
 offered_rps="${offered_rps:-0}"
@@ -161,22 +248,24 @@ server_loss_suspect_total="${server_loss_suspect_total:-0}"
 offered_rps_ratio="$(awk -v o="$offered_rps" -v t="$TARGET_RPS" 'BEGIN{if (t+0<=0) {print 0} else {printf "%.6f", (o+0)/(t+0)}}')"
 pass_completed_rps="$(awk -v v="$completed_rps" -v t="$TARGET_COMPLETED_RPS" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
 pass_ack="$(awk -v v="$server_live_ack_p99_us" -v t="$TARGET_ACK_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
+pass_ack_accepted="$(awk -v v="$server_live_ack_accepted_p99_us" -v t="$TARGET_ACK_ACCEPTED_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_rate="$(awk -v v="$server_accepted_rate" -v t="$TARGET_ACCEPTED_RATE" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
 pass_killed="$(awk -v v="$server_rejected_killed_total" -v t="$TARGET_REJECTED_KILLED_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_loss="$(awk -v v="$server_loss_suspect_total" -v t="$TARGET_LOSS_SUSPECT_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_offered_ratio="$(awk -v v="$offered_rps_ratio" -v t="$TARGET_OFFERED_RPS_RATIO_MIN" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
 pass_drop_ratio="$(awk -v v="$drop_ratio" -v t="$TARGET_DROPPED_OFFER_RATIO_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_unsent="$(awk -v v="$unsent_total" -v t="$TARGET_UNSENT_TOTAL_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
-overall_pass=$((pass_completed_rps & pass_ack & pass_rate & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent))
+overall_pass=$((pass_completed_rps & pass_ack & pass_ack_accepted & pass_rate & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent))
 
 cat >"$SUMMARY_OUT" <<EOF
-pure_hft_open_loop_probe
+v3_open_loop_probe
 date=${STAMP}
 host=${HOST}:${PORT}
 duration_sec=${DURATION}
 target_rps=${TARGET_RPS}
 target_completed_rps=${TARGET_COMPLETED_RPS}
 target_live_ack_p99_us=${TARGET_ACK_P99_US}
+target_live_ack_accepted_p99_us=${TARGET_ACK_ACCEPTED_P99_US}
 target_accepted_rate=${TARGET_ACCEPTED_RATE}
 target_rejected_killed_max=${TARGET_REJECTED_KILLED_MAX}
 target_loss_suspect_max=${TARGET_LOSS_SUSPECT_MAX}
@@ -186,6 +275,8 @@ target_unsent_total_max=${TARGET_UNSENT_TOTAL_MAX}
 load_workers=${LOAD_WORKERS}
 load_accounts=${LOAD_ACCOUNTS}
 load_queue_capacity=${LOAD_QUEUE_CAPACITY}
+load_max_burst_per_tick=${LOAD_MAX_BURST_PER_TICK}
+load_final_catchup=${LOAD_FINAL_CATCHUP}
 v3_soft_reject_pct=${V3_SOFT_REJECT_PCT}
 v3_hard_reject_pct=${V3_HARD_REJECT_PCT}
 v3_kill_reject_pct=${V3_KILL_REJECT_PCT}
@@ -195,6 +286,18 @@ v3_loss_gap_timeout_ms=${V3_LOSS_GAP_TIMEOUT_MS}
 v3_session_loss_suspect_threshold=${V3_SESSION_LOSS_SUSPECT_THRESHOLD}
 v3_shard_loss_suspect_threshold=${V3_SHARD_LOSS_SUSPECT_THRESHOLD}
 v3_global_loss_suspect_threshold=${V3_GLOBAL_LOSS_SUSPECT_THRESHOLD}
+v3_durable_worker_batch_max=${V3_DURABLE_WORKER_BATCH_MAX}
+v3_durable_worker_batch_min=${V3_DURABLE_WORKER_BATCH_MIN}
+v3_durable_worker_batch_wait_us=${V3_DURABLE_WORKER_BATCH_WAIT_US}
+v3_durable_worker_batch_wait_min_us=${V3_DURABLE_WORKER_BATCH_WAIT_MIN_US}
+v3_durable_worker_batch_adaptive=${V3_DURABLE_WORKER_BATCH_ADAPTIVE}
+v3_durable_worker_batch_adaptive_low_util_pct=${V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT}
+v3_durable_worker_batch_adaptive_high_util_pct=${V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT}
+v3_durable_admission_controller_enabled=${V3_DURABLE_ADMISSION_CONTROLLER_ENABLED}
+v3_durable_admission_sustain_ticks=${V3_DURABLE_ADMISSION_SUSTAIN_TICKS}
+v3_durable_admission_recover_ticks=${V3_DURABLE_ADMISSION_RECOVER_TICKS}
+v3_durable_admission_soft_fsync_p99_us=${V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US}
+v3_durable_admission_hard_fsync_p99_us=${V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US}
 offered_total=${offered_total}
 offered_rps=${offered_rps}
 offered_rps_ratio=${offered_rps_ratio}
@@ -218,8 +321,23 @@ server_rejected_soft_total=${server_rejected_soft_total}
 server_rejected_hard_total=${server_rejected_hard_total}
 server_rejected_killed_total=${server_rejected_killed_total}
 server_loss_suspect_total=${server_loss_suspect_total}
+server_durable_backpressure_soft_total=${server_durable_backpressure_soft_total}
+server_durable_backpressure_hard_total=${server_durable_backpressure_hard_total}
+server_durable_admission_controller_enabled=${server_durable_admission_controller_enabled}
+server_durable_admission_level=${server_durable_admission_level}
+server_durable_admission_soft_trip_total=${server_durable_admission_soft_trip_total}
+server_durable_admission_hard_trip_total=${server_durable_admission_hard_trip_total}
+server_durable_admission_sustain_ticks=${server_durable_admission_sustain_ticks}
+server_durable_admission_recover_ticks=${server_durable_admission_recover_ticks}
+server_durable_admission_soft_fsync_p99_us=${server_durable_admission_soft_fsync_p99_us}
+server_durable_admission_hard_fsync_p99_us=${server_durable_admission_hard_fsync_p99_us}
+server_durable_soft_reject_pct=${server_durable_soft_reject_pct}
+server_durable_hard_reject_pct=${server_durable_hard_reject_pct}
+server_durable_backlog_soft_reject_per_sec=${server_durable_backlog_soft_reject_per_sec}
+server_durable_backlog_hard_reject_per_sec=${server_durable_backlog_hard_reject_per_sec}
 gate_pass_completed_rps=${pass_completed_rps}
 gate_pass_live_ack_p99=${pass_ack}
+gate_pass_live_ack_accepted_p99=${pass_ack_accepted}
 gate_pass_accepted_rate=${pass_rate}
 gate_pass_rejected_killed=${pass_killed}
 gate_pass_loss_suspect=${pass_loss}
@@ -234,7 +352,7 @@ EOF
 
 echo "[summary] offered_rps=${offered_rps} completed_rps=${completed_rps} client_accepted_rate=${client_accepted_rate} server_accepted_rate=${server_accepted_rate}"
 echo "[summary] server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}"
-echo "[gate] completed_rps>=${TARGET_COMPLETED_RPS}:${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss}"
+echo "[gate] completed_rps>=${TARGET_COMPLETED_RPS}:${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss}"
 echo "[gate_supply] offered_rps_ratio>=${TARGET_OFFERED_RPS_RATIO_MIN}:${pass_offered_ratio} dropped_offer_ratio<=${TARGET_DROPPED_OFFER_RATIO_MAX}:${pass_drop_ratio} unsent_total<=${TARGET_UNSENT_TOTAL_MAX}:${pass_unsent}"
 echo "[artifacts] summary=${SUMMARY_OUT}"
 echo "[artifacts] load=${LOAD_OUT}"

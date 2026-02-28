@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/var/results}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-WAIT_LOG="${WAIT_LOG:-$OUT_DIR/pure_hft_quiet_wait_${STAMP}.log}"
-PRE_NOISE="${PRE_NOISE:-$OUT_DIR/pure_hft_quiet_wait_${STAMP}.noise.txt}"
+WAIT_LOG="${WAIT_LOG:-$OUT_DIR/v3_quiet_wait_${STAMP}.log}"
+PRE_NOISE="${PRE_NOISE:-$OUT_DIR/v3_quiet_wait_${STAMP}.noise.txt}"
 
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-300}"
 POLL_SEC="${POLL_SEC:-2}"
@@ -37,7 +37,7 @@ stable=0
 ready=0
 
 {
-  echo "pure_hft_quiet_wait"
+  echo "v3_quiet_wait"
   echo "started_at=$(date +%Y-%m-%dT%H:%M:%S%z)"
   echo "wait_max_sec=$WAIT_MAX_SEC"
   echo "poll_sec=$POLL_SEC"
@@ -91,6 +91,6 @@ else
   fi
 fi
 
-echo "run=run_pure_hft_phase2_compare.sh" | tee -a "$WAIT_LOG"
+echo "run=run_v3_phase2_compare.sh" | tee -a "$WAIT_LOG"
 echo "INFO: launching benchmark (log: $WAIT_LOG)"
-scripts/ops/run_pure_hft_phase2_compare.sh
+scripts/ops/run_v3_phase2_compare.sh

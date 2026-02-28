@@ -201,7 +201,7 @@ Schema versioning policy（決定）
       - BACKOFFICE_JWT が無い場合は JWT_HS256_SECRET + BACKOFFICE_ACCOUNT_ID から生成する。
       - BACKOFFICE_PASSFAIL=1 で PASS/FAIL の要約を出す。
   - Runbook:
-      - docs/ops/backoffice_runbook.txt に最小の復旧手順をまとめる。
+      - docs/ops/old/backoffice_runbook.txt に最小の復旧手順をまとめる。
       - Checklist を併記して最短確認手順を示す。
   - Replay 検証:
       - scripts/ops/backoffice_replay_verify.sh で ledger replay 後の整合確認を行う。

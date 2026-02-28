@@ -22,20 +22,20 @@ fi
 
 mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_FILE="$OUT_DIR/pure_hft_gate_${STAMP}.gateway.log"
-WRK_OUT="$OUT_DIR/pure_hft_gate_${STAMP}.wrk.txt"
-METRICS_OUT="$OUT_DIR/pure_hft_gate_${STAMP}.metrics.prom"
-SUMMARY_OUT="$OUT_DIR/pure_hft_gate_${STAMP}.summary.txt"
-NOISE_OUT="$OUT_DIR/pure_hft_gate_${STAMP}.noise.txt"
+LOG_FILE="$OUT_DIR/v3_gate_${STAMP}.gateway.log"
+WRK_OUT="$OUT_DIR/v3_gate_${STAMP}.wrk.txt"
+METRICS_OUT="$OUT_DIR/v3_gate_${STAMP}.metrics.prom"
+SUMMARY_OUT="$OUT_DIR/v3_gate_${STAMP}.summary.txt"
+NOISE_OUT="$OUT_DIR/v3_gate_${STAMP}.noise.txt"
 
 cd "$ROOT_DIR"
 
 if [[ "$BUILD_RELEASE" == "1" ]]; then
   echo "[build] building release binary with fixed perf flags..."
-  scripts/ops/build_gateway_rust_release.sh >/tmp/pure_hft_gate_build.log 2>&1
+  scripts/ops/build_gateway_rust_release.sh >/tmp/v3_gate_build.log 2>&1
 elif [[ ! -x ./gateway-rust/target/release/gateway-rust ]]; then
   echo "[build] release binary not found. building..."
-  scripts/ops/build_gateway_rust_release.sh >/tmp/pure_hft_gate_build.log 2>&1
+  scripts/ops/build_gateway_rust_release.sh >/tmp/v3_gate_build.log 2>&1
 fi
 
 STRICT="$NOISE_GUARD_STRICT" CPU_THRESHOLD="$NOISE_CPU_THRESHOLD" \
@@ -111,7 +111,7 @@ rejected_hard_total="${rejected_hard_total:-0}"
 rejected_killed_total="${rejected_killed_total:-0}"
 
 cat >"$SUMMARY_OUT" <<EOF
-pure_hft_absolute_gate
+v3_absolute_gate
 date=${STAMP}
 host=${HOST}:${PORT}
 duration_sec=${DURATION}

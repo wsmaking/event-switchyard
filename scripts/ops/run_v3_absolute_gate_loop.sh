@@ -23,23 +23,23 @@ fi
 
 mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-RAW_TSV="$OUT_DIR/pure_hft_gate_loop_${STAMP}.tsv"
-SUMMARY_OUT="$OUT_DIR/pure_hft_gate_loop_${STAMP}.summary.txt"
+RAW_TSV="$OUT_DIR/v3_gate_loop_${STAMP}.tsv"
+SUMMARY_OUT="$OUT_DIR/v3_gate_loop_${STAMP}.summary.txt"
 
 echo -e "run\trc\trps\tlive_ack_p99_us\taccepted_rate\tsummary_path" >"$RAW_TSV"
 
 for run in $(seq 1 "$RUNS"); do
-  run_out_dir="$OUT_DIR/pure_hft_gate_loop_${STAMP}_run${run}"
+  run_out_dir="$OUT_DIR/v3_gate_loop_${STAMP}_run${run}"
   run_log="$run_out_dir/run.log"
   mkdir -p "$run_out_dir"
 
   echo "[run ${run}/${RUNS}] OUT_DIR=${run_out_dir}"
   set +e
-  OUT_DIR="$run_out_dir" scripts/ops/check_pure_hft_absolute_gate.sh >"$run_log" 2>&1
+  OUT_DIR="$run_out_dir" scripts/ops/check_v3_absolute_gate.sh >"$run_log" 2>&1
   rc=$?
   set -e
 
-  summary_path="$(ls -1t "$run_out_dir"/pure_hft_gate_*.summary.txt 2>/dev/null | head -n1 || true)"
+  summary_path="$(ls -1t "$run_out_dir"/v3_gate_*.summary.txt 2>/dev/null | head -n1 || true)"
   rps="NA"
   live_ack_p99_us="NA"
   accepted_rate="NA"
@@ -93,7 +93,7 @@ ack_p99_median = median_numeric("live_ack_p99_us")
 accepted_rate_median = median_numeric("accepted_rate")
 
 lines = [
-    "pure_hft_absolute_gate_loop",
+    "v3_absolute_gate_loop",
     f"runs={runs}",
     f"pass_count={pass_count}",
     f"fail_count={fail_count}",
