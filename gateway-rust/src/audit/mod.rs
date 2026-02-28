@@ -296,11 +296,6 @@ impl AuditLog {
         }
     }
 
-    /// 非同期WAL設定に関わらず、呼び出しスレッドで durable まで同期実行する。
-    pub fn append_durable_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
-        self.append_sync_with_timings(event)
-    }
-
     #[cfg(test)]
     pub fn poison_writer_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -407,8 +402,20 @@ impl AuditLog {
             if let Ok(line) = serde_json::to_string(&event) {
                 let mut line_bytes = line.into_bytes();
                 line_bytes.push(b'\n');
-                let _ = writer.write_all(&line_bytes);
-                let _ = writer.flush();
+                if writer.write_all(&line_bytes).is_err() {
+                    return AuditAppendTimings {
+                        enqueue_done_ns: 0,
+                        durable_done_ns: 0,
+                        fdatasync_ns: 0,
+                    };
+                }
+                if writer.flush().is_err() {
+                    return AuditAppendTimings {
+                        enqueue_done_ns: 0,
+                        durable_done_ns: 0,
+                        fdatasync_ns: 0,
+                    };
+                }
                 self.append_hash_chain(&line_bytes);
                 enqueue_done_ns = now_nanos();
 
@@ -419,7 +426,13 @@ impl AuditLog {
 
                 if self.fdatasync_enabled {
                     let sync_start = now_nanos();
-                    let _ = writer.get_ref().sync_data();
+                    if writer.get_ref().sync_data().is_err() {
+                        return AuditAppendTimings {
+                            enqueue_done_ns,
+                            durable_done_ns: 0,
+                            fdatasync_ns: 0,
+                        };
+                    }
                     fdatasync_ns = now_nanos() - sync_start;
                 }
                 durable_done_ns = now_nanos();

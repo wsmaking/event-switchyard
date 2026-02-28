@@ -149,6 +149,17 @@ def main() -> None:
     parser.add_argument("--queue-capacity", type=int, default=20_000)
     parser.add_argument("--request-timeout-sec", type=float, default=2.0)
     parser.add_argument("--drain-timeout-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--max-burst-per-tick",
+        type=int,
+        default=2000,
+        help="Maximum offers emitted per scheduler tick to avoid runaway catch-up bursts",
+    )
+    parser.add_argument(
+        "--final-catchup",
+        action="store_true",
+        help="Backfill remaining target offers after duration",
+    )
     args = parser.parse_args()
 
     if args.duration_sec <= 0:
@@ -165,6 +176,8 @@ def main() -> None:
         raise SystemExit("--request-timeout-sec must be > 0")
     if args.drain_timeout_sec < 0:
         raise SystemExit("--drain-timeout-sec must be >= 0")
+    if args.max_burst_per_tick <= 0:
+        raise SystemExit("--max-burst-per-tick must be > 0")
 
     account_ids = [f"{args.account_prefix}_{i+1}" for i in range(args.accounts)]
     auth_headers = {
@@ -212,7 +225,10 @@ def main() -> None:
         if now >= sched_end:
             break
         should_offer = int((now - sched_start) * args.target_rps)
-        while offered_total < should_offer and offered_total < offered_total_target:
+        due = min(should_offer, offered_total_target) - offered_total
+        if due > args.max_burst_per_tick:
+            due = args.max_burst_per_tick
+        while due > 0:
             item = (offered_total, account_idx)
             account_idx = (account_idx + 1) % args.accounts
             try:
@@ -221,19 +237,21 @@ def main() -> None:
             except queue.Full:
                 dropped_before_send_total += 1
             offered_total += 1
+            due -= 1
         sleep_sec = min(0.001, max(0.0, sched_end - now))
         if sleep_sec > 0:
             time.sleep(sleep_sec)
 
-    while offered_total < offered_total_target:
-        item = (offered_total, account_idx)
-        account_idx = (account_idx + 1) % args.accounts
-        try:
-            q.put_nowait(item)
-            enqueued_total += 1
-        except queue.Full:
-            dropped_before_send_total += 1
-        offered_total += 1
+    if args.final_catchup:
+        while offered_total < offered_total_target:
+            item = (offered_total, account_idx)
+            account_idx = (account_idx + 1) % args.accounts
+            try:
+                q.put_nowait(item)
+                enqueued_total += 1
+            except queue.Full:
+                dropped_before_send_total += 1
+            offered_total += 1
 
     scheduler_done.set()
 
@@ -281,6 +299,9 @@ def main() -> None:
     print(f"workers={args.workers}")
     print(f"accounts={args.accounts}")
     print(f"queue_capacity={args.queue_capacity}")
+    print(f"max_burst_per_tick={args.max_burst_per_tick}")
+    print(f"final_catchup={int(args.final_catchup)}")
+    print(f"offered_total_target={offered_total_target}")
     print(f"offered_total={offered_total}")
     print(f"offered_rps={offered_rps:.3f}")
     print(f"enqueued_total={enqueued_total}")

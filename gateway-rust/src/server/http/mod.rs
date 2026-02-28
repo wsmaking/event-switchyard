@@ -28,14 +28,18 @@ mod sse;
 
 use axum::{
     Router,
+    http::StatusCode,
     routing::{get, post},
 };
 use gateway_core::SymbolLimits;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, error::TrySendError};
 use tower_http::cors::CorsLayer;
@@ -52,13 +56,15 @@ use crate::rate_limit::AccountRateLimiter;
 use crate::sse::SseHub;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
 use gateway_core::LatencyHistogram;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
 use orders::{
-    handle_cancel_order, handle_get_order, handle_get_order_by_client_id, handle_get_order_v2,
-    handle_get_order_v3, handle_order, handle_order_v2, handle_order_v3,
+    V3_TCP_REQUEST_SIZE, authenticate_v3_tcp_token, decode_v3_tcp_request,
+    encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_cancel_order, handle_get_order,
+    handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3, handle_order,
+    handle_order_v2, handle_order_v3, process_order_v3_hot_path,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -90,6 +96,184 @@ impl From<V3OrderTask> for V3DurableTask {
             received_at_ns: task.received_at_ns,
             shard_id: task.shard_id,
         }
+    }
+}
+
+#[derive(Clone)]
+struct V3DurableLane {
+    tx: Sender<V3DurableTask>,
+    depth: Arc<AtomicU64>,
+    capacity: u64,
+    processed_total: Arc<AtomicU64>,
+    queue_full_total: Arc<AtomicU64>,
+    queue_closed_total: Arc<AtomicU64>,
+}
+
+impl V3DurableLane {
+    fn new(tx: Sender<V3DurableTask>, capacity: u64) -> Self {
+        Self {
+            tx,
+            depth: Arc::new(AtomicU64::new(0)),
+            capacity,
+            processed_total: Arc::new(AtomicU64::new(0)),
+            queue_full_total: Arc::new(AtomicU64::new(0)),
+            queue_closed_total: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct V3DurableIngress {
+    lanes: Arc<Vec<V3DurableLane>>,
+}
+
+impl V3DurableIngress {
+    fn new(lanes: Vec<V3DurableLane>) -> Self {
+        Self {
+            lanes: Arc::new(lanes),
+        }
+    }
+
+    pub(super) fn lane_count(&self) -> usize {
+        self.lanes.len().max(1)
+    }
+
+    pub(super) fn lane_for_shard(&self, shard_id: usize) -> usize {
+        shard_id % self.lane_count()
+    }
+
+    fn try_enqueue(&self, task: V3DurableTask) -> Result<(), TrySendError<V3DurableTask>> {
+        // durable lane は ingress shard と同じ分割キーで固定し、順序と局所性を揃える。
+        let lane_id = self.lane_for_shard(task.shard_id);
+        let Some(lane) = self.lanes.get(lane_id) else {
+            return Err(TrySendError::Closed(task));
+        };
+        match lane.tx.try_send(task) {
+            Ok(()) => {
+                lane.depth.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(TrySendError::Full(task)) => {
+                lane.queue_full_total.fetch_add(1, Ordering::Relaxed);
+                Err(TrySendError::Full(task))
+            }
+            Err(TrySendError::Closed(task)) => {
+                lane.queue_closed_total.fetch_add(1, Ordering::Relaxed);
+                Err(TrySendError::Closed(task))
+            }
+        }
+    }
+
+    fn on_processed_one(&self, lane_id: usize) {
+        let Some(lane) = self.lanes.get(lane_id) else {
+            return;
+        };
+        let prev = lane.depth.fetch_sub(1, Ordering::Relaxed);
+        if prev == 0 {
+            lane.depth.store(0, Ordering::Relaxed);
+        }
+        lane.processed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn total_depth(&self) -> u64 {
+        self.lanes
+            .iter()
+            .map(|lane| lane.depth.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    pub(super) fn total_capacity(&self) -> u64 {
+        self.lanes.iter().map(|lane| lane.capacity).sum()
+    }
+
+    pub(super) fn queue_utilization_pct_max(&self) -> f64 {
+        self.lanes
+            .iter()
+            .map(|lane| {
+                if lane.capacity == 0 {
+                    100.0
+                } else {
+                    lane.depth.load(Ordering::Relaxed) as f64 * 100.0 / lane.capacity as f64
+                }
+            })
+            .fold(0.0, f64::max)
+    }
+
+    pub(super) fn lane_utilization_pct(&self, lane_id: usize) -> f64 {
+        let Some(lane) = self.lanes.get(lane_id) else {
+            return 100.0;
+        };
+        if lane.capacity == 0 {
+            100.0
+        } else {
+            lane.depth.load(Ordering::Relaxed) as f64 * 100.0 / lane.capacity as f64
+        }
+    }
+
+    pub(super) fn lane_depth(&self, lane_id: usize) -> u64 {
+        self.lanes
+            .get(lane_id)
+            .map(|lane| lane.depth.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(super) fn lane_skew_pct(&self) -> f64 {
+        let mut max = 0u64;
+        let mut total = 0u64;
+        for lane in self.lanes.iter() {
+            let depth = lane.depth.load(Ordering::Relaxed);
+            max = max.max(depth);
+            total = total.saturating_add(depth);
+        }
+        if total == 0 {
+            return 0.0;
+        }
+        let avg = total as f64 / self.lane_count() as f64;
+        if avg <= 0.0 {
+            return 0.0;
+        }
+        ((max as f64 / avg) - 1.0) * 100.0
+    }
+
+    pub(super) fn queue_full_total(&self) -> u64 {
+        self.lanes
+            .iter()
+            .map(|lane| lane.queue_full_total.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    pub(super) fn queue_closed_total(&self) -> u64 {
+        self.lanes
+            .iter()
+            .map(|lane| lane.queue_closed_total.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    pub(super) fn processed_total(&self) -> u64 {
+        self.lanes
+            .iter()
+            .map(|lane| lane.processed_total.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    pub(super) fn lane_depths(&self) -> Vec<u64> {
+        self.lanes
+            .iter()
+            .map(|lane| lane.depth.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    pub(super) fn lane_utilization_pcts(&self) -> Vec<f64> {
+        self.lanes
+            .iter()
+            .map(|lane| {
+                if lane.capacity == 0 {
+                    100.0
+                } else {
+                    lane.depth.load(Ordering::Relaxed) as f64 * 100.0 / lane.capacity as f64
+                }
+            })
+            .collect()
     }
 }
 
@@ -139,20 +323,167 @@ pub(super) struct V3LossCandidate {
     pub(super) shard_id: usize,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct V3DeadlineEntry {
+    deadline_ns: u64,
+    session_id: String,
+    session_seq: u64,
+}
+
+impl Ord for V3DeadlineEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering for min-heap semantics (earliest deadline first).
+        other
+            .deadline_ns
+            .cmp(&self.deadline_ns)
+            .then_with(|| other.session_seq.cmp(&self.session_seq))
+            .then_with(|| other.session_id.cmp(&self.session_id))
+    }
+}
+
+impl PartialOrd for V3DeadlineEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct V3TimeoutScanResult {
+    pub(super) candidates: Vec<V3LossCandidate>,
+    pub(super) scan_cost: u64,
+}
+
+#[derive(Clone)]
 pub(super) struct V3ConfirmStore {
-    records: Arc<dashmap::DashMap<(String, u64), V3ConfirmRecord>>,
+    records: Arc<Vec<Arc<dashmap::DashMap<(String, u64), V3ConfirmRecord>>>>,
+    timeout_wheels: Arc<Vec<Arc<std::sync::Mutex<BinaryHeap<V3DeadlineEntry>>>>>,
+    gc_wheels: Arc<Vec<Arc<std::sync::Mutex<BinaryHeap<V3DeadlineEntry>>>>>,
+    timeout_ns: u64,
+    ttl_ns: u64,
 }
 
 impl V3ConfirmStore {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(lane_count: usize, timeout_ms: u64, ttl_ms: u64) -> Self {
+        let lanes = lane_count.max(1);
+        let timeout_ns = timeout_ms.max(1).saturating_mul(1_000_000);
+        let ttl_ns = ttl_ms.max(timeout_ms.max(1)).saturating_mul(1_000_000);
+        let mut records = Vec::with_capacity(lanes);
+        let mut timeout_wheels = Vec::with_capacity(lanes);
+        let mut gc_wheels = Vec::with_capacity(lanes);
+        for _ in 0..lanes {
+            records.push(Arc::new(dashmap::DashMap::new()));
+            timeout_wheels.push(Arc::new(std::sync::Mutex::new(BinaryHeap::new())));
+            gc_wheels.push(Arc::new(std::sync::Mutex::new(BinaryHeap::new())));
+        }
         Self {
-            records: Arc::new(dashmap::DashMap::new()),
+            records: Arc::new(records),
+            timeout_wheels: Arc::new(timeout_wheels),
+            gc_wheels: Arc::new(gc_wheels),
+            timeout_ns,
+            ttl_ns,
         }
     }
 
+    fn lane_count(&self) -> usize {
+        self.records.len().max(1)
+    }
+
+    fn lane_for_session(&self, session_id: &str) -> usize {
+        index_for_key(session_id, self.lane_count())
+    }
+
+    fn schedule_timeout(
+        &self,
+        lane: usize,
+        session_id: &str,
+        session_seq: u64,
+        received_at_ns: u64,
+    ) {
+        let deadline_ns = received_at_ns.saturating_add(self.timeout_ns);
+        let mut wheel = match self.timeout_wheels[lane].lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        wheel.push(V3DeadlineEntry {
+            deadline_ns,
+            session_id: session_id.to_string(),
+            session_seq,
+        });
+    }
+
+    fn schedule_gc(&self, lane: usize, session_id: &str, session_seq: u64, updated_at_ns: u64) {
+        let deadline_ns = updated_at_ns.saturating_add(self.ttl_ns);
+        let mut wheel = match self.gc_wheels[lane].lock() {
+            Ok(v) => v,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        wheel.push(V3DeadlineEntry {
+            deadline_ns,
+            session_id: session_id.to_string(),
+            session_seq,
+        });
+    }
+
+    pub(super) fn lane_count_metric(&self) -> u64 {
+        self.lane_count() as u64
+    }
+
+    pub(super) fn total_size(&self) -> u64 {
+        self.records.iter().map(|lane| lane.len() as u64).sum()
+    }
+
+    pub(super) fn lane_skew_pct(&self) -> f64 {
+        let mut max = 0u64;
+        let mut total = 0u64;
+        for lane in self.records.iter() {
+            let size = lane.len() as u64;
+            max = max.max(size);
+            total = total.saturating_add(size);
+        }
+        if total == 0 {
+            return 0.0;
+        }
+        let avg = total as f64 / self.lane_count() as f64;
+        if avg <= 0.0 {
+            return 0.0;
+        }
+        ((max as f64 / avg) - 1.0) * 100.0
+    }
+
+    pub(super) fn oldest_volatile_age_us_per_lane(&self, now_ns: u64) -> Vec<u64> {
+        let mut out = vec![0u64; self.lane_count()];
+        for lane in 0..self.lane_count() {
+            let deadline_ns_opt = {
+                let mut wheel = match self.timeout_wheels[lane].lock() {
+                    Ok(v) => v,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                loop {
+                    let Some(peek) = wheel.peek() else {
+                        break None;
+                    };
+                    let key = (peek.session_id.clone(), peek.session_seq);
+                    let is_volatile = self.records[lane]
+                        .get(&key)
+                        .map(|entry| entry.status == V3ConfirmStatus::VolatileAccept)
+                        .unwrap_or(false);
+                    if is_volatile {
+                        break Some(peek.deadline_ns);
+                    }
+                    wheel.pop();
+                }
+            };
+            if let Some(deadline_ns) = deadline_ns_opt {
+                let received_at_ns = deadline_ns.saturating_sub(self.timeout_ns);
+                out[lane] = now_ns.saturating_sub(received_at_ns) / 1_000;
+            }
+        }
+        out
+    }
+
     pub(super) fn record_volatile(&self, task: &V3OrderTask, now_ns: u64) {
-        self.records.insert(
+        let lane = self.lane_for_session(&task.session_id);
+        self.records[lane].insert(
             (task.session_id.clone(), task.session_seq),
             V3ConfirmRecord {
                 status: V3ConfirmStatus::VolatileAccept,
@@ -163,16 +494,26 @@ impl V3ConfirmStore {
                 shard_id: task.shard_id,
             },
         );
+        self.schedule_timeout(
+            lane,
+            &task.session_id,
+            task.session_seq,
+            task.received_at_ns,
+        );
+        self.schedule_gc(lane, &task.session_id, task.session_seq, now_ns);
     }
 
     pub(super) fn mark_durable_accepted(&self, session_id: &str, session_seq: u64, now_ns: u64) {
-        if let Some(mut entry) = self.records.get_mut(&(session_id.to_string(), session_seq)) {
+        let lane = self.lane_for_session(session_id);
+        if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
+        {
             entry.status = V3ConfirmStatus::DurableAccepted;
             entry.reason = None;
             entry.updated_at_ns = now_ns;
+            self.schedule_gc(lane, session_id, session_seq, now_ns);
             return;
         }
-        self.records.insert(
+        self.records[lane].insert(
             (session_id.to_string(), session_seq),
             V3ConfirmRecord {
                 status: V3ConfirmStatus::DurableAccepted,
@@ -180,9 +521,10 @@ impl V3ConfirmStore {
                 attempt_seq: session_seq,
                 received_at_ns: now_ns,
                 updated_at_ns: now_ns,
-                shard_id: 0,
+                shard_id: lane,
             },
         );
+        self.schedule_gc(lane, session_id, session_seq, now_ns);
     }
 
     pub(super) fn mark_durable_rejected(
@@ -192,13 +534,16 @@ impl V3ConfirmStore {
         reason: &str,
         now_ns: u64,
     ) {
-        if let Some(mut entry) = self.records.get_mut(&(session_id.to_string(), session_seq)) {
+        let lane = self.lane_for_session(session_id);
+        if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
+        {
             entry.status = V3ConfirmStatus::DurableRejected;
             entry.reason = Some(reason.to_string());
             entry.updated_at_ns = now_ns;
+            self.schedule_gc(lane, session_id, session_seq, now_ns);
             return;
         }
-        self.records.insert(
+        self.records[lane].insert(
             (session_id.to_string(), session_seq),
             V3ConfirmRecord {
                 status: V3ConfirmStatus::DurableRejected,
@@ -206,9 +551,10 @@ impl V3ConfirmStore {
                 attempt_seq: session_seq,
                 received_at_ns: now_ns,
                 updated_at_ns: now_ns,
-                shard_id: 0,
+                shard_id: lane,
             },
         );
+        self.schedule_gc(lane, session_id, session_seq, now_ns);
     }
 
     pub(super) fn mark_loss_suspect(
@@ -219,7 +565,9 @@ impl V3ConfirmStore {
         reason: &str,
         now_ns: u64,
     ) -> Option<usize> {
-        if let Some(mut entry) = self.records.get_mut(&(session_id.to_string(), session_seq)) {
+        let lane = self.lane_for_session(session_id);
+        if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
+        {
             if entry.status == V3ConfirmStatus::LossSuspect {
                 return None;
             }
@@ -231,9 +579,10 @@ impl V3ConfirmStore {
             entry.status = V3ConfirmStatus::LossSuspect;
             entry.reason = Some(reason.to_string());
             entry.updated_at_ns = now_ns;
+            self.schedule_gc(lane, session_id, session_seq, now_ns);
             return Some(entry.shard_id);
         }
-        self.records.insert(
+        self.records[lane].insert(
             (session_id.to_string(), session_seq),
             V3ConfirmRecord {
                 status: V3ConfirmStatus::LossSuspect,
@@ -244,11 +593,13 @@ impl V3ConfirmStore {
                 shard_id,
             },
         );
+        self.schedule_gc(lane, session_id, session_seq, now_ns);
         Some(shard_id)
     }
 
     pub(super) fn snapshot(&self, session_id: &str, session_seq: u64) -> Option<V3ConfirmSnapshot> {
-        self.records
+        let lane = self.lane_for_session(session_id);
+        self.records[lane]
             .get(&(session_id.to_string(), session_seq))
             .map(|entry| V3ConfirmSnapshot {
                 status: entry.status,
@@ -260,30 +611,98 @@ impl V3ConfirmStore {
             })
     }
 
-    pub(super) fn collect_timed_out(
-        &self,
-        now_ns: u64,
-        timeout_ns: u64,
-        max_scan: usize,
-    ) -> Vec<V3LossCandidate> {
+    pub(super) fn collect_timed_out(&self, now_ns: u64, max_scan: usize) -> V3TimeoutScanResult {
         let mut out = Vec::new();
-        for item in self.records.iter() {
+        let mut scan_cost = 0u64;
+        if max_scan == 0 {
+            return V3TimeoutScanResult {
+                candidates: out,
+                scan_cost,
+            };
+        }
+        for lane in 0..self.lane_count() {
+            while out.len() < max_scan {
+                let entry = {
+                    let mut wheel = match self.timeout_wheels[lane].lock() {
+                        Ok(v) => v,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let Some(peek) = wheel.peek() else {
+                        break;
+                    };
+                    if peek.deadline_ns > now_ns {
+                        break;
+                    }
+                    wheel.pop()
+                };
+                let Some(entry) = entry else {
+                    break;
+                };
+                scan_cost = scan_cost.saturating_add(1);
+                let key = (entry.session_id.clone(), entry.session_seq);
+                if let Some(item) = self.records[lane].get(&key) {
+                    if item.status != V3ConfirmStatus::VolatileAccept {
+                        continue;
+                    }
+                    if now_ns < entry.deadline_ns {
+                        continue;
+                    }
+                    out.push(V3LossCandidate {
+                        session_id: key.0,
+                        session_seq: key.1,
+                        shard_id: item.shard_id,
+                    });
+                }
+            }
             if out.len() >= max_scan {
                 break;
             }
-            if item.status != V3ConfirmStatus::VolatileAccept {
-                continue;
-            }
-            if now_ns.saturating_sub(item.received_at_ns) < timeout_ns {
-                continue;
-            }
-            out.push(V3LossCandidate {
-                session_id: item.key().0.clone(),
-                session_seq: item.key().1,
-                shard_id: item.shard_id,
-            });
         }
-        out
+        V3TimeoutScanResult {
+            candidates: out,
+            scan_cost,
+        }
+    }
+
+    pub(super) fn gc_expired(&self, now_ns: u64, max_scan: usize) -> usize {
+        let mut removed = 0usize;
+        if max_scan == 0 {
+            return removed;
+        }
+        for lane in 0..self.lane_count() {
+            while removed < max_scan {
+                let entry = {
+                    let mut wheel = match self.gc_wheels[lane].lock() {
+                        Ok(v) => v,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let Some(peek) = wheel.peek() else {
+                        break;
+                    };
+                    if peek.deadline_ns > now_ns {
+                        break;
+                    }
+                    wheel.pop()
+                };
+                let Some(entry) = entry else {
+                    break;
+                };
+                let key = (entry.session_id, entry.session_seq);
+                if let Some(item) = self.records[lane].get(&key) {
+                    if item.updated_at_ns.saturating_add(self.ttl_ns) > now_ns {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                self.records[lane].remove(&key);
+                removed = removed.saturating_add(1);
+            }
+            if removed >= max_scan {
+                break;
+            }
+        }
+        removed
     }
 }
 
@@ -386,6 +805,8 @@ pub(super) struct V3LossEscalation {
 pub(super) struct V3Ingress {
     shards: Arc<Vec<V3ShardIngress>>,
     session_seq: Arc<dashmap::DashMap<String, Arc<AtomicU64>>>,
+    session_shard: Arc<dashmap::DashMap<String, usize>>,
+    shard_session_counts: Arc<Vec<Arc<AtomicU64>>>,
     session_killed: Arc<dashmap::DashSet<String>>,
     global_kill_switch: Arc<AtomicBool>,
     kill_auto_recover: bool,
@@ -413,12 +834,16 @@ impl V3Ingress {
     ) -> Self {
         let shard_len = shards.len().max(1);
         let mut windows = Vec::with_capacity(shard_len);
+        let mut session_counts = Vec::with_capacity(shard_len);
         for _ in 0..shard_len {
             windows.push(Arc::new(std::sync::Mutex::new(VecDeque::new())));
+            session_counts.push(Arc::new(AtomicU64::new(0)));
         }
         Self {
             shards: Arc::new(shards),
             session_seq: Arc::new(dashmap::DashMap::new()),
+            session_shard: Arc::new(dashmap::DashMap::new()),
+            shard_session_counts: Arc::new(session_counts),
             session_killed: Arc::new(dashmap::DashSet::new()),
             global_kill_switch: Arc::new(AtomicBool::new(false)),
             kill_auto_recover,
@@ -434,10 +859,38 @@ impl V3Ingress {
         }
     }
 
+    fn choose_shard_for_new_session(&self) -> usize {
+        let mut best_idx = 0usize;
+        let mut best_sessions = u64::MAX;
+        let mut best_depth = u64::MAX;
+        for (idx, shard) in self.shards.iter().enumerate() {
+            let sessions = self
+                .shard_session_counts
+                .get(idx)
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let depth = shard.depth.load(Ordering::Relaxed);
+            if sessions < best_sessions || (sessions == best_sessions && depth < best_depth) {
+                best_idx = idx;
+                best_sessions = sessions;
+                best_depth = depth;
+            }
+        }
+        best_idx
+    }
+
     fn shard_index_for_session(&self, session_id: &str) -> usize {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        session_id.hash(&mut hasher);
-        (hasher.finish() as usize) % self.shards.len().max(1)
+        use dashmap::mapref::entry::Entry;
+        match self.session_shard.entry(session_id.to_string()) {
+            Entry::Occupied(v) => *v.get(),
+            Entry::Vacant(v) => {
+                let shard_id = self.choose_shard_for_new_session();
+                if let Some(counter) = self.shard_session_counts.get(shard_id) {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                *v.insert(shard_id)
+            }
+        }
     }
 
     pub(super) fn next_seq(&self, session_id: &str) -> u64 {
@@ -609,7 +1062,8 @@ impl V3Ingress {
     ) -> V3LossEscalation {
         let shard_idx = shard_id.min(self.shards.len().saturating_sub(1));
         let mut out = V3LossEscalation::default();
-        if self.record_session_loss_and_count(session_id, now_ns) >= self.session_loss_suspect_threshold
+        if self.record_session_loss_and_count(session_id, now_ns)
+            >= self.session_loss_suspect_threshold
         {
             if self.session_killed.insert(session_id.to_string()) {
                 out.session_killed = true;
@@ -692,7 +1146,9 @@ pub(super) struct AppState {
     pub(super) sse_hub: Arc<SseHub>,
     pub(super) order_id_seq: Arc<AtomicU64>,
     pub(super) audit_log: Arc<AuditLog>,
+    pub(super) v3_durable_audit_logs: Arc<Vec<Arc<AuditLog>>>,
     pub(super) audit_read_path: Arc<PathBuf>,
+    pub(super) v3_confirm_rebuild_paths: Arc<Vec<PathBuf>>,
     pub(super) bus_publisher: Arc<BusPublisher>,
     pub(super) bus_mode_outbox: bool,
     pub(super) backpressure: BackpressureConfig,
@@ -730,18 +1186,74 @@ pub(super) struct AppState {
     pub(super) v3_session_killed_total: Arc<AtomicU64>,
     pub(super) v3_shard_killed_total: Arc<AtomicU64>,
     pub(super) v3_global_killed_total: Arc<AtomicU64>,
+    pub(super) v3_durable_ingress: Arc<V3DurableIngress>,
     pub(super) v3_durable_accepted_total: Arc<AtomicU64>,
     pub(super) v3_durable_rejected_total: Arc<AtomicU64>,
     pub(super) v3_live_ack_hist: Arc<LatencyHistogram>,
     pub(super) v3_live_ack_accepted_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_confirm_hist: Arc<LatencyHistogram>,
+    pub(super) v3_durable_wal_append_hist: Arc<LatencyHistogram>,
+    pub(super) v3_durable_wal_fsync_hist: Arc<LatencyHistogram>,
+    pub(super) v3_durable_wal_fsync_hist_per_lane: Arc<Vec<Arc<LatencyHistogram>>>,
+    pub(super) v3_durable_worker_loop_hist: Arc<LatencyHistogram>,
+    pub(super) v3_durable_worker_loop_hist_per_lane: Arc<Vec<Arc<LatencyHistogram>>>,
+    pub(super) v3_durable_worker_batch_min: usize,
+    pub(super) v3_durable_worker_batch_max: usize,
+    pub(super) v3_durable_worker_batch_wait_min_us: u64,
+    pub(super) v3_durable_worker_batch_wait_us: u64,
+    pub(super) v3_durable_worker_batch_adaptive: bool,
+    pub(super) v3_durable_worker_batch_adaptive_low_util_pct: f64,
+    pub(super) v3_durable_worker_batch_adaptive_high_util_pct: f64,
+    pub(super) v3_durable_depth_last: Arc<AtomicU64>,
+    pub(super) v3_durable_depth_last_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_backlog_growth_per_sec: Arc<AtomicI64>,
+    pub(super) v3_durable_backlog_growth_per_sec_per_lane: Arc<Vec<Arc<AtomicI64>>>,
+    pub(super) v3_durable_soft_reject_pct: u64,
+    pub(super) v3_durable_hard_reject_pct: u64,
+    pub(super) v3_durable_backlog_soft_reject_per_sec: i64,
+    pub(super) v3_durable_backlog_hard_reject_per_sec: i64,
+    pub(super) v3_durable_admission_controller_enabled: bool,
+    pub(super) v3_durable_admission_sustain_ticks: u64,
+    pub(super) v3_durable_admission_recover_ticks: u64,
+    pub(super) v3_durable_admission_soft_fsync_p99_us: u64,
+    pub(super) v3_durable_admission_hard_fsync_p99_us: u64,
+    pub(super) v3_durable_admission_level: Arc<AtomicU64>,
+    pub(super) v3_durable_admission_level_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_soft_trip_total: Arc<AtomicU64>,
+    pub(super) v3_durable_admission_soft_trip_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_hard_trip_total: Arc<AtomicU64>,
+    pub(super) v3_durable_admission_hard_trip_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_queue_soft_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_queue_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_backlog_soft_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_backlog_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_fsync_soft_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_admission_signal_fsync_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_backpressure_soft_total: Arc<AtomicU64>,
+    pub(super) v3_durable_backpressure_soft_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_backpressure_hard_total: Arc<AtomicU64>,
+    pub(super) v3_durable_backpressure_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_write_error_total: Arc<AtomicU64>,
     pub(super) v3_soft_reject_pct: u64,
     pub(super) v3_hard_reject_pct: u64,
     pub(super) v3_kill_reject_pct: u64,
     pub(super) v3_confirm_store: Arc<V3ConfirmStore>,
+    pub(super) v3_confirm_oldest_inflight_us: Arc<AtomicU64>,
+    pub(super) v3_confirm_oldest_inflight_us_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_confirm_age_hist_per_lane: Arc<Vec<Arc<LatencyHistogram>>>,
     pub(super) v3_loss_gap_timeout_ms: u64,
     pub(super) v3_loss_scan_interval_ms: u64,
     pub(super) v3_loss_scan_batch: usize,
+    pub(super) v3_confirm_gc_batch: usize,
+    pub(super) v3_confirm_timeout_scan_cost_last: Arc<AtomicU64>,
+    pub(super) v3_confirm_timeout_scan_cost_total: Arc<AtomicU64>,
+    pub(super) v3_confirm_gc_removed_total: Arc<AtomicU64>,
+    pub(super) v3_confirm_rebuild_restored_total: Arc<AtomicU64>,
+    pub(super) v3_confirm_rebuild_elapsed_ms: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_soft_reject_age_us: u64,
+    pub(super) v3_durable_confirm_hard_reject_age_us: u64,
+    pub(super) v3_durable_confirm_age_soft_reject_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_hard_reject_total: Arc<AtomicU64>,
     pub(super) v3_risk_profile: V3RiskProfile,
     pub(super) v3_risk_margin_mode: V3RiskMarginMode,
     pub(super) v3_risk_loops: u32,
@@ -816,6 +1328,120 @@ fn parse_bool_env(key: &str) -> Option<bool> {
             "0" | "false" | "no" | "off" => Some(false),
             _ => None,
         })
+}
+
+fn mix_u64(mut x: u64) -> u64 {
+    // MurmurHash3 finalizer mix to improve low-bit spread before bucket selection.
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    x
+}
+
+fn jump_consistent_hash(key: u64, buckets: usize) -> usize {
+    let buckets = buckets.max(1);
+    let mut k = key;
+    let mut b = -1i64;
+    let mut j = 0i64;
+    while j < buckets as i64 {
+        b = j;
+        k = k.wrapping_mul(2862933555777941757).wrapping_add(1);
+        let denom = ((k >> 33) + 1) as f64;
+        j = ((b as f64 + 1.0) * ((1u64 << 31) as f64 / denom)) as i64;
+    }
+    b.max(0) as usize
+}
+
+fn index_for_key(key: &str, buckets: usize) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let mixed = mix_u64(hasher.finish());
+    jump_consistent_hash(mixed, buckets)
+}
+
+fn parse_v3_order_id(order_id: &str) -> Option<(String, u64)> {
+    let rest = order_id.strip_prefix("v3/")?;
+    let (session_id, seq_raw) = rest.rsplit_once('/')?;
+    let session_seq = seq_raw.parse::<u64>().ok()?;
+    if session_id.is_empty() {
+        return None;
+    }
+    Some((session_id.to_string(), session_seq))
+}
+
+fn v3_durable_lane_wal_path(base: &Path, lane_id: usize) -> PathBuf {
+    PathBuf::from(format!("{}.v3.lane{}.log", base.display(), lane_id))
+}
+
+fn rebuild_v3_confirm_store_from_reader<R: BufRead>(
+    confirm_store: &V3ConfirmStore,
+    reader: R,
+    max_lines: usize,
+) -> u64 {
+    let max_lines = max_lines.clamp(1, 5_000_000);
+    let mut ring: VecDeque<AuditEvent> = VecDeque::with_capacity(max_lines.min(16_384));
+
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: AuditEvent = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        ring.push_back(event);
+        while ring.len() > max_lines {
+            ring.pop_front();
+        }
+    }
+
+    let mut restored = 0u64;
+    for event in ring {
+        let Some(order_id) = event.order_id.as_deref() else {
+            continue;
+        };
+        let Some((session_id, session_seq)) = parse_v3_order_id(order_id) else {
+            continue;
+        };
+        let at_ns = event.at.saturating_mul(1_000_000);
+        match event.event_type.as_str() {
+            "V3DurableAccepted" => {
+                confirm_store.mark_durable_accepted(&session_id, session_seq, at_ns);
+                restored = restored.saturating_add(1);
+            }
+            "V3DurableRejected" => {
+                let reason = event
+                    .data
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("WAL_DURABILITY_FAILED");
+                confirm_store.mark_durable_rejected(&session_id, session_seq, reason, at_ns);
+                restored = restored.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    restored
+}
+
+fn rebuild_v3_confirm_store_from_wal_path(state: &AppState, path: &Path, max_lines: usize) -> u64 {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = BufReader::new(file);
+    rebuild_v3_confirm_store_from_reader(&state.v3_confirm_store, reader, max_lines)
+}
+
+fn rebuild_v3_confirm_store_from_wal(state: &AppState, max_lines: usize) -> u64 {
+    state
+        .v3_confirm_rebuild_paths
+        .iter()
+        .map(|path| rebuild_v3_confirm_store_from_wal_path(state, path, max_lines))
+        .sum()
 }
 
 fn parse_v3_symbol_limits(
@@ -969,16 +1595,157 @@ pub async fn run(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(65_536);
+    let v3_shard_count_default = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(4, 8))
+        .unwrap_or(4);
     let v3_shard_count = std::env::var("V3_SHARD_COUNT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(4);
+        .unwrap_or(v3_shard_count_default);
     let v3_durable_queue_capacity = std::env::var("V3_DURABILITY_QUEUE_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(200_000);
+    let configured_v3_durable_lane_count = std::env::var("V3_DURABLE_LANE_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0);
+    if let Some(configured) = configured_v3_durable_lane_count {
+        if configured != v3_shard_count {
+            info!(
+                configured = configured,
+                shard_count = v3_shard_count,
+                "V3_DURABLE_LANE_COUNT ignored: shard->durable lane is fixed 1:1"
+            );
+        }
+    }
+    let v3_durable_lane_count = v3_shard_count;
+    let v3_durable_worker_batch_max = std::env::var("V3_DURABLE_WORKER_BATCH_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(12);
+    let mut v3_durable_worker_batch_min = std::env::var("V3_DURABLE_WORKER_BATCH_MIN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or((v3_durable_worker_batch_max / 2).max(1));
+    if v3_durable_worker_batch_min > v3_durable_worker_batch_max {
+        v3_durable_worker_batch_min = v3_durable_worker_batch_max;
+    }
+    let v3_durable_worker_batch_wait_us = std::env::var("V3_DURABLE_WORKER_BATCH_WAIT_US")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(80);
+    let mut v3_durable_worker_batch_wait_min_us =
+        std::env::var("V3_DURABLE_WORKER_BATCH_WAIT_MIN_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or((v3_durable_worker_batch_wait_us / 2).max(20));
+    if v3_durable_worker_batch_wait_min_us > v3_durable_worker_batch_wait_us {
+        v3_durable_worker_batch_wait_min_us = v3_durable_worker_batch_wait_us.max(1);
+    }
+    let v3_durable_worker_batch_adaptive =
+        parse_bool_env("V3_DURABLE_WORKER_BATCH_ADAPTIVE").unwrap_or(false);
+    let mut v3_durable_worker_batch_adaptive_low_util_pct =
+        std::env::var("V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(10.0)
+            .clamp(0.0, 99.0);
+    let mut v3_durable_worker_batch_adaptive_high_util_pct =
+        std::env::var("V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(60.0)
+            .clamp(1.0, 100.0);
+    if v3_durable_worker_batch_adaptive_high_util_pct
+        <= v3_durable_worker_batch_adaptive_low_util_pct
+    {
+        v3_durable_worker_batch_adaptive_high_util_pct =
+            (v3_durable_worker_batch_adaptive_low_util_pct + 1.0).min(100.0);
+    }
+    if v3_durable_worker_batch_adaptive_low_util_pct
+        >= v3_durable_worker_batch_adaptive_high_util_pct
+    {
+        v3_durable_worker_batch_adaptive_low_util_pct =
+            (v3_durable_worker_batch_adaptive_high_util_pct - 1.0).max(0.0);
+    }
+    let v3_durable_worker_batch_adaptive_cfg = V3DurableWorkerBatchAdaptiveConfig {
+        enabled: v3_durable_worker_batch_adaptive,
+        batch_min: v3_durable_worker_batch_min,
+        batch_max: v3_durable_worker_batch_max,
+        wait_min: Duration::from_micros(v3_durable_worker_batch_wait_min_us.max(1)),
+        wait_max: Duration::from_micros(v3_durable_worker_batch_wait_us.max(1)),
+        low_util_pct: v3_durable_worker_batch_adaptive_low_util_pct,
+        high_util_pct: v3_durable_worker_batch_adaptive_high_util_pct,
+    };
+    let durable_soft_reject_default = v3_soft_reject_pct.saturating_sub(15).max(50);
+    let v3_durable_soft_reject_pct = std::env::var("V3_DURABLE_SOFT_REJECT_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.min(99))
+        .unwrap_or(durable_soft_reject_default);
+    let durable_hard_reject_default = v3_hard_reject_pct
+        .saturating_sub(10)
+        .max(v3_durable_soft_reject_pct.saturating_add(1))
+        .min(99);
+    let mut v3_durable_hard_reject_pct = std::env::var("V3_DURABLE_HARD_REJECT_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.min(99))
+        .unwrap_or(durable_hard_reject_default);
+    if v3_durable_hard_reject_pct <= v3_durable_soft_reject_pct {
+        v3_durable_hard_reject_pct = (v3_durable_soft_reject_pct + 1).min(99);
+    }
+    let durable_backlog_soft_reject_default = ((v3_durable_queue_capacity as i64) / 200).max(1_000);
+    let v3_durable_backlog_soft_reject_per_sec =
+        std::env::var("V3_DURABLE_BACKLOG_SOFT_REJECT_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(durable_backlog_soft_reject_default);
+    let durable_backlog_hard_reject_default = durable_backlog_soft_reject_default.saturating_mul(2);
+    let mut v3_durable_backlog_hard_reject_per_sec =
+        std::env::var("V3_DURABLE_BACKLOG_HARD_REJECT_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(durable_backlog_hard_reject_default);
+    if v3_durable_backlog_hard_reject_per_sec <= v3_durable_backlog_soft_reject_per_sec {
+        v3_durable_backlog_hard_reject_per_sec =
+            v3_durable_backlog_soft_reject_per_sec.saturating_add(1);
+    }
+    let v3_durable_admission_controller_enabled =
+        parse_bool_env("V3_DURABLE_ADMISSION_CONTROLLER_ENABLED").unwrap_or(true);
+    let v3_durable_admission_sustain_ticks = std::env::var("V3_DURABLE_ADMISSION_SUSTAIN_TICKS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(4);
+    let v3_durable_admission_recover_ticks = std::env::var("V3_DURABLE_ADMISSION_RECOVER_TICKS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(8);
+    let v3_durable_admission_soft_fsync_p99_us =
+        std::env::var("V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(6_000);
+    let mut v3_durable_admission_hard_fsync_p99_us =
+        std::env::var("V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(12_000);
+    if v3_durable_admission_hard_fsync_p99_us <= v3_durable_admission_soft_fsync_p99_us {
+        v3_durable_admission_hard_fsync_p99_us =
+            v3_durable_admission_soft_fsync_p99_us.saturating_add(1);
+    }
     let v3_loss_gap_timeout_ms = std::env::var("V3_LOSS_GAP_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -994,17 +1761,54 @@ pub async fn run(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(2_048);
+    let v3_confirm_lanes = std::env::var("V3_CONFIRM_LANES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(v3_shard_count);
+    let v3_confirm_ttl_ms = std::env::var("V3_CONFIRM_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(600_000);
+    let v3_confirm_gc_batch = std::env::var("V3_CONFIRM_GC_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(v3_loss_scan_batch.max(1));
+    let v3_durable_confirm_soft_reject_age_us =
+        std::env::var("V3_DURABLE_CONFIRM_SOFT_REJECT_AGE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+    let mut v3_durable_confirm_hard_reject_age_us =
+        std::env::var("V3_DURABLE_CONFIRM_HARD_REJECT_AGE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+    if v3_durable_confirm_soft_reject_age_us > 0
+        && v3_durable_confirm_hard_reject_age_us > 0
+        && v3_durable_confirm_hard_reject_age_us <= v3_durable_confirm_soft_reject_age_us
+    {
+        v3_durable_confirm_hard_reject_age_us =
+            v3_durable_confirm_soft_reject_age_us.saturating_add(1);
+    }
+    let v3_confirm_rebuild_on_start = parse_bool_env("V3_CONFIRM_REBUILD_ON_START").unwrap_or(true);
+    let v3_confirm_rebuild_max_lines = std::env::var("V3_CONFIRM_REBUILD_MAX_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(500_000);
     let v3_loss_window_sec = std::env::var("V3_LOSS_WINDOW_SEC")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(60);
-    let v3_session_loss_suspect_threshold =
-        std::env::var("V3_SESSION_LOSS_SUSPECT_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(1);
+    let v3_session_loss_suspect_threshold = std::env::var("V3_SESSION_LOSS_SUSPECT_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
     let v3_shard_loss_suspect_threshold = std::env::var("V3_SHARD_LOSS_SUSPECT_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -1037,7 +1841,61 @@ pub async fn run(
         v3_shard_loss_suspect_threshold,
         v3_global_loss_suspect_threshold,
     ));
-    let (v3_durable_tx, v3_durable_rx) = tokio::sync::mpsc::channel(v3_durable_queue_capacity);
+    let per_lane_capacity = (v3_durable_queue_capacity / v3_durable_lane_count.max(1)).max(1);
+    let mut v3_durable_lanes = Vec::with_capacity(v3_durable_lane_count);
+    let mut v3_durable_rxs = Vec::with_capacity(v3_durable_lane_count);
+    for _ in 0..v3_durable_lane_count {
+        let (tx, rx) = tokio::sync::mpsc::channel(per_lane_capacity);
+        v3_durable_lanes.push(V3DurableLane::new(tx, per_lane_capacity as u64));
+        v3_durable_rxs.push(rx);
+    }
+    let v3_durable_ingress = Arc::new(V3DurableIngress::new(v3_durable_lanes));
+    let mut v3_durable_audit_logs = Vec::with_capacity(v3_durable_lane_count);
+    let mut v3_confirm_rebuild_paths = Vec::with_capacity(v3_durable_lane_count + 1);
+    v3_confirm_rebuild_paths.push(audit_log.path().to_path_buf());
+    for lane_id in 0..v3_durable_lane_count {
+        let lane_path = v3_durable_lane_wal_path(audit_log.path(), lane_id);
+        let lane_log = Arc::new(AuditLog::new(&lane_path)?);
+        lane_log.clone().start_async_writer(None);
+        v3_confirm_rebuild_paths.push(lane_path);
+        v3_durable_audit_logs.push(lane_log);
+    }
+    let new_lane_u64_counters = || {
+        Arc::new(
+            (0..v3_durable_lane_count)
+                .map(|_| Arc::new(AtomicU64::new(0)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let new_lane_i64_gauges = || {
+        Arc::new(
+            (0..v3_durable_lane_count)
+                .map(|_| Arc::new(AtomicI64::new(0)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let new_confirm_lane_u64_counters = || {
+        Arc::new(
+            (0..v3_confirm_lanes.max(1))
+                .map(|_| Arc::new(AtomicU64::new(0)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let v3_confirm_age_hist_per_lane = Arc::new(
+        (0..v3_confirm_lanes.max(1))
+            .map(|_| Arc::new(LatencyHistogram::new()))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_wal_fsync_hist_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(LatencyHistogram::new()))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_worker_loop_hist_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(LatencyHistogram::new()))
+            .collect::<Vec<_>>(),
+    );
 
     let audit_read_path = {
         let configured = std::env::var("AUDIT_LOG_PATH").ok().map(PathBuf::from);
@@ -1068,7 +1926,9 @@ pub async fn run(
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,
+        v3_durable_audit_logs: Arc::new(v3_durable_audit_logs),
         audit_read_path: Arc::new(audit_read_path),
+        v3_confirm_rebuild_paths: Arc::new(v3_confirm_rebuild_paths),
         bus_publisher,
         bus_mode_outbox,
         backpressure,
@@ -1106,18 +1966,78 @@ pub async fn run(
         v3_session_killed_total: Arc::new(AtomicU64::new(0)),
         v3_shard_killed_total: Arc::new(AtomicU64::new(0)),
         v3_global_killed_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_ingress: Arc::clone(&v3_durable_ingress),
         v3_durable_accepted_total: Arc::new(AtomicU64::new(0)),
         v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
         v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
         v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
+        v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
+        v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
+        v3_durable_wal_fsync_hist_per_lane,
+        v3_durable_worker_loop_hist: Arc::new(LatencyHistogram::new()),
+        v3_durable_worker_loop_hist_per_lane,
+        v3_durable_worker_batch_min,
+        v3_durable_worker_batch_max,
+        v3_durable_worker_batch_wait_min_us,
+        v3_durable_worker_batch_wait_us,
+        v3_durable_worker_batch_adaptive,
+        v3_durable_worker_batch_adaptive_low_util_pct,
+        v3_durable_worker_batch_adaptive_high_util_pct,
+        v3_durable_depth_last: Arc::new(AtomicU64::new(0)),
+        v3_durable_depth_last_per_lane: new_lane_u64_counters(),
+        v3_durable_backlog_growth_per_sec: Arc::new(AtomicI64::new(0)),
+        v3_durable_backlog_growth_per_sec_per_lane: new_lane_i64_gauges(),
+        v3_durable_soft_reject_pct,
+        v3_durable_hard_reject_pct,
+        v3_durable_backlog_soft_reject_per_sec,
+        v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_admission_controller_enabled,
+        v3_durable_admission_sustain_ticks,
+        v3_durable_admission_recover_ticks,
+        v3_durable_admission_soft_fsync_p99_us,
+        v3_durable_admission_hard_fsync_p99_us,
+        v3_durable_admission_level: Arc::new(AtomicU64::new(0)),
+        v3_durable_admission_level_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_soft_trip_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_admission_soft_trip_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_hard_trip_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_admission_hard_trip_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_queue_soft_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_queue_hard_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_backlog_soft_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_backlog_hard_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_fsync_soft_total_per_lane: new_lane_u64_counters(),
+        v3_durable_admission_signal_fsync_hard_total_per_lane: new_lane_u64_counters(),
+        v3_durable_backpressure_soft_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_backpressure_soft_total_per_lane: new_lane_u64_counters(),
+        v3_durable_backpressure_hard_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_backpressure_hard_total_per_lane: new_lane_u64_counters(),
+        v3_durable_write_error_total: Arc::new(AtomicU64::new(0)),
         v3_soft_reject_pct,
         v3_hard_reject_pct,
         v3_kill_reject_pct,
-        v3_confirm_store: Arc::new(V3ConfirmStore::new()),
+        v3_confirm_store: Arc::new(V3ConfirmStore::new(
+            v3_confirm_lanes,
+            v3_loss_gap_timeout_ms,
+            v3_confirm_ttl_ms,
+        )),
+        v3_confirm_oldest_inflight_us: Arc::new(AtomicU64::new(0)),
+        v3_confirm_oldest_inflight_us_per_lane: new_confirm_lane_u64_counters(),
+        v3_confirm_age_hist_per_lane,
         v3_loss_gap_timeout_ms,
         v3_loss_scan_interval_ms,
         v3_loss_scan_batch,
+        v3_confirm_gc_batch,
+        v3_confirm_timeout_scan_cost_last: Arc::new(AtomicU64::new(0)),
+        v3_confirm_timeout_scan_cost_total: Arc::new(AtomicU64::new(0)),
+        v3_confirm_gc_removed_total: Arc::new(AtomicU64::new(0)),
+        v3_confirm_rebuild_restored_total: Arc::new(AtomicU64::new(0)),
+        v3_confirm_rebuild_elapsed_ms: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_soft_reject_age_us,
+        v3_durable_confirm_hard_reject_age_us,
+        v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
         v3_risk_profile,
         v3_risk_margin_mode,
         v3_risk_loops,
@@ -1138,19 +2058,47 @@ pub async fn run(
         v3_stage_serialize_hist: Arc::new(LatencyHistogram::new()),
     };
 
+    if v3_confirm_rebuild_on_start {
+        let rebuild_t0 = Instant::now();
+        let restored = rebuild_v3_confirm_store_from_wal(&state, v3_confirm_rebuild_max_lines);
+        let elapsed_ms = rebuild_t0.elapsed().as_millis() as u64;
+        state
+            .v3_confirm_rebuild_restored_total
+            .store(restored, Ordering::Relaxed);
+        state
+            .v3_confirm_rebuild_elapsed_ms
+            .store(elapsed_ms, Ordering::Relaxed);
+        info!(
+            restored = restored,
+            elapsed_ms = elapsed_ms,
+            max_lines = v3_confirm_rebuild_max_lines,
+            "v3 confirm store rebuilt from WAL"
+        );
+    }
+
     for (shard_id, v3_rx) in v3_rxs.into_iter().enumerate() {
         let writer_state = state.clone();
-        let durable_tx = v3_durable_tx.clone();
         tokio::spawn(async move {
-            run_v3_single_writer(shard_id, v3_rx, writer_state, durable_tx).await;
+            run_v3_single_writer(shard_id, v3_rx, writer_state).await;
         });
     }
-    drop(v3_durable_tx);
-
-    let durable_state = state.clone();
-    tokio::spawn(async move {
-        run_v3_durable_worker(v3_durable_rx, durable_state).await;
-    });
+    for (lane_id, v3_durable_rx) in v3_durable_rxs.into_iter().enumerate() {
+        let durable_state = state.clone();
+        let durable_batch_max = durable_state.v3_durable_worker_batch_max;
+        let durable_batch_wait_us = durable_state.v3_durable_worker_batch_wait_us;
+        let durable_batch_adaptive_cfg = v3_durable_worker_batch_adaptive_cfg;
+        tokio::spawn(async move {
+            run_v3_durable_worker(
+                lane_id,
+                v3_durable_rx,
+                durable_state,
+                durable_batch_max,
+                durable_batch_wait_us,
+                durable_batch_adaptive_cfg,
+            )
+            .await;
+        });
+    }
 
     let loss_state = state.clone();
     tokio::spawn(async move {
@@ -1164,14 +2112,24 @@ pub async fn run(
         });
     }
 
-    let app = Router::new()
+    let v3_http_enable = parse_bool_env("V3_HTTP_ENABLE").unwrap_or(true);
+    let v3_tcp_enable = parse_bool_env("V3_TCP_ENABLE").unwrap_or(false);
+    let v3_tcp_port = std::env::var("V3_TCP_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(0);
+    if v3_tcp_enable && v3_tcp_port > 0 {
+        let v3_tcp_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = run_v3_tcp_server(v3_tcp_port, v3_tcp_state).await {
+                tracing::error!(error = %err, "v3 tcp server exited");
+            }
+        });
+    }
+
+    let app_base = Router::new()
         .route("/orders", post(handle_order))
         .route("/v2/orders", post(handle_order_v2))
-        .route("/v3/orders", post(handle_order_v3))
-        .route(
-            "/v3/orders/{session_id}/{session_seq}",
-            get(handle_get_order_v3),
-        )
         .route("/orders/{order_id}", get(handle_get_order))
         .route("/v2/orders/{order_id}", get(handle_get_order_v2))
         .route(
@@ -1191,9 +2149,17 @@ pub async fn run(
         .route("/audit/verify", get(handle_audit_verify))
         .route("/audit/anchor", get(handle_audit_anchor))
         .route("/health", get(handle_health))
-        .route("/metrics", get(handle_metrics))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+        .route("/metrics", get(handle_metrics));
+    let app = if v3_http_enable {
+        app_base.route("/v3/orders", post(handle_order_v3)).route(
+            "/v3/orders/{session_id}/{session_seq}",
+            get(handle_get_order_v3),
+        )
+    } else {
+        app_base
+    }
+    .layer(CorsLayer::permissive())
+    .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
@@ -1204,20 +2170,133 @@ pub async fn run(
     Ok(())
 }
 
+async fn run_v3_tcp_server(port: u16, state: AppState) -> anyhow::Result<()> {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).await?;
+    info!("v3 TCP server listening on {}", addr);
+
+    loop {
+        let (socket, peer) = listener.accept().await?;
+        let conn_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = handle_v3_tcp_connection(socket, conn_state).await {
+                tracing::warn!(peer = %peer, error = %err, "v3 tcp connection error");
+            }
+        });
+    }
+}
+
+async fn handle_v3_tcp_connection(
+    mut socket: tokio::net::TcpStream,
+    state: AppState,
+) -> anyhow::Result<()> {
+    socket.set_nodelay(true)?;
+    let mut req = [0u8; V3_TCP_REQUEST_SIZE];
+    loop {
+        match socket.read_exact(&mut req).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let t0 = gateway_core::now_nanos();
+        let resp = match decode_v3_tcp_request(&req) {
+            Ok(decoded) => match authenticate_v3_tcp_token(&state, &decoded.jwt_token) {
+                Ok(principal) => {
+                    let (status, body) = process_order_v3_hot_path(
+                        &state,
+                        principal.session_id,
+                        decoded.order_req,
+                        t0,
+                    );
+                    encode_v3_tcp_response(status, &body)
+                }
+                Err((status, reason_code)) => encode_v3_tcp_decode_error(status, reason_code, t0),
+            },
+            Err(code) => encode_v3_tcp_decode_error(StatusCode::UNPROCESSABLE_ENTITY, code, t0),
+        };
+        socket.write_all(&resp).await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct V3DurableWorkerBatchAdaptiveConfig {
+    enabled: bool,
+    batch_min: usize,
+    batch_max: usize,
+    wait_min: Duration,
+    wait_max: Duration,
+    low_util_pct: f64,
+    high_util_pct: f64,
+}
+
+impl V3DurableWorkerBatchAdaptiveConfig {
+    fn target_for_pressure(&self, pressure_pct: f64) -> (usize, Duration) {
+        let batch_min = self.batch_min.max(1).min(self.batch_max.max(1));
+        let batch_max = self.batch_max.max(batch_min);
+        let wait_min_us = self.wait_min.as_micros() as u64;
+        let wait_max_us = self.wait_max.as_micros() as u64;
+        let wait_min_us = wait_min_us.max(1).min(wait_max_us.max(1));
+        let wait_max_us = wait_max_us.max(wait_min_us);
+        if !self.enabled || (self.high_util_pct - self.low_util_pct) <= f64::EPSILON {
+            return (batch_max, Duration::from_micros(wait_max_us));
+        }
+        if pressure_pct <= self.low_util_pct {
+            return (batch_min, Duration::from_micros(wait_min_us));
+        }
+        if pressure_pct >= self.high_util_pct {
+            return (batch_max, Duration::from_micros(wait_max_us));
+        }
+        let ratio = ((pressure_pct - self.low_util_pct) / (self.high_util_pct - self.low_util_pct))
+            .clamp(0.0, 1.0);
+        let batch_span = batch_max.saturating_sub(batch_min);
+        let wait_span_us = wait_max_us.saturating_sub(wait_min_us);
+        let batch =
+            batch_min + ((batch_span as f64 * ratio).round() as usize).min(batch_span.max(1));
+        let wait_us =
+            wait_min_us + ((wait_span_us as f64 * ratio).round() as u64).min(wait_span_us);
+        (batch.max(1), Duration::from_micros(wait_us.max(1)))
+    }
+}
+
+fn v3_pressure_ratio(current: i64, soft: i64, hard: i64) -> f64 {
+    if hard <= soft {
+        return if current >= hard { 1.0 } else { 0.0 };
+    }
+    let current = current.max(0);
+    let soft = soft.max(0);
+    let hard = hard.max(1);
+    if current <= soft {
+        0.0
+    } else if current >= hard {
+        1.0
+    } else {
+        (current - soft) as f64 / (hard - soft) as f64
+    }
+}
+
+fn v3_fsync_pressure_ratio(current_us: u64, soft_us: u64, hard_us: u64) -> f64 {
+    if hard_us <= soft_us {
+        return if current_us >= hard_us { 1.0 } else { 0.0 };
+    }
+    if current_us <= soft_us {
+        0.0
+    } else if current_us >= hard_us {
+        1.0
+    } else {
+        (current_us - soft_us) as f64 / (hard_us - soft_us) as f64
+    }
+}
+
 /// /v3/orders の single-writer worker。
 /// ホットキューを直列消費し、durable confirm 経路へ渡す。
-async fn run_v3_single_writer(
-    shard_id: usize,
-    mut rx: Receiver<V3OrderTask>,
-    state: AppState,
-    durable_tx: Sender<V3DurableTask>,
-) {
+async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, state: AppState) {
     while let Some(task) = rx.recv().await {
         state.v3_ingress.on_processed_one(shard_id);
         state
             .v3_confirm_store
             .record_volatile(&task, gateway_core::now_nanos());
-        match durable_tx.try_send(task.into()) {
+        match state.v3_durable_ingress.try_enqueue(task.into()) {
             Ok(()) => {}
             Err(TrySendError::Full(task)) => {
                 state.register_v3_loss_suspect(
@@ -1243,42 +2322,154 @@ async fn run_v3_single_writer(
 
 /// /v3 の durable confirm worker。
 /// hot path外で WAL durable を実行し、結果を status store に反映する。
-async fn run_v3_durable_worker(mut rx: Receiver<V3DurableTask>, state: AppState) {
-    while let Some(task) = rx.recv().await {
-        let event = AuditEvent {
-            event_type: "V3DurableAccepted".to_string(),
-            at: crate::audit::now_millis(),
-            account_id: task.session_id.clone(),
-            order_id: Some(format!("v3/{}/{}", task.session_id, task.session_seq)),
-            data: serde_json::json!({
-                "sessionSeq": task.session_seq,
-                "attemptId": format!("att_{}", task.attempt_seq),
-            }),
+async fn run_v3_durable_worker(
+    lane_id: usize,
+    mut rx: Receiver<V3DurableTask>,
+    state: AppState,
+    batch_max: usize,
+    batch_wait_us: u64,
+    batch_adaptive_cfg: V3DurableWorkerBatchAdaptiveConfig,
+) {
+    let fallback_batch_max = batch_max.max(1);
+    let fallback_batch_wait = Duration::from_micros(batch_wait_us.max(1));
+    let lane_audit_log = state
+        .v3_durable_audit_logs
+        .get(lane_id)
+        .cloned()
+        .unwrap_or_else(|| Arc::clone(&state.audit_log));
+    loop {
+        let Some(first) = rx.recv().await else {
+            break;
         };
-        let timings = state.audit_log.append_durable_with_timings(event);
-        let now_ns = gateway_core::now_nanos();
-        if timings.durable_done_ns > 0 {
-            state.v3_confirm_store.mark_durable_accepted(
-                &task.session_id,
-                task.session_seq,
-                now_ns,
-            );
-            state
-                .v3_durable_accepted_total
-                .fetch_add(1, Ordering::Relaxed);
+        let lane_util_pct = state.v3_durable_ingress.lane_utilization_pct(lane_id);
+        let lane_backlog_growth_per_sec = state
+            .v3_durable_backlog_growth_per_sec_per_lane
+            .get(lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let lane_fsync_p99_us = state
+            .v3_durable_wal_fsync_hist_per_lane
+            .get(lane_id)
+            .map(|hist| hist.snapshot().percentile(99.0))
+            .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
+        let util_ratio = (lane_util_pct / 100.0).clamp(0.0, 1.0);
+        let backlog_ratio = v3_pressure_ratio(
+            lane_backlog_growth_per_sec,
+            state.v3_durable_backlog_soft_reject_per_sec,
+            state.v3_durable_backlog_hard_reject_per_sec,
+        );
+        let fsync_ratio = v3_fsync_pressure_ratio(
+            lane_fsync_p99_us,
+            state.v3_durable_admission_soft_fsync_p99_us,
+            state.v3_durable_admission_hard_fsync_p99_us,
+        );
+        let lane_pressure_pct = ((util_ratio * 0.60 + backlog_ratio * 0.25 + fsync_ratio * 0.15)
+            * 100.0)
+            .clamp(0.0, 100.0);
+        let (target_batch_max, target_batch_wait) = if batch_adaptive_cfg.enabled {
+            batch_adaptive_cfg.target_for_pressure(lane_pressure_pct)
         } else {
-            state.v3_confirm_store.mark_durable_rejected(
-                &task.session_id,
-                task.session_seq,
-                "WAL_DURABILITY_FAILED",
-                now_ns,
-            );
-            state
-                .v3_durable_rejected_total
-                .fetch_add(1, Ordering::Relaxed);
+            (fallback_batch_max, fallback_batch_wait)
+        };
+        let mut batch = Vec::with_capacity(target_batch_max.max(1));
+        batch.push(first);
+        if target_batch_max > 1 {
+            let deadline = tokio::time::Instant::now() + target_batch_wait;
+            while batch.len() < target_batch_max {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(task)) => batch.push(task),
+                    Ok(None) | Err(_) => break,
+                }
+            }
         }
-        let elapsed_us = now_ns.saturating_sub(task.received_at_ns) / 1_000;
-        state.v3_durable_confirm_hist.record(elapsed_us);
+        let worker_loop_t0 = gateway_core::now_nanos();
+        let mut pending = Vec::with_capacity(batch.len());
+        for task in batch {
+            state.v3_durable_ingress.on_processed_one(lane_id);
+            let append_t0 = gateway_core::now_nanos();
+            let event = AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: crate::audit::now_millis(),
+                account_id: task.session_id.clone(),
+                order_id: Some(format!("v3/{}/{}", task.session_id, task.session_seq)),
+                data: serde_json::json!({
+                    "sessionSeq": task.session_seq,
+                    "attemptId": format!("att_{}", task.attempt_seq),
+                }),
+            };
+            let append = lane_audit_log.append_with_durable_receipt(event, append_t0);
+            let append_elapsed_us = if append.timings.enqueue_done_ns >= append_t0 {
+                (append.timings.enqueue_done_ns - append_t0) / 1_000
+            } else {
+                gateway_core::now_nanos().saturating_sub(append_t0) / 1_000
+            };
+            state.v3_durable_wal_append_hist.record(append_elapsed_us);
+            pending.push((
+                task,
+                append.timings.durable_done_ns,
+                append.timings.fdatasync_ns,
+                append.durable_rx,
+            ));
+        }
+
+        // 先にbatch全体をWAL queueへ積み、後段でdurable receiptを回収する。
+        // enqueueとwaitを分離してgroup commitを効かせる。
+        for (task, durable_done_ns_hint, fdatasync_ns_hint, durable_rx) in pending {
+            let (durable_done_ns, fdatasync_ns, reject_reason) = if durable_done_ns_hint > 0 {
+                (durable_done_ns_hint, fdatasync_ns_hint, "")
+            } else if let Some(durable_rx) = durable_rx {
+                match durable_rx.await {
+                    Ok(receipt) if receipt.durable_done_ns > 0 => {
+                        (receipt.durable_done_ns, receipt.fdatasync_ns, "")
+                    }
+                    Ok(_) => (0, 0, "WAL_DURABILITY_FAILED"),
+                    Err(_) => (0, 0, "WAL_DURABILITY_RECEIPT_CLOSED"),
+                }
+            } else {
+                (0, 0, "WAL_DURABILITY_ENQUEUE_FAILED")
+            };
+            if fdatasync_ns > 0 {
+                state.v3_durable_wal_fsync_hist.record(fdatasync_ns / 1_000);
+                if let Some(hist) = state.v3_durable_wal_fsync_hist_per_lane.get(lane_id) {
+                    hist.record(fdatasync_ns / 1_000);
+                }
+            }
+
+            let now_ns = gateway_core::now_nanos();
+            if durable_done_ns > 0 {
+                state.v3_confirm_store.mark_durable_accepted(
+                    &task.session_id,
+                    task.session_seq,
+                    now_ns,
+                );
+                state
+                    .v3_durable_accepted_total
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                state.v3_confirm_store.mark_durable_rejected(
+                    &task.session_id,
+                    task.session_seq,
+                    reject_reason,
+                    now_ns,
+                );
+                state
+                    .v3_durable_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .v3_durable_write_error_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            let elapsed_us = now_ns.saturating_sub(task.received_at_ns) / 1_000;
+            state.v3_durable_confirm_hist.record(elapsed_us);
+        }
+        let worker_loop_elapsed_us =
+            gateway_core::now_nanos().saturating_sub(worker_loop_t0) / 1_000;
+        state
+            .v3_durable_worker_loop_hist
+            .record(worker_loop_elapsed_us);
+        if let Some(hist) = state.v3_durable_worker_loop_hist_per_lane.get(lane_id) {
+            hist.record(worker_loop_elapsed_us);
+        }
     }
 }
 
@@ -1286,15 +2477,37 @@ async fn run_v3_durable_worker(mut rx: Receiver<V3DurableTask>, state: AppState)
 async fn run_v3_loss_monitor(state: AppState) {
     let interval_ms = state.v3_loss_scan_interval_ms.max(10);
     let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+    let lane_count = state.v3_durable_ingress.lane_count();
+    let mut soft_streak_per_lane = vec![0u64; lane_count];
+    let mut hard_streak_per_lane = vec![0u64; lane_count];
+    let mut clear_streak_per_lane = vec![0u64; lane_count];
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
-        let timeout_ns = state.v3_loss_gap_timeout_ms.saturating_mul(1_000_000);
-        let candidates =
-            state
-                .v3_confirm_store
-                .collect_timed_out(now_ns, timeout_ns, state.v3_loss_scan_batch);
-        for candidate in candidates {
+        let confirm_oldest_age_us_per_lane = state.v3_confirm_store.oldest_volatile_age_us_per_lane(now_ns);
+        let mut confirm_oldest_age_us_max = 0u64;
+        for (lane_id, age_us) in confirm_oldest_age_us_per_lane.iter().copied().enumerate() {
+            confirm_oldest_age_us_max = confirm_oldest_age_us_max.max(age_us);
+            if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(lane_id) {
+                gauge.store(age_us, Ordering::Relaxed);
+            }
+            if let Some(hist) = state.v3_confirm_age_hist_per_lane.get(lane_id) {
+                hist.record(age_us);
+            }
+        }
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(confirm_oldest_age_us_max, Ordering::Relaxed);
+        let scan = state
+            .v3_confirm_store
+            .collect_timed_out(now_ns, state.v3_loss_scan_batch);
+        state
+            .v3_confirm_timeout_scan_cost_last
+            .store(scan.scan_cost, Ordering::Relaxed);
+        state
+            .v3_confirm_timeout_scan_cost_total
+            .fetch_add(scan.scan_cost, Ordering::Relaxed);
+        for candidate in scan.candidates {
             state.register_v3_loss_suspect(
                 &candidate.session_id,
                 candidate.session_seq,
@@ -1302,6 +2515,206 @@ async fn run_v3_loss_monitor(state: AppState) {
                 "DURABLE_CONFIRM_TIMEOUT",
                 now_ns,
             );
+        }
+        let gc_removed = state
+            .v3_confirm_store
+            .gc_expired(now_ns, state.v3_confirm_gc_batch);
+        state
+            .v3_confirm_gc_removed_total
+            .fetch_add(gc_removed as u64, Ordering::Relaxed);
+        let durable_depth_now = state.v3_durable_ingress.total_depth();
+        let durable_depth_prev = state
+            .v3_durable_depth_last
+            .swap(durable_depth_now, Ordering::Relaxed);
+        let growth_i128 = (durable_depth_now as i128)
+            .saturating_sub(durable_depth_prev as i128)
+            .saturating_mul(1_000)
+            .checked_div(interval_ms as i128)
+            .unwrap_or(0);
+        let growth = growth_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        state
+            .v3_durable_backlog_growth_per_sec
+            .store(growth, Ordering::Relaxed);
+        for lane_id in 0..lane_count {
+            let lane_depth_now = state.v3_durable_ingress.lane_depth(lane_id);
+            let lane_depth_prev = state
+                .v3_durable_depth_last_per_lane
+                .get(lane_id)
+                .map(|counter| counter.swap(lane_depth_now, Ordering::Relaxed))
+                .unwrap_or(0);
+            let lane_growth_i128 = (lane_depth_now as i128)
+                .saturating_sub(lane_depth_prev as i128)
+                .saturating_mul(1_000)
+                .checked_div(interval_ms as i128)
+                .unwrap_or(0);
+            let lane_growth = lane_growth_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            if let Some(gauge) = state
+                .v3_durable_backlog_growth_per_sec_per_lane
+                .get(lane_id)
+            {
+                gauge.store(lane_growth, Ordering::Relaxed);
+            }
+        }
+        if state.v3_durable_admission_controller_enabled {
+            let prev_level = state.v3_durable_admission_level.load(Ordering::Relaxed);
+            let mut next_level_global = 0u64;
+            for lane_id in 0..lane_count {
+                let lane_queue_pct_now = state.v3_durable_ingress.lane_utilization_pct(lane_id);
+                let lane_growth = state
+                    .v3_durable_backlog_growth_per_sec_per_lane
+                    .get(lane_id)
+                    .map(|v| v.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                let lane_fsync_p99_us = state
+                    .v3_durable_wal_fsync_hist_per_lane
+                    .get(lane_id)
+                    .map(|hist| hist.snapshot().percentile(99.0))
+                    .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
+                let queue_pressure_soft =
+                    lane_queue_pct_now >= state.v3_durable_soft_reject_pct as f64;
+                let queue_pressure_hard =
+                    lane_queue_pct_now >= state.v3_durable_hard_reject_pct as f64;
+                let backlog_pressure_soft =
+                    lane_growth >= state.v3_durable_backlog_soft_reject_per_sec;
+                let backlog_pressure_hard =
+                    lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
+                let fsync_soft = lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us;
+                let fsync_hard = lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us;
+                let hard_signal = queue_pressure_hard
+                    || backlog_pressure_hard
+                    || ((queue_pressure_soft || backlog_pressure_soft) && fsync_hard);
+                let soft_signal = queue_pressure_soft
+                    || backlog_pressure_soft
+                    || ((lane_queue_pct_now >= (state.v3_durable_soft_reject_pct as f64 * 0.7)
+                        || lane_growth
+                            >= state
+                                .v3_durable_backlog_soft_reject_per_sec
+                                .saturating_mul(7)
+                                / 10)
+                        && fsync_soft);
+
+                if queue_pressure_soft {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_queue_soft_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if queue_pressure_hard {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_queue_hard_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if backlog_pressure_soft {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_backlog_soft_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if backlog_pressure_hard {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_backlog_hard_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if fsync_soft {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_fsync_soft_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if fsync_hard {
+                    if let Some(counter) = state
+                        .v3_durable_admission_signal_fsync_hard_total_per_lane
+                        .get(lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                if hard_signal {
+                    hard_streak_per_lane[lane_id] = hard_streak_per_lane[lane_id].saturating_add(1);
+                    soft_streak_per_lane[lane_id] = soft_streak_per_lane[lane_id].saturating_add(1);
+                    clear_streak_per_lane[lane_id] = 0;
+                } else if soft_signal {
+                    soft_streak_per_lane[lane_id] = soft_streak_per_lane[lane_id].saturating_add(1);
+                    hard_streak_per_lane[lane_id] = 0;
+                    clear_streak_per_lane[lane_id] = 0;
+                } else {
+                    clear_streak_per_lane[lane_id] =
+                        clear_streak_per_lane[lane_id].saturating_add(1);
+                    soft_streak_per_lane[lane_id] = 0;
+                    hard_streak_per_lane[lane_id] = 0;
+                }
+
+                let prev_lane_level = state
+                    .v3_durable_admission_level_per_lane
+                    .get(lane_id)
+                    .map(|level| level.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                let mut next_lane_level = prev_lane_level;
+                if hard_signal
+                    && hard_streak_per_lane[lane_id] >= state.v3_durable_admission_sustain_ticks
+                {
+                    next_lane_level = 2;
+                } else if soft_signal
+                    && soft_streak_per_lane[lane_id] >= state.v3_durable_admission_sustain_ticks
+                {
+                    next_lane_level = 1;
+                } else if !soft_signal
+                    && clear_streak_per_lane[lane_id] >= state.v3_durable_admission_recover_ticks
+                {
+                    next_lane_level = 0;
+                }
+                if let Some(level) = state.v3_durable_admission_level_per_lane.get(lane_id) {
+                    if next_lane_level != prev_lane_level {
+                        level.store(next_lane_level, Ordering::Relaxed);
+                        if next_lane_level == 1 && prev_lane_level < 1 {
+                            if let Some(counter) = state
+                                .v3_durable_admission_soft_trip_total_per_lane
+                                .get(lane_id)
+                            {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        if next_lane_level == 2 && prev_lane_level < 2 {
+                            if let Some(counter) = state
+                                .v3_durable_admission_hard_trip_total_per_lane
+                                .get(lane_id)
+                            {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                next_level_global = next_level_global.max(next_lane_level);
+            }
+
+            if next_level_global != prev_level {
+                state
+                    .v3_durable_admission_level
+                    .store(next_level_global, Ordering::Relaxed);
+                if next_level_global == 1 && prev_level < 1 {
+                    state
+                        .v3_durable_admission_soft_trip_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if next_level_global == 2 && prev_level < 2 {
+                    state
+                        .v3_durable_admission_hard_trip_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
 
         if !state.v3_ingress.is_global_killed() {
@@ -1366,5 +2779,228 @@ async fn run_durable_notifier(
             let notify_us = gateway_core::now_nanos().saturating_sub(notify_start_ns) / 1_000;
             state.durable_notify_hist.record(notify_us);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::{BufReader, Cursor};
+
+    fn test_task(
+        session_id: &str,
+        session_seq: u64,
+        received_at_ns: u64,
+        shard_id: usize,
+    ) -> V3OrderTask {
+        V3OrderTask {
+            session_id: session_id.to_string(),
+            session_seq,
+            attempt_seq: session_seq,
+            received_at_ns,
+            shard_id,
+        }
+    }
+
+    #[test]
+    fn v3_durable_ingress_routes_lane_by_shard_id() {
+        let mut lanes = Vec::new();
+        let mut _rxs = Vec::new();
+        for _ in 0..4 {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            lanes.push(V3DurableLane::new(tx, 8));
+            _rxs.push(rx);
+        }
+        let ingress = V3DurableIngress::new(lanes);
+
+        for shard_id in 0..8 {
+            let task = V3DurableTask {
+                session_id: format!("sess-{}", shard_id),
+                session_seq: shard_id as u64,
+                attempt_seq: shard_id as u64,
+                received_at_ns: 1_000_000,
+                shard_id,
+            };
+            ingress
+                .try_enqueue(task)
+                .expect("enqueue should succeed for test lane capacity");
+        }
+
+        assert_eq!(ingress.lane_depths(), vec![2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn v3_confirm_store_lane_hash_is_stable_and_skew_is_observable() {
+        let store = V3ConfirmStore::new(4, 500, 60_000);
+        let lane_a = store.lane_for_session("sess-a");
+        let lane_b = store.lane_for_session("sess-a");
+        assert_eq!(lane_a, lane_b);
+        assert_eq!(store.lane_count_metric(), 4);
+
+        for seq in 0..8 {
+            let task = test_task("sess-a", seq, 1_000_000, 0);
+            store.record_volatile(&task, 1_000_000);
+        }
+        assert_eq!(store.total_size(), 8);
+        assert!(store.lane_skew_pct() > 0.0);
+    }
+
+    #[test]
+    fn v3_confirm_store_timeout_wheel_scans_only_due_entries() {
+        let store = V3ConfirmStore::new(4, 500, 60_000);
+        let far_future_ns = 10_000_000_000u64;
+        for seq in 0..128 {
+            let task = test_task(&format!("sess-{}", seq), seq, far_future_ns, 0);
+            store.record_volatile(&task, far_future_ns);
+        }
+        let pre_scan = store.collect_timed_out(1_000_000, 256);
+        assert!(pre_scan.candidates.is_empty());
+        assert_eq!(pre_scan.scan_cost, 0);
+
+        let due_received_ns = 2_000_000u64;
+        let due = test_task("sess-due", 1, due_received_ns, 2);
+        store.record_volatile(&due, due_received_ns);
+        let at_deadline = due_received_ns.saturating_add(store.timeout_ns);
+        let scan = store.collect_timed_out(at_deadline, 16);
+        assert_eq!(scan.scan_cost, 1);
+        assert_eq!(scan.candidates.len(), 1);
+        assert_eq!(scan.candidates[0].session_id, "sess-due");
+        assert_eq!(scan.candidates[0].session_seq, 1);
+        assert_eq!(scan.candidates[0].shard_id, 2);
+    }
+
+    #[test]
+    fn v3_confirm_store_ttl_gc_removes_expired_records() {
+        let store = V3ConfirmStore::new(1, 500, 2);
+        let received_ns = 10_000_000u64;
+        let task = test_task("sess-gc", 7, received_ns, 0);
+        store.record_volatile(&task, received_ns);
+        let durable_ns = received_ns.saturating_add(1_000_000);
+        store.mark_durable_accepted("sess-gc", 7, durable_ns);
+
+        let before_ttl = durable_ns.saturating_add(store.ttl_ns).saturating_sub(1);
+        assert_eq!(store.gc_expired(before_ttl, 64), 0);
+        assert!(store.snapshot("sess-gc", 7).is_some());
+
+        let at_ttl = durable_ns.saturating_add(store.ttl_ns);
+        assert_eq!(store.gc_expired(at_ttl, 64), 1);
+        assert!(store.snapshot("sess-gc", 7).is_none());
+    }
+
+    #[test]
+    fn v3_confirm_store_rebuilds_from_wal_reader() {
+        let store = V3ConfirmStore::new(2, 500, 60_000);
+        let events = vec![
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 1,
+                account_id: "acc-a".to_string(),
+                order_id: Some("v3/sess-a/11".to_string()),
+                data: json!({}),
+            })
+            .expect("serialize accepted event"),
+            "not-json-line".to_string(),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableRejected".to_string(),
+                at: 2,
+                account_id: "acc-b".to_string(),
+                order_id: Some("v3/sess-b/22".to_string()),
+                data: json!({ "reason": "RISK_REJECTED" }),
+            })
+            .expect("serialize rejected event"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "OrderAccepted".to_string(),
+                at: 3,
+                account_id: "acc-c".to_string(),
+                order_id: Some("ord-legacy".to_string()),
+                data: json!({}),
+            })
+            .expect("serialize non-v3 event"),
+        ]
+        .join("\n");
+        let reader = BufReader::new(Cursor::new(events.into_bytes()));
+        let restored = rebuild_v3_confirm_store_from_reader(&store, reader, 1024);
+        assert_eq!(restored, 2);
+
+        let accepted = store
+            .snapshot("sess-a", 11)
+            .expect("accepted snapshot must exist");
+        assert_eq!(accepted.status, V3ConfirmStatus::DurableAccepted);
+
+        let rejected = store
+            .snapshot("sess-b", 22)
+            .expect("rejected snapshot must exist");
+        assert_eq!(rejected.status, V3ConfirmStatus::DurableRejected);
+        assert_eq!(rejected.reason.as_deref(), Some("RISK_REJECTED"));
+    }
+
+    #[test]
+    fn v3_confirm_store_rebuild_keeps_latest_event_without_duplicates() {
+        let store = V3ConfirmStore::new(2, 500, 60_000);
+        let events = vec![
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 1,
+                account_id: "acc-a".to_string(),
+                order_id: Some("v3/sess-a/1".to_string()),
+                data: json!({}),
+            })
+            .expect("serialize accepted event a1"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableRejected".to_string(),
+                at: 2,
+                account_id: "acc-a".to_string(),
+                order_id: Some("v3/sess-a/1".to_string()),
+                data: json!({ "reason": "LATE_REJECT" }),
+            })
+            .expect("serialize rejected event a1"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 3,
+                account_id: "acc-b".to_string(),
+                order_id: Some("v3/sess-b/2".to_string()),
+                data: json!({}),
+            })
+            .expect("serialize accepted event b2"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 4,
+                account_id: "acc-c".to_string(),
+                order_id: Some("v3/sess-c/3".to_string()),
+                data: json!({}),
+            })
+            .expect("serialize accepted event c3"),
+        ]
+        .join("\n");
+        let reader = BufReader::new(Cursor::new(events.into_bytes()));
+        let restored = rebuild_v3_confirm_store_from_reader(&store, reader, 3);
+        assert_eq!(restored, 3);
+        assert_eq!(store.total_size(), 3);
+
+        let sess_a = store
+            .snapshot("sess-a", 1)
+            .expect("sess-a snapshot must exist");
+        assert_eq!(sess_a.status, V3ConfirmStatus::DurableRejected);
+        assert_eq!(sess_a.reason.as_deref(), Some("LATE_REJECT"));
+        let sess_b = store
+            .snapshot("sess-b", 2)
+            .expect("sess-b snapshot must exist");
+        assert_eq!(sess_b.status, V3ConfirmStatus::DurableAccepted);
+        let sess_c = store
+            .snapshot("sess-c", 3)
+            .expect("sess-c snapshot must exist");
+        assert_eq!(sess_c.status, V3ConfirmStatus::DurableAccepted);
+    }
+
+    #[test]
+    fn parse_v3_order_id_accepts_only_expected_format() {
+        assert_eq!(
+            parse_v3_order_id("v3/sess-1/42"),
+            Some(("sess-1".to_string(), 42))
+        );
+        assert_eq!(parse_v3_order_id("v3/sess-1/not-a-number"), None);
+        assert_eq!(parse_v3_order_id("sess-1/42"), None);
+        assert_eq!(parse_v3_order_id("v3//42"), None);
     }
 }

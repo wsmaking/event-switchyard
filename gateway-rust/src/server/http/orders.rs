@@ -29,6 +29,39 @@ type VolatileOrderResponseResult =
 type DurableOrderStatusResult =
     Result<Json<DurableOrderStatusResponse>, (StatusCode, Json<AuthErrorResponse>)>;
 
+pub(super) const V3_TCP_REQUEST_SIZE: usize = 304;
+pub(super) const V3_TCP_RESPONSE_SIZE: usize = 32;
+
+const V3_TCP_KIND_ACCEPT: u8 = 0;
+const V3_TCP_KIND_REJECTED: u8 = 1;
+const V3_TCP_KIND_KILLED: u8 = 2;
+const V3_TCP_KIND_DECODE_ERROR: u8 = 4;
+
+const V3_TCP_REASON_NONE: u32 = 0;
+pub(super) const V3_TCP_REASON_BAD_TOKEN_LEN: u32 = 101;
+pub(super) const V3_TCP_REASON_BAD_SYMBOL: u32 = 102;
+pub(super) const V3_TCP_REASON_BAD_SIDE: u32 = 103;
+pub(super) const V3_TCP_REASON_BAD_TYPE: u32 = 104;
+pub(super) const V3_TCP_REASON_BAD_TOKEN_UTF8: u32 = 105;
+pub(super) const V3_TCP_REASON_AUTH_INVALID: u32 = 201;
+pub(super) const V3_TCP_REASON_AUTH_EXPIRED: u32 = 202;
+pub(super) const V3_TCP_REASON_AUTH_NOT_YET_VALID: u32 = 203;
+pub(super) const V3_TCP_REASON_AUTH_INTERNAL: u32 = 204;
+
+const V3_TCP_TOKEN_OFFSET: usize = 2;
+const V3_TCP_TOKEN_MAX_LEN: usize = 256;
+const V3_TCP_SYMBOL_OFFSET: usize = 258;
+const V3_TCP_SYMBOL_LEN: usize = 16;
+const V3_TCP_SIDE_OFFSET: usize = 274;
+const V3_TCP_TYPE_OFFSET: usize = 275;
+const V3_TCP_QTY_OFFSET: usize = 280;
+const V3_TCP_PRICE_OFFSET: usize = 288;
+
+pub(super) struct V3TcpDecodedRequest {
+    pub(super) jwt_token: String,
+    pub(super) order_req: OrderRequest,
+}
+
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
 
 // Inflight予約のリリース漏れを防ぐRAIIガード。
@@ -441,7 +474,15 @@ pub(super) async fn handle_order_v3(
 ) -> VolatileOrderResponseResult {
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
-    let session_id = principal.session_id;
+    let (status, body) = process_order_v3_hot_path(&state, principal.session_id, req, t0);
+    Ok((status, Json(body)))
+}
+pub(super) fn process_order_v3_hot_path(
+    state: &AppState,
+    session_id: String,
+    req: OrderRequest,
+    t0: u64,
+) -> (StatusCode, VolatileOrderResponse) {
     let ingress = &state.v3_ingress;
     let shard_id = ingress.shard_for_session(&session_id);
     if ingress.maybe_recover_shard(shard_id, t0) {
@@ -464,42 +505,30 @@ pub(super) async fn handle_order_v3(
             .v3_rejected_killed_total
             .fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "KILLED",
-                "V3_GLOBAL_KILLED",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_GLOBAL_KILLED"),
+        );
     }
     if ingress.is_session_killed(&session_id) {
         state
             .v3_rejected_killed_total
             .fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "KILLED",
-                "V3_SESSION_KILLED",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_SESSION_KILLED"),
+        );
     }
     if ingress.is_shard_killed(shard_id) {
         state
             .v3_rejected_killed_total
             .fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "KILLED",
-                "V3_SHARD_KILLED",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_SHARD_KILLED"),
+        );
     }
 
     // risk段階: 最小の stateless チェックのみ実行し、共有ロックを避ける。
@@ -523,14 +552,204 @@ pub(super) async fn handle_order_v3(
                 }
             }
             record_v3_ack(&state, t0);
-            return Ok((
+            return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(VolatileOrderResponse::rejected(
+                VolatileOrderResponse::rejected(&session_id, "REJECTED", reason),
+            );
+        }
+    }
+
+    // durable経路の詰まりも入口判定へ反映する。
+    let durable_lane_id = state.v3_durable_ingress.lane_for_shard(shard_id);
+    let durable_queue_pct = state
+        .v3_durable_ingress
+        .lane_utilization_pct(durable_lane_id);
+    let durable_backlog_growth_per_sec = state
+        .v3_durable_backlog_growth_per_sec_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed))
+        .unwrap_or_else(|| {
+            state
+                .v3_durable_backlog_growth_per_sec
+                .load(Ordering::Relaxed)
+        });
+    let durable_backlog_hard_failsafe = state
+        .v3_durable_backlog_hard_reject_per_sec
+        .saturating_mul(4);
+    let confirm_oldest_age_us_global =
+        state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
+    let confirm_oldest_age_us_lane = state
+        .v3_confirm_oldest_inflight_us_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed))
+        .unwrap_or(confirm_oldest_age_us_global);
+    let confirm_oldest_age_us = confirm_oldest_age_us_global.max(confirm_oldest_age_us_lane);
+    let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+    if confirm_hard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_age_us {
+        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        state
+            .v3_durable_confirm_age_hard_reject_total
+            .fetch_add(1, Ordering::Relaxed);
+        state
+            .v3_durable_backpressure_hard_total
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(counter) = state
+            .v3_durable_backpressure_hard_total_per_lane
+            .get(durable_lane_id)
+        {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        record_v3_ack(&state, t0);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            VolatileOrderResponse::rejected(
+                &session_id,
+                "REJECTED",
+                "V3_DURABLE_CONFIRM_AGE_HARD",
+            ),
+        );
+    }
+    let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
+    if confirm_soft_age_us > 0 && confirm_oldest_age_us >= confirm_soft_age_us {
+        state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+        state
+            .v3_durable_confirm_age_soft_reject_total
+            .fetch_add(1, Ordering::Relaxed);
+        state
+            .v3_durable_backpressure_soft_total
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(counter) = state
+            .v3_durable_backpressure_soft_total_per_lane
+            .get(durable_lane_id)
+        {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        record_v3_ack(&state, t0);
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            VolatileOrderResponse::rejected(
+                &session_id,
+                "REJECTED",
+                "V3_DURABLE_CONFIRM_AGE_SOFT",
+            ),
+        );
+    }
+    // 監視ループより先に深刻な飽和を検知した場合のみ即時hard拒否する。
+    let durable_failsafe_hard = durable_queue_pct >= 99.0
+        || durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe;
+    if durable_failsafe_hard {
+        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        state
+            .v3_durable_backpressure_hard_total
+            .fetch_add(1, Ordering::Relaxed);
+        record_v3_ack(&state, t0);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            VolatileOrderResponse::rejected(
+                &session_id,
+                "REJECTED",
+                "V3_DURABLE_BACKPRESSURE_FAILSAFE",
+            ),
+        );
+    }
+    if state.v3_durable_admission_controller_enabled {
+        let durable_level_global = state.v3_durable_admission_level.load(Ordering::Relaxed);
+        let durable_level_lane = state
+            .v3_durable_admission_level_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        match durable_level_global.max(durable_level_lane) {
+            2 => {
+                state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+                state
+                    .v3_durable_backpressure_hard_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = state
+                    .v3_durable_backpressure_hard_total_per_lane
+                    .get(durable_lane_id)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                record_v3_ack(&state, t0);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    VolatileOrderResponse::rejected(
+                        &session_id,
+                        "REJECTED",
+                        "V3_DURABLE_CONTROLLER_HARD",
+                    ),
+                );
+            }
+            1 => {
+                state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+                state
+                    .v3_durable_backpressure_soft_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = state
+                    .v3_durable_backpressure_soft_total_per_lane
+                    .get(durable_lane_id)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                record_v3_ack(&state, t0);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    VolatileOrderResponse::rejected(
+                        &session_id,
+                        "REJECTED",
+                        "V3_DURABLE_CONTROLLER_SOFT",
+                    ),
+                );
+            }
+            _ => {}
+        }
+    } else {
+        if durable_queue_pct >= state.v3_durable_hard_reject_pct as f64
+            || durable_backlog_growth_per_sec >= state.v3_durable_backlog_hard_reject_per_sec
+        {
+            state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+            state
+                .v3_durable_backpressure_hard_total
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = state
+                .v3_durable_backpressure_hard_total_per_lane
+                .get(durable_lane_id)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            record_v3_ack(&state, t0);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                VolatileOrderResponse::rejected(
                     &session_id,
                     "REJECTED",
-                    reason,
-                )),
-            ));
+                    "V3_DURABLE_BACKPRESSURE_HARD",
+                ),
+            );
+        }
+        if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
+            || durable_backlog_growth_per_sec >= state.v3_durable_backlog_soft_reject_per_sec
+        {
+            state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+            state
+                .v3_durable_backpressure_soft_total
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = state
+                .v3_durable_backpressure_soft_total_per_lane
+                .get(durable_lane_id)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            record_v3_ack(&state, t0);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                VolatileOrderResponse::rejected(
+                    &session_id,
+                    "REJECTED",
+                    "V3_DURABLE_BACKPRESSURE_SOFT",
+                ),
+            );
         }
     }
 
@@ -544,39 +763,27 @@ pub(super) async fn handle_order_v3(
             .v3_rejected_killed_total
             .fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "KILLED",
-                "V3_QUEUE_KILLED",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_QUEUE_KILLED"),
+        );
     }
     if queue_pct >= state.v3_hard_reject_pct {
         state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "REJECTED",
-                "V3_BACKPRESSURE_HARD",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_BACKPRESSURE_HARD"),
+        );
     }
 
     if queue_pct >= state.v3_soft_reject_pct {
         state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
         record_v3_ack(&state, t0);
-        return Ok((
+        return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(VolatileOrderResponse::rejected(
-                &session_id,
-                "REJECTED",
-                "V3_BACKPRESSURE_SOFT",
-            )),
-        ));
+            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_BACKPRESSURE_SOFT"),
+        );
     }
 
     let session_seq = ingress.next_seq(&session_id);
@@ -601,7 +808,7 @@ pub(super) async fn handle_order_v3(
             state.v3_stage_serialize_hist.record(serialize_elapsed);
             record_v3_ack(&state, t0);
             record_v3_ack_accepted(&state, t0);
-            Ok((StatusCode::ACCEPTED, Json(body)))
+            (StatusCode::ACCEPTED, body)
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(task)) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
@@ -620,14 +827,10 @@ pub(super) async fn handle_order_v3(
                 .v3_rejected_killed_total
                 .fetch_add(1, Ordering::Relaxed);
             record_v3_ack(&state, t0);
-            Ok((
+            (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(VolatileOrderResponse::rejected(
-                    &session_id,
-                    "KILLED",
-                    "V3_QUEUE_FULL",
-                )),
-            ))
+                VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_QUEUE_FULL"),
+            )
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
@@ -646,15 +849,175 @@ pub(super) async fn handle_order_v3(
                 .v3_rejected_killed_total
                 .fetch_add(1, Ordering::Relaxed);
             record_v3_ack(&state, t0);
-            Ok((
+            (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(VolatileOrderResponse::rejected(
-                    &session_id,
-                    "KILLED",
-                    "V3_INGRESS_CLOSED",
-                )),
-            ))
+                VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_INGRESS_CLOSED"),
+            )
         }
+    }
+}
+
+pub(super) fn decode_v3_tcp_request(
+    frame: &[u8; V3_TCP_REQUEST_SIZE],
+) -> Result<V3TcpDecodedRequest, u32> {
+    let token_len =
+        u16::from_le_bytes(frame[0..2].try_into().expect("token length bytes")) as usize;
+    if token_len == 0 || token_len > V3_TCP_TOKEN_MAX_LEN {
+        return Err(V3_TCP_REASON_BAD_TOKEN_LEN);
+    }
+    let token_end = V3_TCP_TOKEN_OFFSET + token_len;
+    let jwt_token = std::str::from_utf8(&frame[V3_TCP_TOKEN_OFFSET..token_end])
+        .map_err(|_| V3_TCP_REASON_BAD_TOKEN_UTF8)?;
+
+    let symbol_raw = &frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + V3_TCP_SYMBOL_LEN)];
+    let symbol_len = symbol_raw
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(symbol_raw.len());
+    if symbol_len == 0 {
+        return Err(V3_TCP_REASON_BAD_SYMBOL);
+    }
+    let symbol =
+        std::str::from_utf8(&symbol_raw[..symbol_len]).map_err(|_| V3_TCP_REASON_BAD_SYMBOL)?;
+    let side = match frame[V3_TCP_SIDE_OFFSET] {
+        1 => "BUY",
+        2 => "SELL",
+        _ => return Err(V3_TCP_REASON_BAD_SIDE),
+    };
+    let order_type = match frame[V3_TCP_TYPE_OFFSET] {
+        1 => crate::order::OrderType::Limit,
+        2 => crate::order::OrderType::Market,
+        _ => return Err(V3_TCP_REASON_BAD_TYPE),
+    };
+    let qty = u64::from_le_bytes(
+        frame[V3_TCP_QTY_OFFSET..(V3_TCP_QTY_OFFSET + 8)]
+            .try_into()
+            .expect("qty bytes"),
+    );
+    let raw_price = u64::from_le_bytes(
+        frame[V3_TCP_PRICE_OFFSET..(V3_TCP_PRICE_OFFSET + 8)]
+            .try_into()
+            .expect("price bytes"),
+    );
+    let price = if order_type == crate::order::OrderType::Market {
+        None
+    } else {
+        Some(raw_price)
+    };
+
+    Ok(V3TcpDecodedRequest {
+        jwt_token: jwt_token.to_string(),
+        order_req: OrderRequest {
+            symbol: symbol.to_string(),
+            side: side.to_string(),
+            order_type,
+            qty,
+            price,
+            time_in_force: crate::order::TimeInForce::Gtc,
+            expire_at: None,
+            client_order_id: None,
+        },
+    })
+}
+
+pub(super) fn authenticate_v3_tcp_token(
+    state: &AppState,
+    jwt_token: &str,
+) -> Result<crate::auth::Principal, (StatusCode, u32)> {
+    match state.jwt_auth.authenticate_token(jwt_token) {
+        AuthResult::Ok(p) => Ok(p),
+        AuthResult::Err(e) => {
+            let (status, reason) = match e {
+                AuthError::SecretNotConfigured => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    V3_TCP_REASON_AUTH_INTERNAL,
+                ),
+                AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_EXPIRED),
+                AuthError::TokenNotYetValid => {
+                    (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_NOT_YET_VALID)
+                }
+                _ => (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_INVALID),
+            };
+            Err((status, reason))
+        }
+    }
+}
+
+pub(super) fn encode_v3_tcp_decode_error(
+    status: StatusCode,
+    reason_code: u32,
+    received_at_ns: u64,
+) -> [u8; V3_TCP_RESPONSE_SIZE] {
+    encode_v3_tcp_response_raw(
+        V3_TCP_KIND_DECODE_ERROR,
+        status,
+        reason_code,
+        0,
+        0,
+        received_at_ns,
+    )
+}
+
+pub(super) fn encode_v3_tcp_response(
+    status: StatusCode,
+    resp: &VolatileOrderResponse,
+) -> [u8; V3_TCP_RESPONSE_SIZE] {
+    encode_v3_tcp_response_raw(
+        v3_tcp_kind(resp),
+        status,
+        v3_tcp_reason_code(resp),
+        resp.session_seq.unwrap_or(0),
+        resp.session_seq.unwrap_or(0),
+        resp.received_at_ns,
+    )
+}
+
+fn encode_v3_tcp_response_raw(
+    kind: u8,
+    status: StatusCode,
+    reason_code: u32,
+    session_seq: u64,
+    attempt_seq: u64,
+    received_at_ns: u64,
+) -> [u8; V3_TCP_RESPONSE_SIZE] {
+    let mut out = [0u8; V3_TCP_RESPONSE_SIZE];
+    out[0] = kind;
+    out[1] = 0;
+    out[2..4].copy_from_slice(&(status.as_u16()).to_le_bytes());
+    out[4..8].copy_from_slice(&reason_code.to_le_bytes());
+    out[8..16].copy_from_slice(&session_seq.to_le_bytes());
+    out[16..24].copy_from_slice(&attempt_seq.to_le_bytes());
+    out[24..32].copy_from_slice(&received_at_ns.to_le_bytes());
+    out
+}
+
+fn v3_tcp_kind(resp: &VolatileOrderResponse) -> u8 {
+    match resp.status.as_str() {
+        "VOLATILE_ACCEPT" => V3_TCP_KIND_ACCEPT,
+        "KILLED" => V3_TCP_KIND_KILLED,
+        _ => V3_TCP_KIND_REJECTED,
+    }
+}
+
+fn v3_tcp_reason_code(resp: &VolatileOrderResponse) -> u32 {
+    match resp.reason.as_deref() {
+        None => V3_TCP_REASON_NONE,
+        Some("INVALID_QTY") => 1_001,
+        Some("INVALID_SIDE") => 1_002,
+        Some("INVALID_PRICE") => 1_003,
+        Some("INVALID_SYMBOL") => 1_004,
+        Some("RISK_REJECT") => 1_100,
+        Some("V3_DURABLE_BACKPRESSURE_SOFT") => 2_001,
+        Some("V3_DURABLE_BACKPRESSURE_HARD") => 2_002,
+        Some("V3_BACKPRESSURE_SOFT") => 2_101,
+        Some("V3_BACKPRESSURE_HARD") => 2_102,
+        Some("V3_QUEUE_KILLED") => 2_201,
+        Some("V3_QUEUE_FULL") => 2_202,
+        Some("V3_INGRESS_CLOSED") => 2_203,
+        Some("V3_GLOBAL_KILLED") => 2_301,
+        Some("V3_SESSION_KILLED") => 2_302,
+        Some("V3_SHARD_KILLED") => 2_303,
+        Some(_) => 9_999,
     }
 }
 
@@ -1368,11 +1731,7 @@ pub(super) struct VolatileOrderResponse {
 }
 
 impl VolatileOrderResponse {
-    fn accepted(
-        session_id: String,
-        session_seq: u64,
-        received_at_ns: u64,
-    ) -> Self {
+    fn accepted(session_id: String, session_seq: u64, received_at_ns: u64) -> Self {
         Self {
             session_id,
             session_seq: Some(session_seq),
@@ -1490,8 +1849,8 @@ mod tests {
     use sha2::Sha256;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     type HmacSha256 = Hmac<Sha256>;
 
@@ -1507,6 +1866,9 @@ mod tests {
     fn build_test_state_with_audit_log(audit_log: Arc<AuditLog>) -> AppState {
         let (tx, _rx) = tokio::sync::mpsc::channel(1024);
         let shard = super::super::V3ShardIngress::new(tx, 1024);
+        let (durable_tx, _durable_rx) = tokio::sync::mpsc::channel(1024);
+        let durable_lane = super::super::V3DurableLane::new(durable_tx, 1024);
+        let v3_durable_ingress = Arc::new(super::super::V3DurableIngress::new(vec![durable_lane]));
         let v3_ingress = Arc::new(super::super::V3Ingress::new(
             vec![shard],
             false,
@@ -1519,6 +1881,14 @@ mod tests {
         ));
         audit_log.clone().start_async_writer(None);
         let audit_read_path = Arc::new(audit_log.path().to_path_buf());
+        let v3_durable_audit_logs = Arc::new(vec![Arc::clone(&audit_log)]);
+        let v3_confirm_rebuild_paths = Arc::new(vec![audit_log.path().to_path_buf()]);
+        let lane_u64 = || Arc::new(vec![Arc::new(AtomicU64::new(0))]);
+        let lane_i64 = || Arc::new(vec![Arc::new(AtomicI64::new(0))]);
+        let confirm_lane_hist = || Arc::new(vec![Arc::new(LatencyHistogram::new())]);
+        let v3_durable_wal_fsync_hist_per_lane = Arc::new(vec![Arc::new(LatencyHistogram::new())]);
+        let v3_durable_worker_loop_hist_per_lane =
+            Arc::new(vec![Arc::new(LatencyHistogram::new())]);
 
         AppState {
             engine: FastPathEngine::new(16_384),
@@ -1529,7 +1899,9 @@ mod tests {
             sse_hub: Arc::new(SseHub::new()),
             order_id_seq: Arc::new(AtomicU64::new(1)),
             audit_log,
+            v3_durable_audit_logs,
             audit_read_path,
+            v3_confirm_rebuild_paths,
             bus_publisher: Arc::new(BusPublisher::disabled_for_test()),
             bus_mode_outbox: true,
             backpressure: BackpressureConfig {
@@ -1573,18 +1945,74 @@ mod tests {
             v3_session_killed_total: Arc::new(AtomicU64::new(0)),
             v3_shard_killed_total: Arc::new(AtomicU64::new(0)),
             v3_global_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_ingress: Arc::clone(&v3_durable_ingress),
             v3_durable_accepted_total: Arc::new(AtomicU64::new(0)),
             v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
             v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
             v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
+            v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
+            v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
+            v3_durable_wal_fsync_hist_per_lane,
+            v3_durable_worker_loop_hist: Arc::new(LatencyHistogram::new()),
+            v3_durable_worker_loop_hist_per_lane,
+            v3_durable_worker_batch_min: 4,
+            v3_durable_worker_batch_max: 8,
+            v3_durable_worker_batch_wait_min_us: 100,
+            v3_durable_worker_batch_wait_us: 200,
+            v3_durable_worker_batch_adaptive: true,
+            v3_durable_worker_batch_adaptive_low_util_pct: 10.0,
+            v3_durable_worker_batch_adaptive_high_util_pct: 60.0,
+            v3_durable_depth_last: Arc::new(AtomicU64::new(0)),
+            v3_durable_depth_last_per_lane: lane_u64(),
+            v3_durable_backlog_growth_per_sec: Arc::new(AtomicI64::new(0)),
+            v3_durable_backlog_growth_per_sec_per_lane: lane_i64(),
+            v3_durable_soft_reject_pct: 95,
+            v3_durable_hard_reject_pct: 98,
+            v3_durable_backlog_soft_reject_per_sec: i64::MAX,
+            v3_durable_backlog_hard_reject_per_sec: i64::MAX,
+            v3_durable_admission_controller_enabled: false,
+            v3_durable_admission_sustain_ticks: 1,
+            v3_durable_admission_recover_ticks: 1,
+            v3_durable_admission_soft_fsync_p99_us: 6_000,
+            v3_durable_admission_hard_fsync_p99_us: 12_000,
+            v3_durable_admission_level: Arc::new(AtomicU64::new(0)),
+            v3_durable_admission_level_per_lane: lane_u64(),
+            v3_durable_admission_soft_trip_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_admission_soft_trip_total_per_lane: lane_u64(),
+            v3_durable_admission_hard_trip_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_admission_hard_trip_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_queue_soft_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_queue_hard_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_backlog_soft_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_backlog_hard_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_fsync_soft_total_per_lane: lane_u64(),
+            v3_durable_admission_signal_fsync_hard_total_per_lane: lane_u64(),
+            v3_durable_backpressure_soft_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_backpressure_soft_total_per_lane: lane_u64(),
+            v3_durable_backpressure_hard_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_backpressure_hard_total_per_lane: lane_u64(),
+            v3_durable_write_error_total: Arc::new(AtomicU64::new(0)),
             v3_soft_reject_pct: 85,
             v3_hard_reject_pct: 90,
             v3_kill_reject_pct: 95,
-            v3_confirm_store: Arc::new(super::super::V3ConfirmStore::new()),
+            v3_confirm_store: Arc::new(super::super::V3ConfirmStore::new(1, 500, 600_000)),
+            v3_confirm_oldest_inflight_us: Arc::new(AtomicU64::new(0)),
+            v3_confirm_oldest_inflight_us_per_lane: lane_u64(),
+            v3_confirm_age_hist_per_lane: confirm_lane_hist(),
             v3_loss_gap_timeout_ms: 500,
             v3_loss_scan_interval_ms: 50,
             v3_loss_scan_batch: 128,
+            v3_confirm_gc_batch: 128,
+            v3_confirm_timeout_scan_cost_last: Arc::new(AtomicU64::new(0)),
+            v3_confirm_timeout_scan_cost_total: Arc::new(AtomicU64::new(0)),
+            v3_confirm_gc_removed_total: Arc::new(AtomicU64::new(0)),
+            v3_confirm_rebuild_restored_total: Arc::new(AtomicU64::new(0)),
+            v3_confirm_rebuild_elapsed_ms: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_soft_reject_age_us: 0,
+            v3_durable_confirm_hard_reject_age_us: 0,
+            v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
             v3_risk_profile: super::super::V3RiskProfile::Light,
             v3_risk_margin_mode: super::super::V3RiskMarginMode::Legacy,
             v3_risk_loops: 16,
@@ -1604,6 +2032,61 @@ mod tests {
             v3_stage_enqueue_hist: Arc::new(LatencyHistogram::new()),
             v3_stage_serialize_hist: Arc::new(LatencyHistogram::new()),
         }
+    }
+
+    fn build_test_state_with_v3_pipeline(
+        confirm_timeout_ms: u64,
+        confirm_ttl_ms: u64,
+        loss_scan_interval_ms: u64,
+        durable_lane_count: usize,
+        durable_lane_capacity: usize,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<super::super::V3OrderTask>,
+        Vec<tokio::sync::mpsc::Receiver<super::super::V3DurableTask>>,
+    ) {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-orders-v3-int-{}.log", now_nanos()));
+        let audit_log = Arc::new(AuditLog::new(wal_path).expect("create audit log"));
+        let mut state = build_test_state_with_audit_log(audit_log);
+        let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(1024);
+        let shard = super::super::V3ShardIngress::new(ingress_tx, 1024);
+        state.v3_ingress = Arc::new(super::super::V3Ingress::new(
+            vec![shard],
+            false,
+            60,
+            3_000,
+            60,
+            1,
+            3,
+            6,
+        ));
+        let mut durable_lanes = Vec::with_capacity(durable_lane_count.max(1));
+        let mut durable_rxs = Vec::with_capacity(durable_lane_count.max(1));
+        for _ in 0..durable_lane_count.max(1) {
+            let (durable_tx, durable_rx) = tokio::sync::mpsc::channel(durable_lane_capacity.max(1));
+            durable_lanes.push(super::super::V3DurableLane::new(
+                durable_tx,
+                durable_lane_capacity.max(1) as u64,
+            ));
+            durable_rxs.push(durable_rx);
+        }
+        state.v3_durable_ingress = Arc::new(super::super::V3DurableIngress::new(durable_lanes));
+        state.v3_confirm_store = Arc::new(super::super::V3ConfirmStore::new(
+            1,
+            confirm_timeout_ms,
+            confirm_ttl_ms,
+        ));
+        state.v3_confirm_oldest_inflight_us = Arc::new(AtomicU64::new(0));
+        state.v3_confirm_oldest_inflight_us_per_lane = Arc::new(vec![Arc::new(AtomicU64::new(0))]);
+        state.v3_confirm_age_hist_per_lane = Arc::new(vec![Arc::new(LatencyHistogram::new())]);
+        state.v3_loss_gap_timeout_ms = confirm_timeout_ms;
+        state.v3_loss_scan_interval_ms = loss_scan_interval_ms;
+        state.v3_loss_scan_batch = 256;
+        state.v3_confirm_gc_batch = 256;
+        state.v3_durable_worker_batch_max = 4;
+        state.v3_durable_worker_batch_wait_us = 100;
+        (state, ingress_rx, durable_rxs)
     }
 
     fn make_token(account_id: &str) -> String {
@@ -1659,6 +2142,31 @@ mod tests {
             expire_at: None,
             client_order_id: Some(client_order_id.to_string()),
         }
+    }
+
+    fn v3_tcp_request(
+        jwt_token: &str,
+        symbol: &str,
+        side: u8,
+        order_type: u8,
+        qty: u64,
+        price: u64,
+    ) -> [u8; V3_TCP_REQUEST_SIZE] {
+        let mut frame = [0u8; V3_TCP_REQUEST_SIZE];
+        let token_bytes = jwt_token.as_bytes();
+        let token_len = token_bytes.len().min(V3_TCP_TOKEN_MAX_LEN);
+        frame[0..2].copy_from_slice(&(token_len as u16).to_le_bytes());
+        frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + token_len)]
+            .copy_from_slice(&token_bytes[..token_len]);
+        let symbol_bytes = symbol.as_bytes();
+        let copy_len = symbol_bytes.len().min(V3_TCP_SYMBOL_LEN);
+        frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + copy_len)]
+            .copy_from_slice(&symbol_bytes[..copy_len]);
+        frame[V3_TCP_SIDE_OFFSET] = side;
+        frame[V3_TCP_TYPE_OFFSET] = order_type;
+        frame[V3_TCP_QTY_OFFSET..(V3_TCP_QTY_OFFSET + 8)].copy_from_slice(&qty.to_le_bytes());
+        frame[V3_TCP_PRICE_OFFSET..(V3_TCP_PRICE_OFFSET + 8)].copy_from_slice(&price.to_le_bytes());
+        frame
     }
 
     fn put_order(
@@ -1852,6 +2360,429 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("durable v3 status lookup failed"));
         assert_eq!(durable.status, "DURABLE_ACCEPTED");
+    }
+
+    #[test]
+    fn v3_tcp_request_parser_accepts_fixed_frame() {
+        let token = make_token("42");
+        let frame = v3_tcp_request(&token, "AAPL", 1, 1, 100, 15_000);
+        let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
+        assert_eq!(decoded.jwt_token, token);
+        assert_eq!(decoded.order_req.symbol, "AAPL");
+        assert_eq!(decoded.order_req.side, "BUY");
+        assert_eq!(decoded.order_req.order_type, OrderType::Limit);
+        assert_eq!(decoded.order_req.qty, 100);
+        assert_eq!(decoded.order_req.price, Some(15_000));
+    }
+
+    #[tokio::test]
+    async fn v3_tcp_authenticator_accepts_valid_token() {
+        let state = build_test_state();
+        let token = make_token("tcp-auth-1");
+        let principal = authenticate_v3_tcp_token(&state, &token).expect("valid token");
+        assert_eq!(principal.account_id, "tcp-auth-1");
+        assert_eq!(principal.session_id, "tcp-auth-1");
+    }
+
+    #[test]
+    fn v3_tcp_response_encoder_sets_accepted_fields() {
+        let accepted = VolatileOrderResponse::accepted("42".into(), 7, 1234);
+        let bytes = encode_v3_tcp_response(StatusCode::ACCEPTED, &accepted);
+        assert_eq!(bytes.len(), V3_TCP_RESPONSE_SIZE);
+        assert_eq!(bytes[0], V3_TCP_KIND_ACCEPT);
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 202);
+        assert!(
+            u64::from_le_bytes(bytes[8..16].try_into().expect("seq bytes")) > 0,
+            "session seq must be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_soft_when_durable_backlog_crosses_soft_threshold() {
+        let mut state = build_test_state();
+        state.v3_durable_backlog_soft_reject_per_sec = 1_000;
+        state.v3_durable_backlog_hard_reject_per_sec = 2_000;
+        state
+            .v3_durable_backlog_growth_per_sec
+            .store(1_200, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_durable_backlog_growth_per_sec_per_lane.get(0) {
+            gauge.store(1_200, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-durable-soft-1";
+        let req = request_with_client_id("cid_v3_durable_soft");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state),
+            headers(account_id, Some("idem_v3_durable_soft")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_BACKPRESSURE_SOFT"));
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_hard_when_durable_backlog_crosses_hard_threshold() {
+        let mut state = build_test_state();
+        state.v3_durable_backlog_soft_reject_per_sec = 1_000;
+        state.v3_durable_backlog_hard_reject_per_sec = 1_500;
+        state
+            .v3_durable_backlog_growth_per_sec
+            .store(1_700, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_durable_backlog_growth_per_sec_per_lane.get(0) {
+            gauge.store(1_700, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-durable-hard-1";
+        let req = request_with_client_id("cid_v3_durable_hard");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state),
+            headers(account_id, Some("idem_v3_durable_hard")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_BACKPRESSURE_HARD"));
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_soft_when_durable_controller_level_is_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(1, Ordering::Relaxed);
+
+        let account_id = "v3-durable-controller-soft-1";
+        let req = request_with_client_id("cid_v3_durable_controller_soft");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state),
+            headers(account_id, Some("idem_v3_durable_controller_soft")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_CONTROLLER_SOFT"));
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_hard_when_durable_controller_level_is_hard() {
+        let mut state = build_test_state();
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(2, Ordering::Relaxed);
+
+        let account_id = "v3-durable-controller-hard-1";
+        let req = request_with_client_id("cid_v3_durable_controller_hard");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state),
+            headers(account_id, Some("idem_v3_durable_controller_hard")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_CONTROLLER_HARD"));
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_soft_when_confirm_oldest_age_crosses_soft_threshold() {
+        let mut state = build_test_state();
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(6_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(6_000, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-soft-1";
+        let req = request_with_client_id("cid_v3_confirm_age_soft");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_soft")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_CONFIRM_AGE_SOFT"));
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_soft_reject_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_rejects_hard_when_confirm_oldest_age_crosses_hard_threshold() {
+        let mut state = build_test_state();
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(12_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(12_000, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-hard-1";
+        let req = request_with_client_id("cid_v3_confirm_age_hard");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_hard")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_CONFIRM_AGE_HARD"));
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_integration_pipeline_promotes_to_durable_accepted() {
+        let (state, ingress_rx, mut durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        let durable_rx = durable_rxs.pop().expect("durable lane rx");
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let durable_handle = tokio::spawn(super::super::run_v3_durable_worker(
+            0,
+            durable_rx,
+            state.clone(),
+            state.v3_durable_worker_batch_max,
+            state.v3_durable_worker_batch_wait_us,
+            super::super::V3DurableWorkerBatchAdaptiveConfig {
+                enabled: state.v3_durable_worker_batch_adaptive,
+                batch_min: state.v3_durable_worker_batch_min,
+                batch_max: state.v3_durable_worker_batch_max,
+                wait_min: Duration::from_micros(state.v3_durable_worker_batch_wait_min_us.max(1)),
+                wait_max: Duration::from_micros(state.v3_durable_worker_batch_wait_us.max(1)),
+                low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
+                high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
+            },
+        ));
+
+        let account_id = "v3-int-acc-1";
+        let req = request_with_client_id("cid_v3_integration_ok");
+        let (status, Json(accepted)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_integration_ok")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(accepted.status, "VOLATILE_ACCEPT");
+        let session_seq = accepted.session_seq.expect("session seq");
+
+        let mut durable_seen = false;
+        for _ in 0..100 {
+            let Json(status_resp) = handle_get_order_v3(
+                State(state.clone()),
+                headers(account_id, None),
+                Path((account_id.to_string(), session_seq)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("v3 durable lookup failed"));
+            if status_resp.status == "DURABLE_ACCEPTED" {
+                durable_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(durable_seen, "expected eventual DURABLE_ACCEPTED");
+        assert_eq!(state.v3_accepted_total.load(Ordering::Relaxed), 1);
+        assert_eq!(state.v3_durable_accepted_total.load(Ordering::Relaxed), 1);
+
+        let metrics = super::super::metrics::handle_metrics(State(state.clone())).await;
+        assert!(metrics.contains("gateway_v3_confirm_store_size "));
+        assert!(metrics.contains("gateway_v3_confirm_lane_skew_pct "));
+
+        writer_handle.abort();
+        durable_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn v3_integration_loss_monitor_updates_scan_cost_and_gc() {
+        let (state, ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(20, 40, 10, 1, 1_024);
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let monitor_handle = tokio::spawn(super::super::run_v3_loss_monitor(state.clone()));
+
+        let account_id = "v3-int-acc-2";
+        let req = request_with_client_id("cid_v3_integration_timeout");
+        let (status, Json(accepted)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_integration_timeout")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let session_seq = accepted.session_seq.expect("session seq");
+
+        let mut loss_seen = false;
+        for _ in 0..120 {
+            let Json(status_resp) = handle_get_order_v3(
+                State(state.clone()),
+                headers(account_id, None),
+                Path((account_id.to_string(), session_seq)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("v3 status lookup failed"));
+            if status_resp.status == "LOSS_SUSPECT" {
+                loss_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loss_seen, "expected LOSS_SUSPECT after durable timeout");
+        assert!(
+            state
+                .v3_confirm_timeout_scan_cost_total
+                .load(Ordering::Relaxed)
+                > 0
+        );
+
+        let mut gc_seen = false;
+        for _ in 0..120 {
+            if state.v3_confirm_gc_removed_total.load(Ordering::Relaxed) > 0 {
+                gc_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(gc_seen, "expected confirm GC removal");
+
+        let metrics = super::super::metrics::handle_metrics(State(state.clone())).await;
+        assert!(metrics.contains("gateway_v3_confirm_timeout_scan_cost_total "));
+        assert!(metrics.contains("gateway_v3_confirm_gc_removed_total "));
+
+        writer_handle.abort();
+        monitor_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn v3_integration_durable_queue_full_marks_loss_suspect() {
+        let (state, ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(5_000, 60_000, 20, 1, 1);
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+
+        let account_id = "v3-int-acc-full";
+        let (s1, Json(r1)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("cid_v3_qfull_1")),
+            Json(request_with_client_id("cid_v3_qfull_1")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        let (s2, Json(r2)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("cid_v3_qfull_2")),
+            Json(request_with_client_id("cid_v3_qfull_2")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        assert_eq!(s1, StatusCode::ACCEPTED);
+        assert_eq!(s2, StatusCode::ACCEPTED);
+        assert_eq!(r1.status, "VOLATILE_ACCEPT");
+        assert_eq!(r2.status, "VOLATILE_ACCEPT");
+        let seq2 = r2.session_seq.expect("second seq");
+
+        let mut loss_seen = false;
+        for _ in 0..120 {
+            let Json(status_resp) = handle_get_order_v3(
+                State(state.clone()),
+                headers(account_id, None),
+                Path((account_id.to_string(), seq2)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("v3 status lookup failed"));
+            if status_resp.status == "LOSS_SUSPECT" {
+                loss_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            loss_seen,
+            "expected LOSS_SUSPECT when durable queue is full"
+        );
+        assert!(state.v3_durable_ingress.queue_full_total() > 0);
+
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn v3_integration_durable_queue_closed_marks_loss_suspect() {
+        let (state, ingress_rx, durable_rxs) =
+            build_test_state_with_v3_pipeline(5_000, 60_000, 20, 1, 8);
+        drop(durable_rxs);
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+
+        let account_id = "v3-int-acc-closed";
+        let (status, Json(accepted)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_qclosed_1")),
+            Json(request_with_client_id("cid_v3_qclosed_1")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seq = accepted.session_seq.expect("session seq");
+
+        let mut loss_seen = false;
+        for _ in 0..120 {
+            let Json(status_resp) = handle_get_order_v3(
+                State(state.clone()),
+                headers(account_id, None),
+                Path((account_id.to_string(), seq)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("v3 status lookup failed"));
+            if status_resp.status == "LOSS_SUSPECT" {
+                loss_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            loss_seen,
+            "expected LOSS_SUSPECT when durable queue is closed"
+        );
+        assert!(state.v3_durable_ingress.queue_closed_total() > 0);
+
+        writer_handle.abort();
     }
 
     #[tokio::test]
