@@ -237,7 +237,7 @@ services:
       MPLBACKEND: Agg
     volumes:
       - .:/work
-    command: ["python","scripts/plot_summary.py"]
+    command: ["python","tools/plots/old/plot_summary.py"]
 
   # --- Monitoring: Prometheus + Grafana ---
   prometheus:

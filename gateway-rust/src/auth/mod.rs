@@ -97,6 +97,18 @@ impl JwtAuth {
         self.verify_hs256(token)
     }
 
+    /// JWTトークン文字列（Bearer接頭辞なし）を直接検証
+    pub fn authenticate_token(&self, token: &str) -> AuthResult {
+        if self.secret.is_empty() {
+            return AuthResult::Err(AuthError::SecretNotConfigured);
+        }
+        let t = token.trim();
+        if t.is_empty() {
+            return AuthResult::Err(AuthError::MissingBearerToken);
+        }
+        self.verify_hs256(t)
+    }
+
     fn parse_bearer_token(header: Option<&str>) -> Option<&str> {
         let h = header?.trim();
         if !h.starts_with("Bearer ") {
@@ -302,10 +314,7 @@ mod tests {
             .unwrap()
             .as_secs()
             + 3600;
-        let payload = format!(
-            r#"{{"accountId":"acc123","sub":"sess-a","exp":{}}}"#,
-            exp
-        );
+        let payload = format!(r#"{{"accountId":"acc123","sub":"sess-a","exp":{}}}"#, exp);
         let token = make_test_token(secret, &payload);
 
         let auth = JwtAuth {

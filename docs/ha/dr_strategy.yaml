@@ -141,14 +141,14 @@ drills:
         expected: "tail_ratio > 12.0 (GCポーズでテールレイテンシ悪化)"
       - step: 4
         action: "バックプレッシャーチューナー推奨確認"
-        command: "python3 scripts/backpressure_tuner.py --in var/results/gc_pause.json"
+        command: "python3 scripts/old/backpressure_tuner.py --in var/results/gc_pause.json"
         expected: "推奨: JVM heap size増加、GC tuning"
       - step: 5
         action: "JVM設定復元"
         command: "docker-compose -f docker-compose-ha.yml restart hft-app-primary"
     success_criteria:
       - "tail_ratio < 12 (GCチューニング後)"
-      - "backpressure_tuner.pyが正しい推奨を提示"
+      - "scripts/old/backpressure_tuner.py が正しい推奨を提示"
 
   # ドリル3: Chronicle Queue破損シミュレーション
   - name: "chronicle-queue-corruption"
@@ -168,7 +168,7 @@ drills:
       - step: 3
         action: "15分最小リプレイ実行"
         command: |
-          python3 scripts/replay_minset.py \
+          python3 scripts/old/replay_minset.py \
             --incident-time "2025-11-02T10:00:00Z" \
             --window-minutes 15 \
             --out var/results/replay_events.json
@@ -323,7 +323,7 @@ backup:
 
 # 関連ドキュメント
 references:
-  - url: "docs/runbook.md"
+  - url: "docs/old/runbook.md"
     description: "インシデント対応手順"
   - url: "docs/policies/error_budget_policy.yaml"
     description: "エラーバジェット運用ポリシー"

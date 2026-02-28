@@ -91,18 +91,148 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_kill_recover_after_ms = state.v3_ingress.kill_recover_after_ms();
     let v3_kill_recovered_total = state.v3_kill_recovered_total.load(Ordering::Relaxed);
     let v3_loss_suspect_total = state.v3_loss_suspect_total.load(Ordering::Relaxed);
-    let v3_session_loss_suspect_threshold = state.v3_ingress.session_loss_suspect_threshold() as u64;
+    let v3_session_loss_suspect_threshold =
+        state.v3_ingress.session_loss_suspect_threshold() as u64;
     let v3_session_killed_total = state.v3_session_killed_total.load(Ordering::Relaxed);
     let v3_shard_killed_total = state.v3_shard_killed_total.load(Ordering::Relaxed);
     let v3_global_killed_total = state.v3_global_killed_total.load(Ordering::Relaxed);
     let v3_durable_accepted_total = state.v3_durable_accepted_total.load(Ordering::Relaxed);
     let v3_durable_rejected_total = state.v3_durable_rejected_total.load(Ordering::Relaxed);
-    let v3_processed_total = state.v3_ingress.processed_total();
-    let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
-    let v3_live_ack_accepted_p99 = state
-        .v3_live_ack_accepted_hist
+    let v3_durable_queue_depth = state.v3_durable_ingress.total_depth();
+    let v3_durable_queue_capacity = state.v3_durable_ingress.total_capacity();
+    let v3_durable_queue_utilization_pct = if v3_durable_queue_capacity == 0 {
+        0.0
+    } else {
+        (v3_durable_queue_depth as f64 * 100.0) / v3_durable_queue_capacity as f64
+    };
+    let v3_durable_queue_utilization_pct_max = state.v3_durable_ingress.queue_utilization_pct_max();
+    let v3_durable_lane_skew_pct = state.v3_durable_ingress.lane_skew_pct();
+    let v3_durable_lane_depths = state.v3_durable_ingress.lane_depths();
+    let v3_durable_lane_utils = state.v3_durable_ingress.lane_utilization_pcts();
+    let v3_durable_lanes = v3_durable_lane_depths.len() as u64;
+    let v3_durable_queue_full_total = state.v3_durable_ingress.queue_full_total();
+    let v3_durable_queue_closed_total = state.v3_durable_ingress.queue_closed_total();
+    let v3_durable_worker_processed_total = state.v3_durable_ingress.processed_total();
+    let v3_durable_backlog_growth_per_sec = state
+        .v3_durable_backlog_growth_per_sec
+        .load(Ordering::Relaxed);
+    let v3_durable_write_error_total = state.v3_durable_write_error_total.load(Ordering::Relaxed);
+    let v3_durable_backpressure_soft_total = state
+        .v3_durable_backpressure_soft_total
+        .load(Ordering::Relaxed);
+    let v3_durable_backpressure_hard_total = state
+        .v3_durable_backpressure_hard_total
+        .load(Ordering::Relaxed);
+    let v3_durable_admission_controller_enabled = if state.v3_durable_admission_controller_enabled {
+        1
+    } else {
+        0
+    };
+    let v3_durable_admission_level = state.v3_durable_admission_level.load(Ordering::Relaxed);
+    let v3_durable_admission_level_per_lane = state
+        .v3_durable_admission_level_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_soft_trip_total = state
+        .v3_durable_admission_soft_trip_total
+        .load(Ordering::Relaxed);
+    let v3_durable_admission_soft_trip_total_per_lane = state
+        .v3_durable_admission_soft_trip_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_hard_trip_total = state
+        .v3_durable_admission_hard_trip_total
+        .load(Ordering::Relaxed);
+    let v3_durable_admission_hard_trip_total_per_lane = state
+        .v3_durable_admission_hard_trip_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_queue_soft_total_per_lane = state
+        .v3_durable_admission_signal_queue_soft_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_queue_hard_total_per_lane = state
+        .v3_durable_admission_signal_queue_hard_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_backlog_soft_total_per_lane = state
+        .v3_durable_admission_signal_backlog_soft_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_backlog_hard_total_per_lane = state
+        .v3_durable_admission_signal_backlog_hard_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_fsync_soft_total_per_lane = state
+        .v3_durable_admission_signal_fsync_soft_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_signal_fsync_hard_total_per_lane = state
+        .v3_durable_admission_signal_fsync_hard_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_admission_sustain_ticks = state.v3_durable_admission_sustain_ticks;
+    let v3_durable_admission_recover_ticks = state.v3_durable_admission_recover_ticks;
+    let v3_durable_admission_soft_fsync_p99_us = state.v3_durable_admission_soft_fsync_p99_us;
+    let v3_durable_admission_hard_fsync_p99_us = state.v3_durable_admission_hard_fsync_p99_us;
+    let v3_durable_soft_reject_pct = state.v3_durable_soft_reject_pct;
+    let v3_durable_hard_reject_pct = state.v3_durable_hard_reject_pct;
+    let v3_durable_backlog_soft_reject_per_sec = state.v3_durable_backlog_soft_reject_per_sec;
+    let v3_durable_backlog_hard_reject_per_sec = state.v3_durable_backlog_hard_reject_per_sec;
+    let v3_durable_wal_append_p50 = state.v3_durable_wal_append_hist.snapshot().percentile(50.0);
+    let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
+    let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
+    let v3_durable_fsync_p99 = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
+    let v3_durable_worker_loop_p50 = state
+        .v3_durable_worker_loop_hist
+        .snapshot()
+        .percentile(50.0);
+    let v3_durable_worker_loop_p99 = state
+        .v3_durable_worker_loop_hist
         .snapshot()
         .percentile(99.0);
+    let v3_durable_worker_batch_adaptive = if state.v3_durable_worker_batch_adaptive {
+        1
+    } else {
+        0
+    };
+    let v3_durable_backlog_growth_per_sec_per_lane = state
+        .v3_durable_backlog_growth_per_sec_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_backpressure_soft_total_per_lane = state
+        .v3_durable_backpressure_soft_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_backpressure_hard_total_per_lane = state
+        .v3_durable_backpressure_hard_total_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_fsync_p99_per_lane = state
+        .v3_durable_wal_fsync_hist_per_lane
+        .iter()
+        .map(|hist| hist.snapshot().percentile(99.0))
+        .collect::<Vec<_>>();
+    let v3_durable_worker_loop_p99_per_lane = state
+        .v3_durable_worker_loop_hist_per_lane
+        .iter()
+        .map(|hist| hist.snapshot().percentile(99.0))
+        .collect::<Vec<_>>();
+    let v3_processed_total = state.v3_ingress.processed_total();
+    let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
+    let v3_live_ack_accepted_p99 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.0);
     let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
     let v3_total = v3_accepted_total
         + v3_rejected_soft_total
@@ -144,8 +274,43 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_stage_enqueue_p99 = state.v3_stage_enqueue_hist.snapshot().percentile(99.0);
     let v3_stage_serialize_p50 = state.v3_stage_serialize_hist.snapshot().percentile(50.0);
     let v3_stage_serialize_p99 = state.v3_stage_serialize_hist.snapshot().percentile(99.0);
+    let v3_confirm_store_size = state.v3_confirm_store.total_size();
+    let v3_confirm_store_lanes = state.v3_confirm_store.lane_count_metric();
+    let v3_confirm_lane_skew_pct = state.v3_confirm_store.lane_skew_pct();
+    let v3_confirm_oldest_inflight_us = state
+        .v3_confirm_oldest_inflight_us
+        .load(Ordering::Relaxed);
+    let v3_confirm_oldest_inflight_us_per_lane = state
+        .v3_confirm_oldest_inflight_us_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_confirm_age_p99_per_lane = state
+        .v3_confirm_age_hist_per_lane
+        .iter()
+        .map(|hist| hist.snapshot().percentile(99.0))
+        .collect::<Vec<_>>();
+    let v3_confirm_timeout_scan_cost_last = state
+        .v3_confirm_timeout_scan_cost_last
+        .load(Ordering::Relaxed);
+    let v3_confirm_timeout_scan_cost_total = state
+        .v3_confirm_timeout_scan_cost_total
+        .load(Ordering::Relaxed);
+    let v3_confirm_gc_removed_total = state.v3_confirm_gc_removed_total.load(Ordering::Relaxed);
+    let v3_confirm_rebuild_restored_total = state
+        .v3_confirm_rebuild_restored_total
+        .load(Ordering::Relaxed);
+    let v3_confirm_rebuild_elapsed_ms = state.v3_confirm_rebuild_elapsed_ms.load(Ordering::Relaxed);
+    let v3_durable_confirm_soft_reject_age_us = state.v3_durable_confirm_soft_reject_age_us;
+    let v3_durable_confirm_hard_reject_age_us = state.v3_durable_confirm_hard_reject_age_us;
+    let v3_durable_confirm_age_soft_reject_total = state
+        .v3_durable_confirm_age_soft_reject_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_hard_reject_total = state
+        .v3_durable_confirm_age_hard_reject_total
+        .load(Ordering::Relaxed);
     let inflight = state.inflight_controller.inflight();
-    let durable_inflight = state.inflight_controller.inflight();
+    let durable_inflight = v3_durable_queue_depth;
     let wal_age_ms = state.audit_log.wal_age_ms();
     let inflight_limit_dynamic = state.inflight_controller.current_limit();
     let durable_commit_rate_ewma_milli = state.inflight_controller.rate_ewma_milli();
@@ -524,7 +689,76 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          gateway_v3_durable_accepted_total {}\n\
          # HELP gateway_v3_durable_rejected_total Total /v3 durable rejected outcomes\n\
          # TYPE gateway_v3_durable_rejected_total counter\n\
-         gateway_v3_durable_rejected_total {}\n",
+         gateway_v3_durable_rejected_total {}\n\
+         # HELP gateway_v3_durable_queue_depth Total /v3 durable queue depth across all lanes\n\
+         # TYPE gateway_v3_durable_queue_depth gauge\n\
+         gateway_v3_durable_queue_depth {}\n\
+         # HELP gateway_v3_durable_queue_capacity Total /v3 durable queue capacity across all lanes\n\
+         # TYPE gateway_v3_durable_queue_capacity gauge\n\
+         gateway_v3_durable_queue_capacity {}\n\
+         # HELP gateway_v3_durable_queue_utilization_pct /v3 durable queue utilization percentage (aggregate)\n\
+         # TYPE gateway_v3_durable_queue_utilization_pct gauge\n\
+         gateway_v3_durable_queue_utilization_pct {}\n\
+         # HELP gateway_v3_durable_queue_utilization_pct_max /v3 durable queue utilization percentage (worst lane)\n\
+         # TYPE gateway_v3_durable_queue_utilization_pct_max gauge\n\
+         gateway_v3_durable_queue_utilization_pct_max {}\n\
+         # HELP gateway_v3_durable_lane_skew_pct /v3 durable queue lane skew percentage against lane average\n\
+         # TYPE gateway_v3_durable_lane_skew_pct gauge\n\
+         gateway_v3_durable_lane_skew_pct {}\n\
+         # HELP gateway_v3_durable_lanes Configured /v3 durable lane count\n\
+         # TYPE gateway_v3_durable_lanes gauge\n\
+         gateway_v3_durable_lanes {}\n\
+         # HELP gateway_v3_durable_backlog_growth_per_sec /v3 durable queue depth growth per second\n\
+         # TYPE gateway_v3_durable_backlog_growth_per_sec gauge\n\
+         gateway_v3_durable_backlog_growth_per_sec {}\n\
+         # HELP gateway_v3_durable_queue_full_total Total /v3 durable queue full events\n\
+         # TYPE gateway_v3_durable_queue_full_total counter\n\
+         gateway_v3_durable_queue_full_total {}\n\
+         # HELP gateway_v3_durable_queue_closed_total Total /v3 durable queue closed events\n\
+         # TYPE gateway_v3_durable_queue_closed_total counter\n\
+         gateway_v3_durable_queue_closed_total {}\n\
+         # HELP gateway_v3_durable_worker_processed_total Total /v3 durable worker processed tasks\n\
+         # TYPE gateway_v3_durable_worker_processed_total counter\n\
+         gateway_v3_durable_worker_processed_total {}\n\
+         # HELP gateway_v3_durable_worker_batch_max Configured /v3 durable worker max batch size\n\
+         # TYPE gateway_v3_durable_worker_batch_max gauge\n\
+         gateway_v3_durable_worker_batch_max {}\n\
+         # HELP gateway_v3_durable_worker_batch_min Configured /v3 durable worker min batch size (adaptive floor)\n\
+         # TYPE gateway_v3_durable_worker_batch_min gauge\n\
+         gateway_v3_durable_worker_batch_min {}\n\
+         # HELP gateway_v3_durable_worker_batch_wait_us Configured /v3 durable worker micro-batch wait in microseconds\n\
+         # TYPE gateway_v3_durable_worker_batch_wait_us gauge\n\
+         gateway_v3_durable_worker_batch_wait_us {}\n\
+         # HELP gateway_v3_durable_worker_batch_wait_min_us Configured /v3 durable worker minimum micro-batch wait in microseconds\n\
+         # TYPE gateway_v3_durable_worker_batch_wait_min_us gauge\n\
+         gateway_v3_durable_worker_batch_wait_min_us {}\n\
+         # HELP gateway_v3_durable_worker_batch_adaptive Whether /v3 durable worker adaptive batching is enabled (1/0)\n\
+         # TYPE gateway_v3_durable_worker_batch_adaptive gauge\n\
+         gateway_v3_durable_worker_batch_adaptive {}\n\
+         # HELP gateway_v3_durable_worker_batch_adaptive_low_util_pct Adaptive batching low queue-utilization threshold percentage\n\
+         # TYPE gateway_v3_durable_worker_batch_adaptive_low_util_pct gauge\n\
+         gateway_v3_durable_worker_batch_adaptive_low_util_pct {}\n\
+         # HELP gateway_v3_durable_worker_batch_adaptive_high_util_pct Adaptive batching high queue-utilization threshold percentage\n\
+         # TYPE gateway_v3_durable_worker_batch_adaptive_high_util_pct gauge\n\
+         gateway_v3_durable_worker_batch_adaptive_high_util_pct {}\n\
+         # HELP gateway_v3_durable_worker_loop_p50_us /v3 durable worker loop latency p50 in microseconds\n\
+         # TYPE gateway_v3_durable_worker_loop_p50_us gauge\n\
+         gateway_v3_durable_worker_loop_p50_us {}\n\
+         # HELP gateway_v3_durable_worker_loop_p99_us /v3 durable worker loop latency p99 in microseconds\n\
+         # TYPE gateway_v3_durable_worker_loop_p99_us gauge\n\
+         gateway_v3_durable_worker_loop_p99_us {}\n\
+         # HELP gateway_v3_durable_wal_append_p50_us /v3 durable WAL append latency p50 in microseconds\n\
+         # TYPE gateway_v3_durable_wal_append_p50_us gauge\n\
+         gateway_v3_durable_wal_append_p50_us {}\n\
+         # HELP gateway_v3_durable_wal_append_p99_us /v3 durable WAL append latency p99 in microseconds\n\
+         # TYPE gateway_v3_durable_wal_append_p99_us gauge\n\
+         gateway_v3_durable_wal_append_p99_us {}\n\
+         # HELP gateway_v3_durable_fdatasync_p50_us /v3 durable fdatasync latency p50 in microseconds\n\
+         # TYPE gateway_v3_durable_fdatasync_p50_us gauge\n\
+         gateway_v3_durable_fdatasync_p50_us {}\n\
+         # HELP gateway_v3_durable_fdatasync_p99_us /v3 durable fdatasync latency p99 in microseconds\n\
+         # TYPE gateway_v3_durable_fdatasync_p99_us gauge\n\
+         gateway_v3_durable_fdatasync_p99_us {}\n",
         v3_live_ack_p99,
         v3_live_ack_accepted_p99,
         v3_live_ack_p99,
@@ -541,7 +775,359 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_global_killed_total,
         v3_durable_accepted_total,
         v3_durable_rejected_total,
+        v3_durable_queue_depth,
+        v3_durable_queue_capacity,
+        v3_durable_queue_utilization_pct,
+        v3_durable_queue_utilization_pct_max,
+        v3_durable_lane_skew_pct,
+        v3_durable_lanes,
+        v3_durable_backlog_growth_per_sec,
+        v3_durable_queue_full_total,
+        v3_durable_queue_closed_total,
+        v3_durable_worker_processed_total,
+        state.v3_durable_worker_batch_max,
+        state.v3_durable_worker_batch_min,
+        state.v3_durable_worker_batch_wait_us,
+        state.v3_durable_worker_batch_wait_min_us,
+        v3_durable_worker_batch_adaptive,
+        state.v3_durable_worker_batch_adaptive_low_util_pct,
+        state.v3_durable_worker_batch_adaptive_high_util_pct,
+        v3_durable_worker_loop_p50,
+        v3_durable_worker_loop_p99,
+        v3_durable_wal_append_p50,
+        v3_durable_wal_append_p99,
+        v3_durable_fsync_p50,
+        v3_durable_fsync_p99,
     ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_durable_write_error_total Total /v3 durable write/receipt errors\n\
+         # TYPE gateway_v3_durable_write_error_total counter\n\
+         gateway_v3_durable_write_error_total {}\n\
+         # HELP gateway_v3_durable_backpressure_soft_total Total /v3 soft rejects triggered by durable backpressure\n\
+         # TYPE gateway_v3_durable_backpressure_soft_total counter\n\
+         gateway_v3_durable_backpressure_soft_total {}\n\
+         # HELP gateway_v3_durable_backpressure_hard_total Total /v3 hard rejects triggered by durable backpressure\n\
+         # TYPE gateway_v3_durable_backpressure_hard_total counter\n\
+         gateway_v3_durable_backpressure_hard_total {}\n\
+         # HELP gateway_v3_durable_admission_controller_enabled /v3 durable admission controller enabled (1/0)\n\
+         # TYPE gateway_v3_durable_admission_controller_enabled gauge\n\
+         gateway_v3_durable_admission_controller_enabled {}\n\
+         # HELP gateway_v3_durable_admission_level /v3 durable admission controller level (0=normal,1=soft,2=hard)\n\
+         # TYPE gateway_v3_durable_admission_level gauge\n\
+         gateway_v3_durable_admission_level {}\n\
+         # HELP gateway_v3_durable_admission_soft_trip_total Total transitions into durable admission soft level\n\
+         # TYPE gateway_v3_durable_admission_soft_trip_total counter\n\
+         gateway_v3_durable_admission_soft_trip_total {}\n\
+         # HELP gateway_v3_durable_admission_hard_trip_total Total transitions into durable admission hard level\n\
+         # TYPE gateway_v3_durable_admission_hard_trip_total counter\n\
+         gateway_v3_durable_admission_hard_trip_total {}\n\
+         # HELP gateway_v3_durable_admission_sustain_ticks Durable admission controller sustain ticks\n\
+         # TYPE gateway_v3_durable_admission_sustain_ticks gauge\n\
+         gateway_v3_durable_admission_sustain_ticks {}\n\
+         # HELP gateway_v3_durable_admission_recover_ticks Durable admission controller recover ticks\n\
+         # TYPE gateway_v3_durable_admission_recover_ticks gauge\n\
+         gateway_v3_durable_admission_recover_ticks {}\n\
+         # HELP gateway_v3_durable_admission_soft_fsync_p99_us Durable admission soft signal threshold for fdatasync p99 (us)\n\
+         # TYPE gateway_v3_durable_admission_soft_fsync_p99_us gauge\n\
+         gateway_v3_durable_admission_soft_fsync_p99_us {}\n\
+         # HELP gateway_v3_durable_admission_hard_fsync_p99_us Durable admission hard signal threshold for fdatasync p99 (us)\n\
+         # TYPE gateway_v3_durable_admission_hard_fsync_p99_us gauge\n\
+         gateway_v3_durable_admission_hard_fsync_p99_us {}\n\
+         # HELP gateway_v3_durable_soft_reject_pct /v3 durable-path soft reject threshold percentage\n\
+         # TYPE gateway_v3_durable_soft_reject_pct gauge\n\
+         gateway_v3_durable_soft_reject_pct {}\n\
+         # HELP gateway_v3_durable_hard_reject_pct /v3 durable-path hard reject threshold percentage\n\
+         # TYPE gateway_v3_durable_hard_reject_pct gauge\n\
+         gateway_v3_durable_hard_reject_pct {}\n\
+         # HELP gateway_v3_durable_backlog_soft_reject_per_sec /v3 durable backlog growth soft reject threshold per second\n\
+         # TYPE gateway_v3_durable_backlog_soft_reject_per_sec gauge\n\
+         gateway_v3_durable_backlog_soft_reject_per_sec {}\n\
+         # HELP gateway_v3_durable_backlog_hard_reject_per_sec /v3 durable backlog growth hard reject threshold per second\n\
+         # TYPE gateway_v3_durable_backlog_hard_reject_per_sec gauge\n\
+         gateway_v3_durable_backlog_hard_reject_per_sec {}\n\
+         # HELP gateway_v3_durable_confirm_soft_reject_age_us /v3 durable confirm oldest-age soft reject threshold (us, 0=disabled)\n\
+         # TYPE gateway_v3_durable_confirm_soft_reject_age_us gauge\n\
+         gateway_v3_durable_confirm_soft_reject_age_us {}\n\
+         # HELP gateway_v3_durable_confirm_hard_reject_age_us /v3 durable confirm oldest-age hard reject threshold (us, 0=disabled)\n\
+         # TYPE gateway_v3_durable_confirm_hard_reject_age_us gauge\n\
+         gateway_v3_durable_confirm_hard_reject_age_us {}\n\
+         # HELP gateway_v3_durable_confirm_age_soft_reject_total Total /v3 soft rejects due to durable confirm oldest-age guard\n\
+         # TYPE gateway_v3_durable_confirm_age_soft_reject_total counter\n\
+         gateway_v3_durable_confirm_age_soft_reject_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_hard_reject_total Total /v3 hard rejects due to durable confirm oldest-age guard\n\
+         # TYPE gateway_v3_durable_confirm_age_hard_reject_total counter\n\
+         gateway_v3_durable_confirm_age_hard_reject_total {}\n",
+        v3_durable_write_error_total,
+        v3_durable_backpressure_soft_total,
+        v3_durable_backpressure_hard_total,
+        v3_durable_admission_controller_enabled,
+        v3_durable_admission_level,
+        v3_durable_admission_soft_trip_total,
+        v3_durable_admission_hard_trip_total,
+        v3_durable_admission_sustain_ticks,
+        v3_durable_admission_recover_ticks,
+        v3_durable_admission_soft_fsync_p99_us,
+        v3_durable_admission_hard_fsync_p99_us,
+        v3_durable_soft_reject_pct,
+        v3_durable_hard_reject_pct,
+        v3_durable_backlog_soft_reject_per_sec,
+        v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_confirm_soft_reject_age_us,
+        v3_durable_confirm_hard_reject_age_us,
+        v3_durable_confirm_age_soft_reject_total,
+        v3_durable_confirm_age_hard_reject_total,
+    ));
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_queue_depth_per_lane /v3 durable queue depth per lane\n\
+         # TYPE gateway_v3_durable_queue_depth_per_lane gauge\n",
+    );
+    for (lane, depth) in v3_durable_lane_depths.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_queue_depth_per_lane{{lane=\"{}\"}} {}\n",
+            lane, depth
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_queue_utilization_pct_per_lane /v3 durable queue utilization percentage per lane\n\
+         # TYPE gateway_v3_durable_queue_utilization_pct_per_lane gauge\n",
+    );
+    for (lane, util_pct) in v3_durable_lane_utils.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_queue_utilization_pct_per_lane{{lane=\"{}\"}} {}\n",
+            lane, util_pct
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_backlog_growth_per_sec_per_lane /v3 durable queue depth growth per second per lane\n\
+         # TYPE gateway_v3_durable_backlog_growth_per_sec_per_lane gauge\n",
+    );
+    for (lane, growth) in v3_durable_backlog_growth_per_sec_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_backlog_growth_per_sec_per_lane{{lane=\"{}\"}} {}\n",
+            lane, growth
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_backpressure_soft_total_per_lane Total /v3 durable soft rejects per lane\n\
+         # TYPE gateway_v3_durable_backpressure_soft_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_backpressure_soft_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_backpressure_soft_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_backpressure_hard_total_per_lane Total /v3 durable hard rejects per lane\n\
+         # TYPE gateway_v3_durable_backpressure_hard_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_backpressure_hard_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_backpressure_hard_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_level_per_lane /v3 durable admission level per lane (0=normal,1=soft,2=hard)\n\
+         # TYPE gateway_v3_durable_admission_level_per_lane gauge\n",
+    );
+    for (lane, level) in v3_durable_admission_level_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_level_per_lane{{lane=\"{}\"}} {}\n",
+            lane, level
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_soft_trip_total_per_lane Total transitions into durable admission soft level per lane\n\
+         # TYPE gateway_v3_durable_admission_soft_trip_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_soft_trip_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_soft_trip_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_hard_trip_total_per_lane Total transitions into durable admission hard level per lane\n\
+         # TYPE gateway_v3_durable_admission_hard_trip_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_hard_trip_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_hard_trip_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_queue_soft_total_per_lane Durable admission queue-soft signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_queue_soft_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_queue_soft_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_queue_soft_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_queue_hard_total_per_lane Durable admission queue-hard signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_queue_hard_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_queue_hard_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_queue_hard_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_backlog_soft_total_per_lane Durable admission backlog-soft signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_backlog_soft_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_backlog_soft_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_backlog_soft_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_backlog_hard_total_per_lane Durable admission backlog-hard signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_backlog_hard_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_backlog_hard_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_backlog_hard_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_fsync_soft_total_per_lane Durable admission fsync-soft signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_fsync_soft_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_fsync_soft_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_fsync_soft_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_admission_signal_fsync_hard_total_per_lane Durable admission fsync-hard signal hits per lane\n\
+         # TYPE gateway_v3_durable_admission_signal_fsync_hard_total_per_lane counter\n",
+    );
+    for (lane, total) in v3_durable_admission_signal_fsync_hard_total_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_admission_signal_fsync_hard_total_per_lane{{lane=\"{}\"}} {}\n",
+            lane, total
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_fdatasync_p99_us_per_lane /v3 durable fdatasync latency p99 per lane (us)\n\
+         # TYPE gateway_v3_durable_fdatasync_p99_us_per_lane gauge\n",
+    );
+    for (lane, p99) in v3_durable_fsync_p99_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_fdatasync_p99_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, p99
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_worker_loop_p99_us_per_lane /v3 durable worker loop latency p99 per lane (us)\n\
+         # TYPE gateway_v3_durable_worker_loop_p99_us_per_lane gauge\n",
+    );
+    for (lane, p99) in v3_durable_worker_loop_p99_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_worker_loop_p99_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, p99
+        ));
+    }
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_confirm_store_size Number of records in /v3 confirm store\n\
+         # TYPE gateway_v3_confirm_store_size gauge\n\
+         gateway_v3_confirm_store_size {}\n\
+         # HELP gateway_v3_confirm_store_lanes Configured lane count for /v3 confirm store\n\
+         # TYPE gateway_v3_confirm_store_lanes gauge\n\
+         gateway_v3_confirm_store_lanes {}\n\
+         # HELP gateway_v3_confirm_lane_skew_pct /v3 confirm store lane skew percentage against lane average\n\
+         # TYPE gateway_v3_confirm_lane_skew_pct gauge\n\
+         gateway_v3_confirm_lane_skew_pct {}\n\
+         # HELP gateway_v3_confirm_oldest_inflight_us Oldest /v3 inflight confirm age in microseconds\n\
+         # TYPE gateway_v3_confirm_oldest_inflight_us gauge\n\
+         gateway_v3_confirm_oldest_inflight_us {}\n\
+         # HELP gateway_v3_confirm_timeout_scan_cost_last Number of timeout-wheel entries scanned in the last monitor tick\n\
+         # TYPE gateway_v3_confirm_timeout_scan_cost_last gauge\n\
+         gateway_v3_confirm_timeout_scan_cost_last {}\n\
+         # HELP gateway_v3_confirm_timeout_scan_cost_total Total timeout-wheel entries scanned by monitor\n\
+         # TYPE gateway_v3_confirm_timeout_scan_cost_total counter\n\
+         gateway_v3_confirm_timeout_scan_cost_total {}\n\
+         # HELP gateway_v3_confirm_gc_removed_total Total /v3 confirm records removed by TTL GC\n\
+         # TYPE gateway_v3_confirm_gc_removed_total counter\n\
+         gateway_v3_confirm_gc_removed_total {}\n\
+         # HELP gateway_v3_confirm_rebuild_restored_total Total /v3 confirm records restored from WAL at startup\n\
+         # TYPE gateway_v3_confirm_rebuild_restored_total counter\n\
+         gateway_v3_confirm_rebuild_restored_total {}\n\
+         # HELP gateway_v3_confirm_rebuild_elapsed_ms Elapsed milliseconds for /v3 confirm WAL rebuild at startup\n\
+         # TYPE gateway_v3_confirm_rebuild_elapsed_ms gauge\n\
+         gateway_v3_confirm_rebuild_elapsed_ms {}\n",
+        v3_confirm_store_size,
+        v3_confirm_store_lanes,
+        v3_confirm_lane_skew_pct,
+        v3_confirm_oldest_inflight_us,
+        v3_confirm_timeout_scan_cost_last,
+        v3_confirm_timeout_scan_cost_total,
+        v3_confirm_gc_removed_total,
+        v3_confirm_rebuild_restored_total,
+        v3_confirm_rebuild_elapsed_ms,
+    ));
+    snapshot.push_str(
+        "# HELP gateway_v3_confirm_oldest_inflight_us_per_lane Oldest /v3 inflight confirm age per lane in microseconds\n\
+         # TYPE gateway_v3_confirm_oldest_inflight_us_per_lane gauge\n",
+    );
+    for (lane, age) in v3_confirm_oldest_inflight_us_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_confirm_oldest_inflight_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, age
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_confirm_age_p99_us_per_lane /v3 inflight confirm oldest-age p99 per lane (us)\n\
+         # TYPE gateway_v3_confirm_age_p99_us_per_lane gauge\n",
+    );
+    for (lane, p99) in v3_confirm_age_p99_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_confirm_age_p99_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, p99
+        ));
+    }
     snapshot.push_str(&format!(
         "# HELP gateway_v2_requests_total Total POST /v2/orders requests\n\
          # TYPE gateway_v2_requests_total counter\n\

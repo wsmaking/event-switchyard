@@ -66,8 +66,8 @@ FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
 mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR"
 
-OUT_TSV="$OUT_DIR/pure_hft_capacity_sweep_${STAMP}.tsv"
-OUT_SUMMARY="$OUT_DIR/pure_hft_capacity_sweep_${STAMP}.summary.txt"
+OUT_TSV="$OUT_DIR/v3_capacity_sweep_${STAMP}.tsv"
+OUT_SUMMARY="$OUT_DIR/v3_capacity_sweep_${STAMP}.summary.txt"
 echo -e "level\tconnections\tthreads\trc\tcase\tack_p99_us\tack_accepted_p99_us\trps\taccept_ratio\taccepted_rps\tsummary_path" >"$OUT_TSV"
 
 extract_metric() {
@@ -83,7 +83,7 @@ for spec in ${LEVELS//,/ }; do
     exit 1
   fi
 
-  run_out_dir="$OUT_DIR/pure_hft_capacity_${STAMP}_${level}"
+  run_out_dir="$OUT_DIR/v3_capacity_${STAMP}_${level}"
   run_log="$run_out_dir/run.log"
   mkdir -p "$run_out_dir"
   echo "[run] level=${level} connections=${conn} threads=${thr} out=${run_out_dir}"
@@ -117,11 +117,11 @@ for spec in ${LEVELS//,/ }; do
   V3_SHARD_COUNT="$V3_SHARD_COUNT" \
   FASTPATH_DRAIN_WORKERS="$FASTPATH_DRAIN_WORKERS" \
   OUT_DIR="$run_out_dir" \
-  scripts/ops/run_pure_hft_phase2_compare_when_quiet.sh >"$run_log" 2>&1
+  scripts/ops/run_v3_phase2_compare_when_quiet.sh >"$run_log" 2>&1
   rc=$?
   set -e
 
-  summary_path="$(ls -1t "$run_out_dir"/pure_hft_phase2_compare_*.summary.txt 2>/dev/null | head -n1 || true)"
+  summary_path="$(ls -1t "$run_out_dir"/v3_phase2_compare_*.summary.txt 2>/dev/null | head -n1 || true)"
   if [[ -z "$summary_path" ]]; then
     echo -e "${level}\t${conn}\t${thr}\t${rc}\tbaseline\tNA\tNA\tNA\tNA\tNA\t-" >>"$OUT_TSV"
     echo -e "${level}\t${conn}\t${thr}\t${rc}\tinjected\tNA\tNA\tNA\tNA\tNA\t-" >>"$OUT_TSV"
@@ -145,7 +145,7 @@ for spec in ${LEVELS//,/ }; do
 done
 
 cat >"$OUT_SUMMARY" <<EOF
-pure_hft_capacity_sweep
+v3_capacity_sweep
 date=${STAMP}
 capacity_preset=${CAPACITY_PRESET}
 v3_soft_reject_pct=${V3_SOFT_REJECT_PCT}

@@ -147,7 +147,7 @@ commands:
 references:
   - url: "docs/specs/slo.md"
     description: "SLO仕様・目標値"
-  - url: "docs/runbook.md"
+  - url: "docs/old/runbook.md"
     description: "インシデント対応手順"
   - url: "https://sre.google/workbook/implementing-slos/"
     description: "Google SRE Workbook - Implementing SLOs"
