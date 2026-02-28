@@ -573,11 +573,12 @@ pub(super) fn process_order_v3_hot_path(
                 .v3_durable_backlog_growth_per_sec
                 .load(Ordering::Relaxed)
         });
+    let durable_backlog_signal_enabled =
+        durable_queue_pct >= state.v3_durable_backlog_signal_min_queue_pct;
     let durable_backlog_hard_failsafe = state
         .v3_durable_backlog_hard_reject_per_sec
         .saturating_mul(4);
-    let confirm_oldest_age_us_global =
-        state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
+    let confirm_oldest_age_us_global = state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
     let confirm_oldest_age_us_lane = state
         .v3_confirm_oldest_inflight_us_per_lane
         .get(durable_lane_id)
@@ -602,11 +603,7 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(
-                &session_id,
-                "REJECTED",
-                "V3_DURABLE_CONFIRM_AGE_HARD",
-            ),
+            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_HARD"),
         );
     }
     let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
@@ -627,16 +624,13 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            VolatileOrderResponse::rejected(
-                &session_id,
-                "REJECTED",
-                "V3_DURABLE_CONFIRM_AGE_SOFT",
-            ),
+            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_SOFT"),
         );
     }
     // 監視ループより先に深刻な飽和を検知した場合のみ即時hard拒否する。
     let durable_failsafe_hard = durable_queue_pct >= 99.0
-        || durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe;
+        || (durable_backlog_signal_enabled
+            && durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe);
     if durable_failsafe_hard {
         state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
         state
@@ -706,7 +700,8 @@ pub(super) fn process_order_v3_hot_path(
         }
     } else {
         if durable_queue_pct >= state.v3_durable_hard_reject_pct as f64
-            || durable_backlog_growth_per_sec >= state.v3_durable_backlog_hard_reject_per_sec
+            || (durable_backlog_signal_enabled
+                && durable_backlog_growth_per_sec >= state.v3_durable_backlog_hard_reject_per_sec)
         {
             state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
             state
@@ -729,7 +724,8 @@ pub(super) fn process_order_v3_hot_path(
             );
         }
         if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
-            || durable_backlog_growth_per_sec >= state.v3_durable_backlog_soft_reject_per_sec
+            || (durable_backlog_signal_enabled
+                && durable_backlog_growth_per_sec >= state.v3_durable_backlog_soft_reject_per_sec)
         {
             state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
             state
@@ -1971,11 +1967,13 @@ mod tests {
             v3_durable_hard_reject_pct: 98,
             v3_durable_backlog_soft_reject_per_sec: i64::MAX,
             v3_durable_backlog_hard_reject_per_sec: i64::MAX,
+            v3_durable_backlog_signal_min_queue_pct: 0.0,
             v3_durable_admission_controller_enabled: false,
             v3_durable_admission_sustain_ticks: 1,
             v3_durable_admission_recover_ticks: 1,
             v3_durable_admission_soft_fsync_p99_us: 6_000,
             v3_durable_admission_hard_fsync_p99_us: 12_000,
+            v3_durable_admission_fsync_presignal_pct: 1.0,
             v3_durable_admission_level: Arc::new(AtomicU64::new(0)),
             v3_durable_admission_level_per_lane: lane_u64(),
             v3_durable_admission_soft_trip_total: Arc::new(AtomicU64::new(0)),

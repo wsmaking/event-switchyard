@@ -1212,11 +1212,13 @@ pub(super) struct AppState {
     pub(super) v3_durable_hard_reject_pct: u64,
     pub(super) v3_durable_backlog_soft_reject_per_sec: i64,
     pub(super) v3_durable_backlog_hard_reject_per_sec: i64,
+    pub(super) v3_durable_backlog_signal_min_queue_pct: f64,
     pub(super) v3_durable_admission_controller_enabled: bool,
     pub(super) v3_durable_admission_sustain_ticks: u64,
     pub(super) v3_durable_admission_recover_ticks: u64,
     pub(super) v3_durable_admission_soft_fsync_p99_us: u64,
     pub(super) v3_durable_admission_hard_fsync_p99_us: u64,
+    pub(super) v3_durable_admission_fsync_presignal_pct: f64,
     pub(super) v3_durable_admission_level: Arc<AtomicU64>,
     pub(super) v3_durable_admission_level_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_admission_soft_trip_total: Arc<AtomicU64>,
@@ -1718,6 +1720,12 @@ pub async fn run(
         v3_durable_backlog_hard_reject_per_sec =
             v3_durable_backlog_soft_reject_per_sec.saturating_add(1);
     }
+    let v3_durable_backlog_signal_min_queue_pct =
+        std::env::var("V3_DURABLE_BACKLOG_SIGNAL_MIN_QUEUE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(20.0)
+            .clamp(0.0, 100.0);
     let v3_durable_admission_controller_enabled =
         parse_bool_env("V3_DURABLE_ADMISSION_CONTROLLER_ENABLED").unwrap_or(true);
     let v3_durable_admission_sustain_ticks = std::env::var("V3_DURABLE_ADMISSION_SUSTAIN_TICKS")
@@ -1746,6 +1754,12 @@ pub async fn run(
         v3_durable_admission_hard_fsync_p99_us =
             v3_durable_admission_soft_fsync_p99_us.saturating_add(1);
     }
+    let v3_durable_admission_fsync_presignal_pct =
+        std::env::var("V3_DURABLE_ADMISSION_FSYNC_PRESIGNAL_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.5, 1.0);
     let v3_loss_gap_timeout_ms = std::env::var("V3_LOSS_GAP_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1992,11 +2006,13 @@ pub async fn run(
         v3_durable_hard_reject_pct,
         v3_durable_backlog_soft_reject_per_sec,
         v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_backlog_signal_min_queue_pct,
         v3_durable_admission_controller_enabled,
         v3_durable_admission_sustain_ticks,
         v3_durable_admission_recover_ticks,
         v3_durable_admission_soft_fsync_p99_us,
         v3_durable_admission_hard_fsync_p99_us,
+        v3_durable_admission_fsync_presignal_pct,
         v3_durable_admission_level: Arc::new(AtomicU64::new(0)),
         v3_durable_admission_level_per_lane: new_lane_u64_counters(),
         v3_durable_admission_soft_trip_total: Arc::new(AtomicU64::new(0)),
@@ -2484,7 +2500,9 @@ async fn run_v3_loss_monitor(state: AppState) {
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
-        let confirm_oldest_age_us_per_lane = state.v3_confirm_store.oldest_volatile_age_us_per_lane(now_ns);
+        let confirm_oldest_age_us_per_lane = state
+            .v3_confirm_store
+            .oldest_volatile_age_us_per_lane(now_ns);
         let mut confirm_oldest_age_us_max = 0u64;
         for (lane_id, age_us) in confirm_oldest_age_us_per_lane.iter().copied().enumerate() {
             confirm_oldest_age_us_max = confirm_oldest_age_us_max.max(age_us);
@@ -2574,23 +2592,29 @@ async fn run_v3_loss_monitor(state: AppState) {
                     lane_queue_pct_now >= state.v3_durable_soft_reject_pct as f64;
                 let queue_pressure_hard =
                     lane_queue_pct_now >= state.v3_durable_hard_reject_pct as f64;
-                let backlog_pressure_soft =
-                    lane_growth >= state.v3_durable_backlog_soft_reject_per_sec;
-                let backlog_pressure_hard =
-                    lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
+                let backlog_signal_enabled =
+                    lane_queue_pct_now >= state.v3_durable_backlog_signal_min_queue_pct;
+                let backlog_pressure_soft = backlog_signal_enabled
+                    && lane_growth >= state.v3_durable_backlog_soft_reject_per_sec;
+                let backlog_pressure_hard = backlog_signal_enabled
+                    && lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
                 let fsync_soft = lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us;
                 let fsync_hard = lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us;
+                let fsync_presignal_queue_pct = (state.v3_durable_soft_reject_pct as f64
+                    * state.v3_durable_admission_fsync_presignal_pct)
+                    .clamp(0.0, 100.0);
+                let fsync_presignal_backlog = ((state.v3_durable_backlog_soft_reject_per_sec
+                    as f64)
+                    * state.v3_durable_admission_fsync_presignal_pct)
+                    .round()
+                    .max(0.0) as i64;
                 let hard_signal = queue_pressure_hard
                     || backlog_pressure_hard
                     || ((queue_pressure_soft || backlog_pressure_soft) && fsync_hard);
                 let soft_signal = queue_pressure_soft
                     || backlog_pressure_soft
-                    || ((lane_queue_pct_now >= (state.v3_durable_soft_reject_pct as f64 * 0.7)
-                        || lane_growth
-                            >= state
-                                .v3_durable_backlog_soft_reject_per_sec
-                                .saturating_mul(7)
-                                / 10)
+                    || ((lane_queue_pct_now >= fsync_presignal_queue_pct
+                        || (backlog_signal_enabled && lane_growth >= fsync_presignal_backlog))
                         && fsync_soft);
 
                 if queue_pressure_soft {

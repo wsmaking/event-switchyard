@@ -188,6 +188,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_hard_reject_pct = state.v3_durable_hard_reject_pct;
     let v3_durable_backlog_soft_reject_per_sec = state.v3_durable_backlog_soft_reject_per_sec;
     let v3_durable_backlog_hard_reject_per_sec = state.v3_durable_backlog_hard_reject_per_sec;
+    let v3_durable_backlog_signal_min_queue_pct = state.v3_durable_backlog_signal_min_queue_pct;
+    let v3_durable_admission_fsync_presignal_pct = state.v3_durable_admission_fsync_presignal_pct;
     let v3_durable_wal_append_p50 = state.v3_durable_wal_append_hist.snapshot().percentile(50.0);
     let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
     let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
@@ -277,9 +279,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_confirm_store_size = state.v3_confirm_store.total_size();
     let v3_confirm_store_lanes = state.v3_confirm_store.lane_count_metric();
     let v3_confirm_lane_skew_pct = state.v3_confirm_store.lane_skew_pct();
-    let v3_confirm_oldest_inflight_us = state
-        .v3_confirm_oldest_inflight_us
-        .load(Ordering::Relaxed);
+    let v3_confirm_oldest_inflight_us = state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
     let v3_confirm_oldest_inflight_us_per_lane = state
         .v3_confirm_oldest_inflight_us_per_lane
         .iter()
@@ -845,6 +845,12 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_durable_backlog_hard_reject_per_sec /v3 durable backlog growth hard reject threshold per second\n\
          # TYPE gateway_v3_durable_backlog_hard_reject_per_sec gauge\n\
          gateway_v3_durable_backlog_hard_reject_per_sec {}\n\
+         # HELP gateway_v3_durable_backlog_signal_min_queue_pct /v3 minimum queue utilization pct required before backlog-growth signals are considered\n\
+         # TYPE gateway_v3_durable_backlog_signal_min_queue_pct gauge\n\
+         gateway_v3_durable_backlog_signal_min_queue_pct {}\n\
+         # HELP gateway_v3_durable_admission_fsync_presignal_pct /v3 ratio used for fsync-coupled presignal thresholds against soft limits\n\
+         # TYPE gateway_v3_durable_admission_fsync_presignal_pct gauge\n\
+         gateway_v3_durable_admission_fsync_presignal_pct {}\n\
          # HELP gateway_v3_durable_confirm_soft_reject_age_us /v3 durable confirm oldest-age soft reject threshold (us, 0=disabled)\n\
          # TYPE gateway_v3_durable_confirm_soft_reject_age_us gauge\n\
          gateway_v3_durable_confirm_soft_reject_age_us {}\n\
@@ -872,6 +878,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_hard_reject_pct,
         v3_durable_backlog_soft_reject_per_sec,
         v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_backlog_signal_min_queue_pct,
+        v3_durable_admission_fsync_presignal_pct,
         v3_durable_confirm_soft_reject_age_us,
         v3_durable_confirm_hard_reject_age_us,
         v3_durable_confirm_age_soft_reject_total,
