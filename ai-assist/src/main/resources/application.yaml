@@ -15,5 +15,12 @@ ai:
   assist:
     llm:
       enabled: ${AI_ASSIST_LLM_ENABLED:false}
+      provider: ${AI_ASSIST_LLM_PROVIDER:none}
       timeout-ms: ${AI_ASSIST_LLM_TIMEOUT_MS:600}
-
+      openai:
+        api-key: ${AI_ASSIST_OPENAI_API_KEY:}
+        endpoint: ${AI_ASSIST_OPENAI_ENDPOINT:https://api.openai.com/v1/chat/completions}
+        model: ${AI_ASSIST_OPENAI_MODEL:gpt-4o-mini}
+        temperature: ${AI_ASSIST_OPENAI_TEMPERATURE:0.1}
+        max-tokens: ${AI_ASSIST_OPENAI_MAX_TOKENS:120}
+        http-timeout-ms: ${AI_ASSIST_OPENAI_HTTP_TIMEOUT_MS:1200}

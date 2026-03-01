@@ -33,6 +33,7 @@ p95_ms="$(read_value latency_p95_ms)"
 error_rate="$(read_value error_rate)"
 fallback_rate="$(read_value fallback_rate)"
 llm_enabled="$(read_value llm_enabled)"
+llm_provider="$(read_value llm_provider)"
 
 pass_p95="$(awk -v v="$p95_ms" -v t="$TARGET_P95_MS" 'BEGIN{print (v+0<=t+0)?1:0}')"
 pass_error="$(awk -v v="$error_rate" -v t="$TARGET_ERROR_RATE_MAX" 'BEGIN{print (v+0<=t+0)?1:0}')"
@@ -50,6 +51,7 @@ target_error_rate_max=${TARGET_ERROR_RATE_MAX}
 target_fallback_rate_max=${TARGET_FALLBACK_RATE_MAX}
 enforce_fallback_gate=${ENFORCE_FALLBACK_GATE}
 llm_enabled=${llm_enabled}
+llm_provider=${llm_provider}
 observed_p95_ms=${p95_ms}
 observed_error_rate=${error_rate}
 observed_fallback_rate=${fallback_rate}
@@ -60,7 +62,7 @@ gate_pass=${pass_all}
 probe_summary=${probe_summary}
 EOF
 
-echo "[summary] p95_ms=${p95_ms} error_rate=${error_rate} fallback_rate=${fallback_rate} llm_enabled=${llm_enabled}"
+echo "[summary] p95_ms=${p95_ms} error_rate=${error_rate} fallback_rate=${fallback_rate} llm_enabled=${llm_enabled} llm_provider=${llm_provider}"
 echo "[artifacts] ${SUMMARY_OUT}"
 
 if [[ "$pass_all" == "1" ]]; then

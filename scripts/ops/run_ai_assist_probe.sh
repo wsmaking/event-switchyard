@@ -9,6 +9,14 @@ REQUEST_TIMEOUT_SEC="${REQUEST_TIMEOUT_SEC:-2}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/var/results}"
 BUILD_JAR="${BUILD_JAR:-1}"
 AI_ASSIST_LLM_ENABLED="${AI_ASSIST_LLM_ENABLED:-false}"
+AI_ASSIST_LLM_PROVIDER="${AI_ASSIST_LLM_PROVIDER:-none}"
+AI_ASSIST_LLM_TIMEOUT_MS="${AI_ASSIST_LLM_TIMEOUT_MS:-600}"
+AI_ASSIST_OPENAI_API_KEY="${AI_ASSIST_OPENAI_API_KEY:-}"
+AI_ASSIST_OPENAI_ENDPOINT="${AI_ASSIST_OPENAI_ENDPOINT:-https://api.openai.com/v1/chat/completions}"
+AI_ASSIST_OPENAI_MODEL="${AI_ASSIST_OPENAI_MODEL:-gpt-4o-mini}"
+AI_ASSIST_OPENAI_TEMPERATURE="${AI_ASSIST_OPENAI_TEMPERATURE:-0.1}"
+AI_ASSIST_OPENAI_MAX_TOKENS="${AI_ASSIST_OPENAI_MAX_TOKENS:-120}"
+AI_ASSIST_OPENAI_HTTP_TIMEOUT_MS="${AI_ASSIST_OPENAI_HTTP_TIMEOUT_MS:-1200}"
 
 mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR"
@@ -40,6 +48,14 @@ trap cleanup EXIT
 echo "[start] ai-assist on ${HOST}:${PORT}"
 AI_ASSIST_PORT="$PORT" \
 AI_ASSIST_LLM_ENABLED="$AI_ASSIST_LLM_ENABLED" \
+AI_ASSIST_LLM_PROVIDER="$AI_ASSIST_LLM_PROVIDER" \
+AI_ASSIST_LLM_TIMEOUT_MS="$AI_ASSIST_LLM_TIMEOUT_MS" \
+AI_ASSIST_OPENAI_API_KEY="$AI_ASSIST_OPENAI_API_KEY" \
+AI_ASSIST_OPENAI_ENDPOINT="$AI_ASSIST_OPENAI_ENDPOINT" \
+AI_ASSIST_OPENAI_MODEL="$AI_ASSIST_OPENAI_MODEL" \
+AI_ASSIST_OPENAI_TEMPERATURE="$AI_ASSIST_OPENAI_TEMPERATURE" \
+AI_ASSIST_OPENAI_MAX_TOKENS="$AI_ASSIST_OPENAI_MAX_TOKENS" \
+AI_ASSIST_OPENAI_HTTP_TIMEOUT_MS="$AI_ASSIST_OPENAI_HTTP_TIMEOUT_MS" \
 java -jar "$JAR_PATH" >"$LOG_FILE" 2>&1 &
 AI_ASSIST_PID=$!
 
@@ -55,7 +71,7 @@ if ! curl -sS "http://${HOST}:${PORT}/actuator/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[load] requests=${REQUESTS} timeout=${REQUEST_TIMEOUT_SEC}s llm_enabled=${AI_ASSIST_LLM_ENABLED}"
+echo "[load] requests=${REQUESTS} timeout=${REQUEST_TIMEOUT_SEC}s llm_enabled=${AI_ASSIST_LLM_ENABLED} llm_provider=${AI_ASSIST_LLM_PROVIDER}"
 python3 - "$HOST" "$PORT" "$REQUESTS" "$REQUEST_TIMEOUT_SEC" >"$LOAD_OUT" <<'PY'
 import json
 import sys
@@ -159,6 +175,7 @@ port=${PORT}
 requests=${REQUESTS}
 request_timeout_sec=${REQUEST_TIMEOUT_SEC}
 llm_enabled=${AI_ASSIST_LLM_ENABLED}
+llm_provider=${AI_ASSIST_LLM_PROVIDER}
 success_total=${success_total}
 error_total=${error_total}
 error_rate=${error_rate}
@@ -179,4 +196,3 @@ EOF
 echo "[summary] success=${success_total}/${REQUESTS} error_rate=${error_rate} p95_ms=${latency_p95_ms} fallback_rate=${fallback_rate}"
 echo "[artifacts] summary=${SUMMARY_OUT}"
 echo "[artifacts] metrics=${METRICS_OUT}"
-

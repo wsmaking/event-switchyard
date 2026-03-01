@@ -42,6 +42,7 @@
 - `scripts/ops/run_v3_capacity_sweep.sh`
 - `scripts/ops/run_ai_assist_probe.sh`
 - `scripts/ops/check_ai_assist_gate.sh`
+- `scripts/ops/check_ai_assist_ab_gate.sh`
 - `scripts/ops/open_loop_v3_load.py`
 - `scripts/ops/open_loop_v3_tcp_load.py`
 - `scripts/ops/perf_noise_guard.sh`
@@ -143,6 +144,12 @@ REQUESTS=300 scripts/ops/run_ai_assist_probe.sh
 ### AI Assist gate
 ```bash
 REQUESTS=300 scripts/ops/check_ai_assist_gate.sh
+```
+
+### AI Assist A/B gate（rule-only vs llm）
+```bash
+REQUESTS=300 LLM_PROVIDER_B=openai ENFORCE_LLM_USED_GATE=0 \
+scripts/ops/check_ai_assist_ab_gate.sh
 ```
 
 ## 主要メトリクス（v3）
