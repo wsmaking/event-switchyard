@@ -41,7 +41,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, error::TrySendError};
+use tokio::sync::mpsc::{
+    Receiver, Sender, UnboundedReceiver,
+    error::{TryRecvError, TrySendError},
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -1201,6 +1204,10 @@ pub(super) struct AppState {
     pub(super) v3_durable_worker_batch_max: usize,
     pub(super) v3_durable_worker_batch_wait_min_us: u64,
     pub(super) v3_durable_worker_batch_wait_us: u64,
+    pub(super) v3_durable_worker_receipt_timeout_us: u64,
+    pub(super) v3_durable_worker_max_inflight_receipts: usize,
+    pub(super) v3_durable_worker_inflight_soft_cap_pct: u64,
+    pub(super) v3_durable_worker_inflight_hard_cap_pct: u64,
     pub(super) v3_durable_worker_batch_adaptive: bool,
     pub(super) v3_durable_worker_batch_adaptive_low_util_pct: f64,
     pub(super) v3_durable_worker_batch_adaptive_high_util_pct: f64,
@@ -1212,11 +1219,13 @@ pub(super) struct AppState {
     pub(super) v3_durable_hard_reject_pct: u64,
     pub(super) v3_durable_backlog_soft_reject_per_sec: i64,
     pub(super) v3_durable_backlog_hard_reject_per_sec: i64,
+    pub(super) v3_durable_backlog_signal_min_queue_pct: f64,
     pub(super) v3_durable_admission_controller_enabled: bool,
     pub(super) v3_durable_admission_sustain_ticks: u64,
     pub(super) v3_durable_admission_recover_ticks: u64,
     pub(super) v3_durable_admission_soft_fsync_p99_us: u64,
     pub(super) v3_durable_admission_hard_fsync_p99_us: u64,
+    pub(super) v3_durable_admission_fsync_presignal_pct: f64,
     pub(super) v3_durable_admission_level: Arc<AtomicU64>,
     pub(super) v3_durable_admission_level_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_admission_soft_trip_total: Arc<AtomicU64>,
@@ -1234,6 +1243,9 @@ pub(super) struct AppState {
     pub(super) v3_durable_backpressure_hard_total: Arc<AtomicU64>,
     pub(super) v3_durable_backpressure_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_write_error_total: Arc<AtomicU64>,
+    pub(super) v3_durable_receipt_timeout_total: Arc<AtomicU64>,
+    pub(super) v3_durable_receipt_inflight: Arc<AtomicU64>,
+    pub(super) v3_durable_receipt_inflight_max: Arc<AtomicU64>,
     pub(super) v3_soft_reject_pct: u64,
     pub(super) v3_hard_reject_pct: u64,
     pub(super) v3_kill_reject_pct: u64,
@@ -1626,7 +1638,7 @@ pub async fn run(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(12);
+        .unwrap_or(24);
     let mut v3_durable_worker_batch_min = std::env::var("V3_DURABLE_WORKER_BATCH_MIN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -1639,6 +1651,38 @@ pub async fn run(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(80);
+    let v3_durable_worker_receipt_timeout_us =
+        std::env::var("V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20_000_000);
+    let v3_durable_worker_max_inflight_receipts = std::env::var(
+        "V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS",
+    )
+    .ok()
+    .and_then(|v| v.parse::<usize>().ok())
+    .filter(|v| *v > 0)
+    .unwrap_or(v3_durable_worker_batch_max.saturating_mul(2048).max(8192));
+    let mut v3_durable_worker_inflight_soft_cap_pct = std::env::var(
+        "V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT",
+    )
+    .ok()
+    .and_then(|v| v.parse::<u64>().ok())
+    .map(|v| v.clamp(1, 100))
+    .unwrap_or(50);
+    let mut v3_durable_worker_inflight_hard_cap_pct = std::env::var(
+        "V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT",
+    )
+    .ok()
+    .and_then(|v| v.parse::<u64>().ok())
+    .map(|v| v.clamp(1, 100))
+    .unwrap_or(25);
+    if v3_durable_worker_inflight_hard_cap_pct > v3_durable_worker_inflight_soft_cap_pct {
+        v3_durable_worker_inflight_hard_cap_pct = v3_durable_worker_inflight_soft_cap_pct;
+    }
+    if v3_durable_worker_inflight_soft_cap_pct == 0 {
+        v3_durable_worker_inflight_soft_cap_pct = 1;
+    }
     let mut v3_durable_worker_batch_wait_min_us =
         std::env::var("V3_DURABLE_WORKER_BATCH_WAIT_MIN_US")
             .ok()
@@ -1718,6 +1762,12 @@ pub async fn run(
         v3_durable_backlog_hard_reject_per_sec =
             v3_durable_backlog_soft_reject_per_sec.saturating_add(1);
     }
+    let v3_durable_backlog_signal_min_queue_pct =
+        std::env::var("V3_DURABLE_BACKLOG_SIGNAL_MIN_QUEUE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(20.0)
+            .clamp(0.0, 100.0);
     let v3_durable_admission_controller_enabled =
         parse_bool_env("V3_DURABLE_ADMISSION_CONTROLLER_ENABLED").unwrap_or(true);
     let v3_durable_admission_sustain_ticks = std::env::var("V3_DURABLE_ADMISSION_SUSTAIN_TICKS")
@@ -1746,6 +1796,12 @@ pub async fn run(
         v3_durable_admission_hard_fsync_p99_us =
             v3_durable_admission_soft_fsync_p99_us.saturating_add(1);
     }
+    let v3_durable_admission_fsync_presignal_pct =
+        std::env::var("V3_DURABLE_ADMISSION_FSYNC_PRESIGNAL_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.5, 1.0);
     let v3_loss_gap_timeout_ms = std::env::var("V3_LOSS_GAP_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1981,6 +2037,10 @@ pub async fn run(
         v3_durable_worker_batch_max,
         v3_durable_worker_batch_wait_min_us,
         v3_durable_worker_batch_wait_us,
+        v3_durable_worker_receipt_timeout_us,
+        v3_durable_worker_max_inflight_receipts,
+        v3_durable_worker_inflight_soft_cap_pct,
+        v3_durable_worker_inflight_hard_cap_pct,
         v3_durable_worker_batch_adaptive,
         v3_durable_worker_batch_adaptive_low_util_pct,
         v3_durable_worker_batch_adaptive_high_util_pct,
@@ -1992,11 +2052,13 @@ pub async fn run(
         v3_durable_hard_reject_pct,
         v3_durable_backlog_soft_reject_per_sec,
         v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_backlog_signal_min_queue_pct,
         v3_durable_admission_controller_enabled,
         v3_durable_admission_sustain_ticks,
         v3_durable_admission_recover_ticks,
         v3_durable_admission_soft_fsync_p99_us,
         v3_durable_admission_hard_fsync_p99_us,
+        v3_durable_admission_fsync_presignal_pct,
         v3_durable_admission_level: Arc::new(AtomicU64::new(0)),
         v3_durable_admission_level_per_lane: new_lane_u64_counters(),
         v3_durable_admission_soft_trip_total: Arc::new(AtomicU64::new(0)),
@@ -2014,6 +2076,9 @@ pub async fn run(
         v3_durable_backpressure_hard_total: Arc::new(AtomicU64::new(0)),
         v3_durable_backpressure_hard_total_per_lane: new_lane_u64_counters(),
         v3_durable_write_error_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_receipt_timeout_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_receipt_inflight: Arc::new(AtomicU64::new(0)),
+        v3_durable_receipt_inflight_max: Arc::new(AtomicU64::new(0)),
         v3_soft_reject_pct,
         v3_hard_reject_pct,
         v3_kill_reject_pct,
@@ -2112,12 +2177,25 @@ pub async fn run(
         });
     }
 
-    let v3_http_enable = parse_bool_env("V3_HTTP_ENABLE").unwrap_or(true);
+    let v3_http_enable = parse_bool_env("V3_HTTP_ENABLE");
+    let v3_http_ingress_enable = parse_bool_env("V3_HTTP_INGRESS_ENABLE")
+        .or(v3_http_enable)
+        .unwrap_or(true);
+    let v3_http_confirm_enable = parse_bool_env("V3_HTTP_CONFIRM_ENABLE")
+        .or(v3_http_enable)
+        .unwrap_or(true);
     let v3_tcp_enable = parse_bool_env("V3_TCP_ENABLE").unwrap_or(false);
     let v3_tcp_port = std::env::var("V3_TCP_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(0);
+    info!(
+        v3_http_ingress_enable = v3_http_ingress_enable,
+        v3_http_confirm_enable = v3_http_confirm_enable,
+        v3_tcp_enable = v3_tcp_enable,
+        v3_tcp_port = v3_tcp_port,
+        "v3 ingress transport settings"
+    );
     if v3_tcp_enable && v3_tcp_port > 0 {
         let v3_tcp_state = state.clone();
         tokio::spawn(async move {
@@ -2150,16 +2228,17 @@ pub async fn run(
         .route("/audit/anchor", get(handle_audit_anchor))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics));
-    let app = if v3_http_enable {
-        app_base.route("/v3/orders", post(handle_order_v3)).route(
+    let mut app = app_base;
+    if v3_http_ingress_enable {
+        app = app.route("/v3/orders", post(handle_order_v3));
+    }
+    if v3_http_confirm_enable {
+        app = app.route(
             "/v3/orders/{session_id}/{session_seq}",
             get(handle_get_order_v3),
-        )
-    } else {
-        app_base
+        );
     }
-    .layer(CorsLayer::permissive())
-    .with_state(state);
+    let app = app.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
@@ -2330,6 +2409,14 @@ async fn run_v3_durable_worker(
     batch_wait_us: u64,
     batch_adaptive_cfg: V3DurableWorkerBatchAdaptiveConfig,
 ) {
+    #[derive(Clone, Copy)]
+    struct DurableResolution {
+        durable_done_ns: u64,
+        fdatasync_ns: u64,
+        reject_reason: &'static str,
+        timed_out: bool,
+    }
+
     let fallback_batch_max = batch_max.max(1);
     let fallback_batch_wait = Duration::from_micros(batch_wait_us.max(1));
     let lane_audit_log = state
@@ -2337,131 +2424,283 @@ async fn run_v3_durable_worker(
         .get(lane_id)
         .cloned()
         .unwrap_or_else(|| Arc::clone(&state.audit_log));
+    let receipt_timeout = Duration::from_micros(state.v3_durable_worker_receipt_timeout_us.max(1));
+    let max_inflight_receipts = state
+        .v3_durable_worker_max_inflight_receipts
+        .max(fallback_batch_max);
+    let inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
+    let inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
+    let mut ingress_closed = false;
+    let mut inflight = futures::stream::FuturesUnordered::new();
+    use futures::{FutureExt, StreamExt};
+
+    let apply_outcome = |task: V3DurableTask, outcome: DurableResolution| {
+        if outcome.timed_out {
+            state
+                .v3_durable_receipt_timeout_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if outcome.fdatasync_ns > 0 {
+            state.v3_durable_wal_fsync_hist.record(outcome.fdatasync_ns / 1_000);
+            if let Some(hist) = state.v3_durable_wal_fsync_hist_per_lane.get(lane_id) {
+                hist.record(outcome.fdatasync_ns / 1_000);
+            }
+        }
+
+        let now_ns = gateway_core::now_nanos();
+        if outcome.durable_done_ns > 0 {
+            state
+                .v3_confirm_store
+                .mark_durable_accepted(&task.session_id, task.session_seq, now_ns);
+            state
+                .v3_durable_accepted_total
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            state.v3_confirm_store.mark_durable_rejected(
+                &task.session_id,
+                task.session_seq,
+                outcome.reject_reason,
+                now_ns,
+            );
+            state
+                .v3_durable_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .v3_durable_write_error_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let elapsed_us = now_ns.saturating_sub(task.received_at_ns) / 1_000;
+        state.v3_durable_confirm_hist.record(elapsed_us);
+    };
+
     loop {
-        let Some(first) = rx.recv().await else {
-            break;
-        };
-        let lane_util_pct = state.v3_durable_ingress.lane_utilization_pct(lane_id);
-        let lane_backlog_growth_per_sec = state
-            .v3_durable_backlog_growth_per_sec_per_lane
+        let worker_loop_t0 = gateway_core::now_nanos();
+        let mut progressed = false;
+
+        let mut drained = 0usize;
+        let drain_budget = fallback_batch_max.saturating_mul(4).max(64);
+        while drained < drain_budget {
+            match inflight.next().now_or_never() {
+                Some(Some((task, outcome))) => {
+                    apply_outcome(task, outcome);
+                    drained += 1;
+                    progressed = true;
+                }
+                Some(None) | None => break,
+            }
+        }
+
+        state
+            .v3_durable_receipt_inflight
+            .store(inflight.len() as u64, Ordering::Relaxed);
+        state
+            .v3_durable_receipt_inflight_max
+            .fetch_max(inflight.len() as u64, Ordering::Relaxed);
+
+        let lane_level = state
+            .v3_durable_admission_level_per_lane
             .get(lane_id)
             .map(|v| v.load(Ordering::Relaxed))
             .unwrap_or(0);
-        let lane_fsync_p99_us = state
-            .v3_durable_wal_fsync_hist_per_lane
-            .get(lane_id)
-            .map(|hist| hist.snapshot().percentile(99.0))
-            .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
-        let util_ratio = (lane_util_pct / 100.0).clamp(0.0, 1.0);
-        let backlog_ratio = v3_pressure_ratio(
-            lane_backlog_growth_per_sec,
-            state.v3_durable_backlog_soft_reject_per_sec,
-            state.v3_durable_backlog_hard_reject_per_sec,
-        );
-        let fsync_ratio = v3_fsync_pressure_ratio(
-            lane_fsync_p99_us,
-            state.v3_durable_admission_soft_fsync_p99_us,
-            state.v3_durable_admission_hard_fsync_p99_us,
-        );
-        let lane_pressure_pct = ((util_ratio * 0.60 + backlog_ratio * 0.25 + fsync_ratio * 0.15)
-            * 100.0)
-            .clamp(0.0, 100.0);
-        let (target_batch_max, target_batch_wait) = if batch_adaptive_cfg.enabled {
-            batch_adaptive_cfg.target_for_pressure(lane_pressure_pct)
-        } else {
-            (fallback_batch_max, fallback_batch_wait)
+        let inflight_cap_pct = match lane_level {
+            2 => inflight_hard_cap_pct,
+            1 => inflight_soft_cap_pct,
+            _ => 100,
         };
-        let mut batch = Vec::with_capacity(target_batch_max.max(1));
-        batch.push(first);
-        if target_batch_max > 1 {
-            let deadline = tokio::time::Instant::now() + target_batch_wait;
-            while batch.len() < target_batch_max {
-                match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(task)) => batch.push(task),
-                    Ok(None) | Err(_) => break,
-                }
-            }
-        }
-        let worker_loop_t0 = gateway_core::now_nanos();
-        let mut pending = Vec::with_capacity(batch.len());
-        for task in batch {
-            state.v3_durable_ingress.on_processed_one(lane_id);
-            let append_t0 = gateway_core::now_nanos();
-            let event = AuditEvent {
-                event_type: "V3DurableAccepted".to_string(),
-                at: crate::audit::now_millis(),
-                account_id: task.session_id.clone(),
-                order_id: Some(format!("v3/{}/{}", task.session_id, task.session_seq)),
-                data: serde_json::json!({
-                    "sessionSeq": task.session_seq,
-                    "attemptId": format!("att_{}", task.attempt_seq),
-                }),
-            };
-            let append = lane_audit_log.append_with_durable_receipt(event, append_t0);
-            let append_elapsed_us = if append.timings.enqueue_done_ns >= append_t0 {
-                (append.timings.enqueue_done_ns - append_t0) / 1_000
-            } else {
-                gateway_core::now_nanos().saturating_sub(append_t0) / 1_000
-            };
-            state.v3_durable_wal_append_hist.record(append_elapsed_us);
-            pending.push((
-                task,
-                append.timings.durable_done_ns,
-                append.timings.fdatasync_ns,
-                append.durable_rx,
-            ));
-        }
+        let effective_max_inflight = (((max_inflight_receipts as u128)
+            .saturating_mul(inflight_cap_pct as u128)
+            / 100) as usize)
+            .max(fallback_batch_max)
+            .min(max_inflight_receipts);
 
-        // 先にbatch全体をWAL queueへ積み、後段でdurable receiptを回収する。
-        // enqueueとwaitを分離してgroup commitを効かせる。
-        for (task, durable_done_ns_hint, fdatasync_ns_hint, durable_rx) in pending {
-            let (durable_done_ns, fdatasync_ns, reject_reason) = if durable_done_ns_hint > 0 {
-                (durable_done_ns_hint, fdatasync_ns_hint, "")
-            } else if let Some(durable_rx) = durable_rx {
-                match durable_rx.await {
-                    Ok(receipt) if receipt.durable_done_ns > 0 => {
-                        (receipt.durable_done_ns, receipt.fdatasync_ns, "")
+        if inflight.len() >= effective_max_inflight {
+            if let Some((task, outcome)) = inflight.next().await {
+                apply_outcome(task, outcome);
+                progressed = true;
+            } else if ingress_closed {
+                break;
+            }
+        } else {
+            let mut first = None;
+            if !ingress_closed {
+                if progressed {
+                    match rx.try_recv() {
+                        Ok(task) => first = Some(task),
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => {
+                            ingress_closed = true;
+                        }
                     }
-                    Ok(_) => (0, 0, "WAL_DURABILITY_FAILED"),
-                    Err(_) => (0, 0, "WAL_DURABILITY_RECEIPT_CLOSED"),
-                }
-            } else {
-                (0, 0, "WAL_DURABILITY_ENQUEUE_FAILED")
-            };
-            if fdatasync_ns > 0 {
-                state.v3_durable_wal_fsync_hist.record(fdatasync_ns / 1_000);
-                if let Some(hist) = state.v3_durable_wal_fsync_hist_per_lane.get(lane_id) {
-                    hist.record(fdatasync_ns / 1_000);
+                } else if !inflight.is_empty() {
+                    tokio::select! {
+                        maybe_done = inflight.next() => {
+                            if let Some((task, outcome)) = maybe_done {
+                                apply_outcome(task, outcome);
+                                progressed = true;
+                            }
+                        }
+                        maybe_task = rx.recv() => {
+                            match maybe_task {
+                                Some(task) => {
+                                    first = Some(task);
+                                    progressed = true;
+                                }
+                                None => {
+                                    ingress_closed = true;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    match rx.recv().await {
+                        Some(task) => {
+                            first = Some(task);
+                            progressed = true;
+                        }
+                        None => {
+                            ingress_closed = true;
+                        }
+                    }
                 }
             }
 
-            let now_ns = gateway_core::now_nanos();
-            if durable_done_ns > 0 {
-                state.v3_confirm_store.mark_durable_accepted(
-                    &task.session_id,
-                    task.session_seq,
-                    now_ns,
+            if let Some(first) = first {
+                let lane_util_pct = state.v3_durable_ingress.lane_utilization_pct(lane_id);
+                let lane_backlog_growth_per_sec = state
+                    .v3_durable_backlog_growth_per_sec_per_lane
+                    .get(lane_id)
+                    .map(|v| v.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                let lane_fsync_p99_us = state
+                    .v3_durable_wal_fsync_hist_per_lane
+                    .get(lane_id)
+                    .map(|hist| hist.snapshot().percentile(99.0))
+                    .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
+                let util_ratio = (lane_util_pct / 100.0).clamp(0.0, 1.0);
+                let backlog_ratio = v3_pressure_ratio(
+                    lane_backlog_growth_per_sec,
+                    state.v3_durable_backlog_soft_reject_per_sec,
+                    state.v3_durable_backlog_hard_reject_per_sec,
                 );
-                state
-                    .v3_durable_accepted_total
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                state.v3_confirm_store.mark_durable_rejected(
-                    &task.session_id,
-                    task.session_seq,
-                    reject_reason,
-                    now_ns,
+                let fsync_ratio = v3_fsync_pressure_ratio(
+                    lane_fsync_p99_us,
+                    state.v3_durable_admission_soft_fsync_p99_us,
+                    state.v3_durable_admission_hard_fsync_p99_us,
                 );
-                state
-                    .v3_durable_rejected_total
-                    .fetch_add(1, Ordering::Relaxed);
-                state
-                    .v3_durable_write_error_total
-                    .fetch_add(1, Ordering::Relaxed);
+                let lane_pressure_pct =
+                    ((util_ratio * 0.60 + backlog_ratio * 0.25 + fsync_ratio * 0.15) * 100.0)
+                        .clamp(0.0, 100.0);
+                let (target_batch_max, target_batch_wait) = if batch_adaptive_cfg.enabled {
+                    batch_adaptive_cfg.target_for_pressure(lane_pressure_pct)
+                } else {
+                    (fallback_batch_max, fallback_batch_wait)
+                };
+                let mut batch = Vec::with_capacity(target_batch_max.max(1));
+                batch.push(first);
+                if target_batch_max > 1 {
+                    let deadline = tokio::time::Instant::now() + target_batch_wait;
+                    while batch.len() < target_batch_max {
+                        match tokio::time::timeout_at(deadline, rx.recv()).await {
+                            Ok(Some(task)) => batch.push(task),
+                            Ok(None) => {
+                                ingress_closed = true;
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                for task in batch {
+                    state.v3_durable_ingress.on_processed_one(lane_id);
+                    let append_t0 = gateway_core::now_nanos();
+                    let event = AuditEvent {
+                        event_type: "V3DurableAccepted".to_string(),
+                        at: crate::audit::now_millis(),
+                        account_id: task.session_id.clone(),
+                        order_id: Some(format!("v3/{}/{}", task.session_id, task.session_seq)),
+                        data: serde_json::json!({
+                            "sessionSeq": task.session_seq,
+                            "attemptId": format!("att_{}", task.attempt_seq),
+                        }),
+                    };
+                    let append = lane_audit_log.append_with_durable_receipt(event, append_t0);
+                    let append_elapsed_us = if append.timings.enqueue_done_ns >= append_t0 {
+                        (append.timings.enqueue_done_ns - append_t0) / 1_000
+                    } else {
+                        gateway_core::now_nanos().saturating_sub(append_t0) / 1_000
+                    };
+                    state.v3_durable_wal_append_hist.record(append_elapsed_us);
+
+                    if append.timings.durable_done_ns > 0 {
+                        apply_outcome(
+                            task,
+                            DurableResolution {
+                                durable_done_ns: append.timings.durable_done_ns,
+                                fdatasync_ns: append.timings.fdatasync_ns,
+                                reject_reason: "",
+                                timed_out: false,
+                            },
+                        );
+                        continue;
+                    }
+
+                    if let Some(durable_rx) = append.durable_rx {
+                        inflight.push(async move {
+                            let outcome = match tokio::time::timeout(receipt_timeout, durable_rx).await {
+                                Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => DurableResolution {
+                                    durable_done_ns: receipt.durable_done_ns,
+                                    fdatasync_ns: receipt.fdatasync_ns,
+                                    reject_reason: "",
+                                    timed_out: false,
+                                },
+                                Ok(Ok(_)) => DurableResolution {
+                                    durable_done_ns: 0,
+                                    fdatasync_ns: 0,
+                                    reject_reason: "WAL_DURABILITY_FAILED",
+                                    timed_out: false,
+                                },
+                                Ok(Err(_)) => DurableResolution {
+                                    durable_done_ns: 0,
+                                    fdatasync_ns: 0,
+                                    reject_reason: "WAL_DURABILITY_RECEIPT_CLOSED",
+                                    timed_out: false,
+                                },
+                                Err(_) => DurableResolution {
+                                    durable_done_ns: 0,
+                                    fdatasync_ns: 0,
+                                    reject_reason: "WAL_DURABILITY_RECEIPT_TIMEOUT",
+                                    timed_out: true,
+                                },
+                            };
+                            (task, outcome)
+                        });
+                    } else {
+                        apply_outcome(
+                            task,
+                            DurableResolution {
+                                durable_done_ns: 0,
+                                fdatasync_ns: 0,
+                                reject_reason: "WAL_DURABILITY_ENQUEUE_FAILED",
+                                timed_out: false,
+                            },
+                        );
+                    }
+                }
             }
-            let elapsed_us = now_ns.saturating_sub(task.received_at_ns) / 1_000;
-            state.v3_durable_confirm_hist.record(elapsed_us);
         }
+
+        state
+            .v3_durable_receipt_inflight
+            .store(inflight.len() as u64, Ordering::Relaxed);
+        state
+            .v3_durable_receipt_inflight_max
+            .fetch_max(inflight.len() as u64, Ordering::Relaxed);
+
+        if ingress_closed && inflight.is_empty() {
+            break;
+        }
+
         let worker_loop_elapsed_us =
             gateway_core::now_nanos().saturating_sub(worker_loop_t0) / 1_000;
         state
@@ -2469,6 +2708,10 @@ async fn run_v3_durable_worker(
             .record(worker_loop_elapsed_us);
         if let Some(hist) = state.v3_durable_worker_loop_hist_per_lane.get(lane_id) {
             hist.record(worker_loop_elapsed_us);
+        }
+
+        if !progressed {
+            tokio::task::yield_now().await;
         }
     }
 }
@@ -2484,7 +2727,9 @@ async fn run_v3_loss_monitor(state: AppState) {
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
-        let confirm_oldest_age_us_per_lane = state.v3_confirm_store.oldest_volatile_age_us_per_lane(now_ns);
+        let confirm_oldest_age_us_per_lane = state
+            .v3_confirm_store
+            .oldest_volatile_age_us_per_lane(now_ns);
         let mut confirm_oldest_age_us_max = 0u64;
         for (lane_id, age_us) in confirm_oldest_age_us_per_lane.iter().copied().enumerate() {
             confirm_oldest_age_us_max = confirm_oldest_age_us_max.max(age_us);
@@ -2574,23 +2819,29 @@ async fn run_v3_loss_monitor(state: AppState) {
                     lane_queue_pct_now >= state.v3_durable_soft_reject_pct as f64;
                 let queue_pressure_hard =
                     lane_queue_pct_now >= state.v3_durable_hard_reject_pct as f64;
-                let backlog_pressure_soft =
-                    lane_growth >= state.v3_durable_backlog_soft_reject_per_sec;
-                let backlog_pressure_hard =
-                    lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
+                let backlog_signal_enabled =
+                    lane_queue_pct_now >= state.v3_durable_backlog_signal_min_queue_pct;
+                let backlog_pressure_soft = backlog_signal_enabled
+                    && lane_growth >= state.v3_durable_backlog_soft_reject_per_sec;
+                let backlog_pressure_hard = backlog_signal_enabled
+                    && lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
                 let fsync_soft = lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us;
                 let fsync_hard = lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us;
+                let fsync_presignal_queue_pct = (state.v3_durable_soft_reject_pct as f64
+                    * state.v3_durable_admission_fsync_presignal_pct)
+                    .clamp(0.0, 100.0);
+                let fsync_presignal_backlog = ((state.v3_durable_backlog_soft_reject_per_sec
+                    as f64)
+                    * state.v3_durable_admission_fsync_presignal_pct)
+                    .round()
+                    .max(0.0) as i64;
                 let hard_signal = queue_pressure_hard
                     || backlog_pressure_hard
                     || ((queue_pressure_soft || backlog_pressure_soft) && fsync_hard);
                 let soft_signal = queue_pressure_soft
                     || backlog_pressure_soft
-                    || ((lane_queue_pct_now >= (state.v3_durable_soft_reject_pct as f64 * 0.7)
-                        || lane_growth
-                            >= state
-                                .v3_durable_backlog_soft_reject_per_sec
-                                .saturating_mul(7)
-                                / 10)
+                    || ((lane_queue_pct_now >= fsync_presignal_queue_pct
+                        || (backlog_signal_enabled && lane_growth >= fsync_presignal_backlog))
                         && fsync_soft);
 
                 if queue_pressure_soft {

@@ -117,6 +117,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_durable_backlog_growth_per_sec
         .load(Ordering::Relaxed);
     let v3_durable_write_error_total = state.v3_durable_write_error_total.load(Ordering::Relaxed);
+    let v3_durable_receipt_timeout_total = state
+        .v3_durable_receipt_timeout_total
+        .load(Ordering::Relaxed);
+    let v3_durable_receipt_inflight = state.v3_durable_receipt_inflight.load(Ordering::Relaxed);
+    let v3_durable_receipt_inflight_max =
+        state.v3_durable_receipt_inflight_max.load(Ordering::Relaxed);
+    let v3_durable_worker_receipt_timeout_us = state.v3_durable_worker_receipt_timeout_us;
+    let v3_durable_worker_max_inflight_receipts = state.v3_durable_worker_max_inflight_receipts;
+    let v3_durable_worker_inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
+    let v3_durable_worker_inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
     let v3_durable_backpressure_soft_total = state
         .v3_durable_backpressure_soft_total
         .load(Ordering::Relaxed);
@@ -188,6 +198,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_hard_reject_pct = state.v3_durable_hard_reject_pct;
     let v3_durable_backlog_soft_reject_per_sec = state.v3_durable_backlog_soft_reject_per_sec;
     let v3_durable_backlog_hard_reject_per_sec = state.v3_durable_backlog_hard_reject_per_sec;
+    let v3_durable_backlog_signal_min_queue_pct = state.v3_durable_backlog_signal_min_queue_pct;
+    let v3_durable_admission_fsync_presignal_pct = state.v3_durable_admission_fsync_presignal_pct;
     let v3_durable_wal_append_p50 = state.v3_durable_wal_append_hist.snapshot().percentile(50.0);
     let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
     let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
@@ -277,9 +289,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_confirm_store_size = state.v3_confirm_store.total_size();
     let v3_confirm_store_lanes = state.v3_confirm_store.lane_count_metric();
     let v3_confirm_lane_skew_pct = state.v3_confirm_store.lane_skew_pct();
-    let v3_confirm_oldest_inflight_us = state
-        .v3_confirm_oldest_inflight_us
-        .load(Ordering::Relaxed);
+    let v3_confirm_oldest_inflight_us = state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
     let v3_confirm_oldest_inflight_us_per_lane = state
         .v3_confirm_oldest_inflight_us_per_lane
         .iter()
@@ -803,6 +813,27 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         "# HELP gateway_v3_durable_write_error_total Total /v3 durable write/receipt errors\n\
          # TYPE gateway_v3_durable_write_error_total counter\n\
          gateway_v3_durable_write_error_total {}\n\
+         # HELP gateway_v3_durable_receipt_timeout_total Total /v3 durable receipt timeout events inside durable worker\n\
+         # TYPE gateway_v3_durable_receipt_timeout_total counter\n\
+         gateway_v3_durable_receipt_timeout_total {}\n\
+         # HELP gateway_v3_durable_worker_receipt_timeout_us Configured /v3 durable receipt timeout in durable worker (microseconds)\n\
+         # TYPE gateway_v3_durable_worker_receipt_timeout_us gauge\n\
+         gateway_v3_durable_worker_receipt_timeout_us {}\n\
+         # HELP gateway_v3_durable_worker_max_inflight_receipts Configured max in-flight durable receipts per worker\n\
+         # TYPE gateway_v3_durable_worker_max_inflight_receipts gauge\n\
+         gateway_v3_durable_worker_max_inflight_receipts {}\n\
+         # HELP gateway_v3_durable_worker_inflight_soft_cap_pct In-flight receipt cap percentage applied when durable admission level is soft\n\
+         # TYPE gateway_v3_durable_worker_inflight_soft_cap_pct gauge\n\
+         gateway_v3_durable_worker_inflight_soft_cap_pct {}\n\
+         # HELP gateway_v3_durable_worker_inflight_hard_cap_pct In-flight receipt cap percentage applied when durable admission level is hard\n\
+         # TYPE gateway_v3_durable_worker_inflight_hard_cap_pct gauge\n\
+         gateway_v3_durable_worker_inflight_hard_cap_pct {}\n\
+         # HELP gateway_v3_durable_receipt_inflight Current in-flight durable receipts inside worker\n\
+         # TYPE gateway_v3_durable_receipt_inflight gauge\n\
+         gateway_v3_durable_receipt_inflight {}\n\
+         # HELP gateway_v3_durable_receipt_inflight_max Max in-flight durable receipts observed since process start\n\
+         # TYPE gateway_v3_durable_receipt_inflight_max gauge\n\
+         gateway_v3_durable_receipt_inflight_max {}\n\
          # HELP gateway_v3_durable_backpressure_soft_total Total /v3 soft rejects triggered by durable backpressure\n\
          # TYPE gateway_v3_durable_backpressure_soft_total counter\n\
          gateway_v3_durable_backpressure_soft_total {}\n\
@@ -845,6 +876,12 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_durable_backlog_hard_reject_per_sec /v3 durable backlog growth hard reject threshold per second\n\
          # TYPE gateway_v3_durable_backlog_hard_reject_per_sec gauge\n\
          gateway_v3_durable_backlog_hard_reject_per_sec {}\n\
+         # HELP gateway_v3_durable_backlog_signal_min_queue_pct /v3 minimum queue utilization pct required before backlog-growth signals are considered\n\
+         # TYPE gateway_v3_durable_backlog_signal_min_queue_pct gauge\n\
+         gateway_v3_durable_backlog_signal_min_queue_pct {}\n\
+         # HELP gateway_v3_durable_admission_fsync_presignal_pct /v3 ratio used for fsync-coupled presignal thresholds against soft limits\n\
+         # TYPE gateway_v3_durable_admission_fsync_presignal_pct gauge\n\
+         gateway_v3_durable_admission_fsync_presignal_pct {}\n\
          # HELP gateway_v3_durable_confirm_soft_reject_age_us /v3 durable confirm oldest-age soft reject threshold (us, 0=disabled)\n\
          # TYPE gateway_v3_durable_confirm_soft_reject_age_us gauge\n\
          gateway_v3_durable_confirm_soft_reject_age_us {}\n\
@@ -858,6 +895,13 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_v3_durable_confirm_age_hard_reject_total counter\n\
          gateway_v3_durable_confirm_age_hard_reject_total {}\n",
         v3_durable_write_error_total,
+        v3_durable_receipt_timeout_total,
+        v3_durable_worker_receipt_timeout_us,
+        v3_durable_worker_max_inflight_receipts,
+        v3_durable_worker_inflight_soft_cap_pct,
+        v3_durable_worker_inflight_hard_cap_pct,
+        v3_durable_receipt_inflight,
+        v3_durable_receipt_inflight_max,
         v3_durable_backpressure_soft_total,
         v3_durable_backpressure_hard_total,
         v3_durable_admission_controller_enabled,
@@ -872,6 +916,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_hard_reject_pct,
         v3_durable_backlog_soft_reject_per_sec,
         v3_durable_backlog_hard_reject_per_sec,
+        v3_durable_backlog_signal_min_queue_pct,
+        v3_durable_admission_fsync_presignal_pct,
         v3_durable_confirm_soft_reject_age_us,
         v3_durable_confirm_hard_reject_age_us,
         v3_durable_confirm_age_soft_reject_total,
