@@ -10,6 +10,7 @@
 ## 正本ドキュメント
 - 契約: `docs/ops/contract_draft.md`
 - 現行可視化: `docs/ops/current_design_visualization.md`
+- 最新実測集約: `docs/ops/current_design_visualization.md` の `2.2.11 最新実測集約（単一正本）`
 - durable設計: `docs/ops/durable_path_design.md`
 - durable可視化: `docs/ops/durable_path_visualization.md`
 - 進捗: `docs/ops/phase_progress.md`
@@ -33,12 +34,14 @@
 - `scripts/ops/check_v3_stable_gate.sh`
 - `scripts/ops/check_v3_absolute_gate.sh`
 - `scripts/ops/check_v3_capability_gate.sh`
+- `scripts/ops/check_v3_durable_tail_gate.sh`
 - `scripts/ops/run_v3_absolute_gate_loop.sh`
 - `scripts/ops/run_v3_open_loop_probe.sh`
 - `scripts/ops/run_v3_phase2_compare.sh`
 - `scripts/ops/run_v3_phase2_compare_when_quiet.sh`
 - `scripts/ops/run_v3_capacity_sweep.sh`
 - `scripts/ops/open_loop_v3_load.py`
+- `scripts/ops/open_loop_v3_tcp_load.py`
 - `scripts/ops/perf_noise_guard.sh`
 - `scripts/ops/wrk_gateway_rust.sh`
 - `scripts/ops/wrk_orders.lua`
@@ -89,7 +92,10 @@ curl -sS http://127.0.0.1:29001/metrics
 - 返却: `202 VOLATILE_ACCEPT`
 - 水位制御: SOFT/HARD/KILL（`429/503/kill`）
 - 異常時: `LOSS_SUSPECT` を残し、`session -> shard -> global` 昇格
-- `V3_HTTP_ENABLE=false` で `/v3/orders` を無効化し、RESTを管理系だけに分離可能
+- 入口分離:
+  - `V3_HTTP_INGRESS_ENABLE=false` で HTTP受注を無効化
+  - `V3_HTTP_CONFIRM_ENABLE=true` で confirm照会は HTTP 維持可能
+  - `V3_TCP_ENABLE=true` + `V3_TCP_PORT=<port>` で v3 TCP受注を有効化
 
 ## よく使う検証コマンド
 ### local strict gate（Linux未確保時）

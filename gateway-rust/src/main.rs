@@ -84,17 +84,36 @@ async fn main() -> anyhow::Result<()> {
     let tcp_port = config.tcp_port;
     let idempotency_ttl_sec = config.idempotency_ttl_sec;
 
-    tokio::select! {
-        result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec, Some(durable_rx)) => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "HTTP server exited with error");
-                return Err(e.into());
-            }
+    if tcp_port == 0 {
+        let result = server::http::run(
+            http_port,
+            http_engine,
+            http_order_store,
+            http_sse_hub,
+            http_audit_log,
+            http_bus,
+            outbox_enabled,
+            idempotency_ttl_sec,
+            Some(durable_rx),
+        )
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e, "HTTP server exited with error");
+            return Err(e.into());
         }
-        result = server::tcp::run(tcp_port, tcp_engine) => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "TCP server exited with error");
-                return Err(e.into());
+    } else {
+        tokio::select! {
+            result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec, Some(durable_rx)) => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "HTTP server exited with error");
+                    return Err(e.into());
+                }
+            }
+            result = server::tcp::run(tcp_port, tcp_engine) => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "TCP server exited with error");
+                    return Err(e.into());
+                }
             }
         }
     }
