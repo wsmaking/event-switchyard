@@ -27,6 +27,11 @@ TARGET_OFFERED_RPS_RATIO_MIN="${TARGET_OFFERED_RPS_RATIO_MIN:-0.99}"
 TARGET_DROPPED_OFFER_RATIO_MAX="${TARGET_DROPPED_OFFER_RATIO_MAX:-0.001}"
 TARGET_UNSENT_TOTAL_MAX="${TARGET_UNSENT_TOTAL_MAX:-0}"
 TARGET_STRICT_LANE_TOPOLOGY="${TARGET_STRICT_LANE_TOPOLOGY:-1}"
+TARGET_STRICT_PER_LANE_CHECKS="${TARGET_STRICT_PER_LANE_CHECKS:-1}"
+TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX="${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX:-3.50}"
+TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX="${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX:-0.40}"
+WARN_DURABLE_INFLIGHT_SKEW_RATIO="${WARN_DURABLE_INFLIGHT_SKEW_RATIO:-2.50}"
+WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE="${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE:-0.30}"
 ENFORCE_GATE="${ENFORCE_GATE:-0}"
 
 # Raised preset by default (can be overridden via env).
@@ -320,6 +325,34 @@ server_durable_backlog_hard_reject_per_sec="$(metric_value gateway_v3_durable_ba
 server_durable_backlog_signal_min_queue_pct="$(metric_value gateway_v3_durable_backlog_signal_min_queue_pct)"
 server_durable_lanes="$(metric_value gateway_v3_durable_lanes)"
 server_confirm_store_lanes="$(metric_value gateway_v3_confirm_store_lanes)"
+server_durable_worker_max_inflight_receipts="$(metric_value gateway_v3_durable_worker_max_inflight_receipts)"
+server_durable_worker_max_inflight_receipts_global="$(metric_value gateway_v3_durable_worker_max_inflight_receipts_global)"
+server_durable_receipt_inflight_max="$(metric_value gateway_v3_durable_receipt_inflight_max)"
+
+lane_stats="$(awk '
+/^gateway_v3_durable_receipt_inflight_max_per_lane\{lane=\"[0-9]+\"\} /{
+  v=$2+0;
+  if (count==0 || v>max) max=v;
+  if (count==0 || v<min) min=v;
+  sum+=v;
+  count++;
+}
+END{
+  if (count==0) {
+    printf "0 0 0 0 1.000000 0.000000";
+    exit;
+  }
+  avg=sum/count;
+  skew=(avg>0)?max/avg:1;
+  share=(sum>0)?max/sum:0;
+  printf "%d %.6f %.6f %.6f %.6f %.6f", count, max, min, avg, skew, share;
+}' "$METRICS_OUT")"
+read -r server_durable_receipt_inflight_lanes_observed \
+  server_durable_receipt_inflight_max_lane_max \
+  server_durable_receipt_inflight_max_lane_min \
+  server_durable_receipt_inflight_max_lane_avg \
+  server_durable_receipt_inflight_skew_ratio \
+  server_durable_receipt_inflight_hot_lane_share <<<"$lane_stats"
 
 completed_rps="${completed_rps:-0}"
 offered_rps="${offered_rps:-0}"
@@ -332,6 +365,15 @@ server_loss_suspect_total="${server_loss_suspect_total:-0}"
 server_durable_confirm_p99_us="${server_durable_confirm_p99_us:-0}"
 server_durable_lanes="${server_durable_lanes:-0}"
 server_confirm_store_lanes="${server_confirm_store_lanes:-0}"
+server_durable_worker_max_inflight_receipts="${server_durable_worker_max_inflight_receipts:-0}"
+server_durable_worker_max_inflight_receipts_global="${server_durable_worker_max_inflight_receipts_global:-0}"
+server_durable_receipt_inflight_max="${server_durable_receipt_inflight_max:-0}"
+server_durable_receipt_inflight_lanes_observed="${server_durable_receipt_inflight_lanes_observed:-0}"
+server_durable_receipt_inflight_max_lane_max="${server_durable_receipt_inflight_max_lane_max:-0}"
+server_durable_receipt_inflight_max_lane_min="${server_durable_receipt_inflight_max_lane_min:-0}"
+server_durable_receipt_inflight_max_lane_avg="${server_durable_receipt_inflight_max_lane_avg:-0}"
+server_durable_receipt_inflight_skew_ratio="${server_durable_receipt_inflight_skew_ratio:-1}"
+server_durable_receipt_inflight_hot_lane_share="${server_durable_receipt_inflight_hot_lane_share:-0}"
 
 offered_rps_ratio="$(awk -v o="$offered_rps" -v t="$TARGET_RPS" 'BEGIN{if (t+0<=0) {print 0} else {printf "%.6f", (o+0)/(t+0)}}')"
 pass_completed_rps="$(awk -v v="$completed_rps" -v t="$TARGET_COMPLETED_RPS" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
@@ -346,7 +388,15 @@ pass_offered_ratio="$(awk -v v="$offered_rps_ratio" -v t="$TARGET_OFFERED_RPS_RA
 pass_drop_ratio="$(awk -v v="$drop_ratio" -v t="$TARGET_DROPPED_OFFER_RATIO_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_unsent="$(awk -v v="$unsent_total" -v t="$TARGET_UNSENT_TOTAL_MAX" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_lane_topology="$(awk -v strict="$TARGET_STRICT_LANE_TOPOLOGY" -v d="$server_durable_lanes" -v c="$server_confirm_store_lanes" 'BEGIN{if (strict+0<=0) print 1; else print ((d+0)>0 && (d+0)==(c+0)) ? 1 : 0}')"
-overall_pass=$((pass_completed_rps & pass_ack & pass_ack_accepted & pass_rate & pass_durable_confirm & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent & pass_lane_topology))
+pass_lane_coverage="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v obs="$server_durable_receipt_inflight_lanes_observed" -v lanes="$server_durable_lanes" 'BEGIN{if (strict+0<=0) print 1; else if ((obs+0)<=0) print 0; else if ((lanes+0)>0 && (obs+0)!=(lanes+0)) print 0; else print 1}')"
+pass_lane_inflight_cap="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v m="$server_durable_receipt_inflight_max_lane_max" -v cap="$server_durable_worker_max_inflight_receipts" 'BEGIN{if (strict+0<=0) print 1; else if ((cap+0)<=0) print 0; else print ((m+0)<=(cap+0))?1:0}')"
+pass_global_inflight_cap="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v m="$server_durable_receipt_inflight_max" -v cap="$server_durable_worker_max_inflight_receipts_global" 'BEGIN{if (strict+0<=0) print 1; else if ((cap+0)<=0) print 0; else print ((m+0)<=(cap+0))?1:0}')"
+pass_lane_inflight_skew="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v v="$server_durable_receipt_inflight_skew_ratio" -v t="$TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX" 'BEGIN{if (strict+0<=0) print 1; else print (v+0<=t+0)?1:0}')"
+pass_lane_hot_lane_share="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v v="$server_durable_receipt_inflight_hot_lane_share" -v t="$TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX" 'BEGIN{if (strict+0<=0) print 1; else print (v+0<=t+0)?1:0}')"
+pass_lane_checks=$((pass_lane_coverage & pass_lane_inflight_cap & pass_global_inflight_cap & pass_lane_inflight_skew & pass_lane_hot_lane_share))
+warn_lane_inflight_skew="$(awk -v v="$server_durable_receipt_inflight_skew_ratio" -v t="$WARN_DURABLE_INFLIGHT_SKEW_RATIO" 'BEGIN{print (v+0>t+0)?1:0}')"
+warn_lane_hot_lane_share="$(awk -v v="$server_durable_receipt_inflight_hot_lane_share" -v t="$WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE" 'BEGIN{print (v+0>t+0)?1:0}')"
+overall_pass=$((pass_completed_rps & pass_ack & pass_ack_accepted & pass_rate & pass_durable_confirm & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent & pass_lane_topology & pass_lane_checks))
 
 cat >"$SUMMARY_OUT" <<EOF
 v3_open_loop_probe
@@ -366,6 +416,11 @@ target_offered_rps_ratio_min=${TARGET_OFFERED_RPS_RATIO_MIN}
 target_dropped_offer_ratio_max=${TARGET_DROPPED_OFFER_RATIO_MAX}
 target_unsent_total_max=${TARGET_UNSENT_TOTAL_MAX}
 target_strict_lane_topology=${TARGET_STRICT_LANE_TOPOLOGY}
+target_strict_per_lane_checks=${TARGET_STRICT_PER_LANE_CHECKS}
+target_durable_inflight_skew_ratio_max=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}
+target_durable_inflight_hot_lane_share_max=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}
+warn_durable_inflight_skew_ratio=${WARN_DURABLE_INFLIGHT_SKEW_RATIO}
+warn_durable_inflight_hot_lane_share=${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE}
 ingress_transport=${V3_INGRESS_TRANSPORT}
 v3_http_ingress_enable=${V3_HTTP_INGRESS_ENABLE}
 v3_http_confirm_enable=${V3_HTTP_CONFIRM_ENABLE}
@@ -451,6 +506,15 @@ server_durable_backlog_hard_reject_per_sec=${server_durable_backlog_hard_reject_
 server_durable_backlog_signal_min_queue_pct=${server_durable_backlog_signal_min_queue_pct}
 server_durable_lanes=${server_durable_lanes}
 server_confirm_store_lanes=${server_confirm_store_lanes}
+server_durable_worker_max_inflight_receipts=${server_durable_worker_max_inflight_receipts}
+server_durable_worker_max_inflight_receipts_global=${server_durable_worker_max_inflight_receipts_global}
+server_durable_receipt_inflight_max=${server_durable_receipt_inflight_max}
+server_durable_receipt_inflight_lanes_observed=${server_durable_receipt_inflight_lanes_observed}
+server_durable_receipt_inflight_max_lane_max=${server_durable_receipt_inflight_max_lane_max}
+server_durable_receipt_inflight_max_lane_min=${server_durable_receipt_inflight_max_lane_min}
+server_durable_receipt_inflight_max_lane_avg=${server_durable_receipt_inflight_max_lane_avg}
+server_durable_receipt_inflight_skew_ratio=${server_durable_receipt_inflight_skew_ratio}
+server_durable_receipt_inflight_hot_lane_share=${server_durable_receipt_inflight_hot_lane_share}
 gate_pass_completed_rps=${pass_completed_rps}
 gate_pass_live_ack_p99=${pass_ack}
 gate_pass_live_ack_accepted_p99=${pass_ack_accepted}
@@ -463,6 +527,14 @@ gate_pass_offered_rps_ratio=${pass_offered_ratio}
 gate_pass_dropped_offer_ratio=${pass_drop_ratio}
 gate_pass_unsent_total=${pass_unsent}
 gate_pass_lane_topology=${pass_lane_topology}
+gate_pass_lane_coverage=${pass_lane_coverage}
+gate_pass_lane_inflight_cap=${pass_lane_inflight_cap}
+gate_pass_global_inflight_cap=${pass_global_inflight_cap}
+gate_pass_lane_inflight_skew=${pass_lane_inflight_skew}
+gate_pass_lane_hot_lane_share=${pass_lane_hot_lane_share}
+gate_pass_lane_checks=${pass_lane_checks}
+warn_lane_inflight_skew=${warn_lane_inflight_skew}
+warn_lane_hot_lane_share=${warn_lane_hot_lane_share}
 gate_pass=${overall_pass}
 load_out=${LOAD_OUT}
 metrics_out=${METRICS_OUT}
@@ -471,12 +543,19 @@ EOF
 
 echo "[summary] offered_rps=${offered_rps} completed_rps=${completed_rps} client_accepted_rate=${client_accepted_rate} server_accepted_rate=${server_accepted_rate}"
 echo "[summary] server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}"
-echo "[gate] completed_rps>=${TARGET_COMPLETED_RPS}:${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology}"
+echo "[gate] completed_rps>=${TARGET_COMPLETED_RPS}:${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
+echo "[lane] observed_lanes=${server_durable_receipt_inflight_lanes_observed} skew_ratio=${server_durable_receipt_inflight_skew_ratio} hot_lane_share=${server_durable_receipt_inflight_hot_lane_share} max_lane_inflight=${server_durable_receipt_inflight_max_lane_max} max_global_inflight=${server_durable_receipt_inflight_max}"
+echo "[gate_lane] coverage:${pass_lane_coverage} lane_cap:${pass_lane_inflight_cap} global_cap:${pass_global_inflight_cap} skew<=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}:${pass_lane_inflight_skew} hot_share<=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}:${pass_lane_hot_lane_share}"
 echo "[warn] durable_confirm_p99>${WARN_DURABLE_CONFIRM_P99_US}:${warn_durable_confirm} observed=${server_durable_confirm_p99_us}"
+echo "[warn_lane] skew>${WARN_DURABLE_INFLIGHT_SKEW_RATIO}:${warn_lane_inflight_skew} hot_lane_share>${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE}:${warn_lane_hot_lane_share}"
 echo "[gate_supply] offered_rps_ratio>=${TARGET_OFFERED_RPS_RATIO_MIN}:${pass_offered_ratio} dropped_offer_ratio<=${TARGET_DROPPED_OFFER_RATIO_MAX}:${pass_drop_ratio} unsent_total<=${TARGET_UNSENT_TOTAL_MAX}:${pass_unsent}"
 echo "[artifacts] summary=${SUMMARY_OUT}"
 echo "[artifacts] load=${LOAD_OUT}"
 echo "[artifacts] metrics=${METRICS_OUT}"
+
+if [[ "$warn_lane_inflight_skew" == "1" || "$warn_lane_hot_lane_share" == "1" ]]; then
+  echo "[alert_lane_skew] WARN: skew_ratio=${server_durable_receipt_inflight_skew_ratio} (max=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}, warn=${WARN_DURABLE_INFLIGHT_SKEW_RATIO}) hot_lane_share=${server_durable_receipt_inflight_hot_lane_share} (max=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}, warn=${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE})"
+fi
 
 if [[ "$ENFORCE_GATE" == "1" && "$overall_pass" != "1" ]]; then
   echo "FAIL: open-loop strict gate not satisfied"

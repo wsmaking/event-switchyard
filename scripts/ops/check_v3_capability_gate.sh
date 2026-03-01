@@ -17,6 +17,11 @@ TARGET_OFFERED_RPS_RATIO_MIN="${TARGET_OFFERED_RPS_RATIO_MIN:-0.99}"
 TARGET_DROPPED_OFFER_RATIO_MAX="${TARGET_DROPPED_OFFER_RATIO_MAX:-0.001}"
 TARGET_UNSENT_TOTAL_MAX="${TARGET_UNSENT_TOTAL_MAX:-0}"
 TARGET_STRICT_LANE_TOPOLOGY="${TARGET_STRICT_LANE_TOPOLOGY:-1}"
+TARGET_STRICT_PER_LANE_CHECKS="${TARGET_STRICT_PER_LANE_CHECKS:-1}"
+TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX="${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX:-3.50}"
+TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX="${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX:-0.40}"
+WARN_DURABLE_INFLIGHT_SKEW_RATIO="${WARN_DURABLE_INFLIGHT_SKEW_RATIO:-2.50}"
+WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE="${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE:-0.30}"
 V3_INGRESS_TRANSPORT="${V3_INGRESS_TRANSPORT:-tcp}"
 V3_TCP_PORT="${V3_TCP_PORT:-39001}"
 
@@ -72,6 +77,11 @@ TARGET_OFFERED_RPS_RATIO_MIN="$TARGET_OFFERED_RPS_RATIO_MIN" \
 TARGET_DROPPED_OFFER_RATIO_MAX="$TARGET_DROPPED_OFFER_RATIO_MAX" \
 TARGET_UNSENT_TOTAL_MAX="$TARGET_UNSENT_TOTAL_MAX" \
 TARGET_STRICT_LANE_TOPOLOGY="$TARGET_STRICT_LANE_TOPOLOGY" \
+TARGET_STRICT_PER_LANE_CHECKS="$TARGET_STRICT_PER_LANE_CHECKS" \
+TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX="$TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX" \
+TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX="$TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX" \
+WARN_DURABLE_INFLIGHT_SKEW_RATIO="$WARN_DURABLE_INFLIGHT_SKEW_RATIO" \
+WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE="$WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE" \
 V3_INGRESS_TRANSPORT="$V3_INGRESS_TRANSPORT" \
 V3_TCP_PORT="$V3_TCP_PORT" \
 LOAD_WORKERS="$LOAD_WORKERS" \
@@ -135,6 +145,17 @@ pass_loss="$(read_value gate_pass_loss_suspect)"
 pass_offered="$(read_value gate_pass_offered_rps_ratio)"
 pass_drop="$(read_value gate_pass_dropped_offer_ratio)"
 pass_unsent="$(read_value gate_pass_unsent_total)"
+pass_lane_topology="$(read_value gate_pass_lane_topology)"
+pass_lane_checks="$(read_value gate_pass_lane_checks)"
+pass_lane_coverage="$(read_value gate_pass_lane_coverage)"
+pass_lane_inflight_cap="$(read_value gate_pass_lane_inflight_cap)"
+pass_global_inflight_cap="$(read_value gate_pass_global_inflight_cap)"
+pass_lane_inflight_skew="$(read_value gate_pass_lane_inflight_skew)"
+pass_lane_hot_lane_share="$(read_value gate_pass_lane_hot_lane_share)"
+warn_lane_inflight_skew="$(read_value warn_lane_inflight_skew)"
+warn_lane_hot_lane_share="$(read_value warn_lane_hot_lane_share)"
+lane_skew_ratio="$(read_value server_durable_receipt_inflight_skew_ratio)"
+lane_hot_lane_share="$(read_value server_durable_receipt_inflight_hot_lane_share)"
 pass_all="$(read_value gate_pass)"
 
 cat >"$SUMMARY_OUT" <<EOF
@@ -150,6 +171,12 @@ target_loss_suspect_max=${TARGET_LOSS_SUSPECT_MAX}
 target_offered_rps_ratio_min=${TARGET_OFFERED_RPS_RATIO_MIN}
 target_dropped_offer_ratio_max=${TARGET_DROPPED_OFFER_RATIO_MAX}
 target_unsent_total_max=${TARGET_UNSENT_TOTAL_MAX}
+target_strict_lane_topology=${TARGET_STRICT_LANE_TOPOLOGY}
+target_strict_per_lane_checks=${TARGET_STRICT_PER_LANE_CHECKS}
+target_durable_inflight_skew_ratio_max=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}
+target_durable_inflight_hot_lane_share_max=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}
+warn_durable_inflight_skew_ratio=${WARN_DURABLE_INFLIGHT_SKEW_RATIO}
+warn_durable_inflight_hot_lane_share=${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE}
 duration_sec=${DURATION}
 load_workers=${LOAD_WORKERS}
 load_accounts=${LOAD_ACCOUNTS}
@@ -161,6 +188,8 @@ observed_ack_p99_us=${ack_p99_us}
 observed_offered_rps_ratio=${offered_rps_ratio}
 observed_dropped_offer_ratio=${dropped_offer_ratio}
 observed_unsent_total=${unsent_total}
+observed_lane_inflight_skew_ratio=${lane_skew_ratio}
+observed_lane_inflight_hot_lane_share=${lane_hot_lane_share}
 observed_rejected_killed_total=${rejected_killed_total}
 observed_loss_suspect_total=${loss_suspect_total}
 gate_pass_rps=${pass_rps}
@@ -172,6 +201,15 @@ gate_pass_loss_suspect=${pass_loss}
 gate_pass_offered_rps_ratio=${pass_offered}
 gate_pass_dropped_offer_ratio=${pass_drop}
 gate_pass_unsent_total=${pass_unsent}
+gate_pass_lane_topology=${pass_lane_topology}
+gate_pass_lane_checks=${pass_lane_checks}
+gate_pass_lane_coverage=${pass_lane_coverage}
+gate_pass_lane_inflight_cap=${pass_lane_inflight_cap}
+gate_pass_global_inflight_cap=${pass_global_inflight_cap}
+gate_pass_lane_inflight_skew=${pass_lane_inflight_skew}
+gate_pass_lane_hot_lane_share=${pass_lane_hot_lane_share}
+warn_lane_inflight_skew=${warn_lane_inflight_skew}
+warn_lane_hot_lane_share=${warn_lane_hot_lane_share}
 gate_pass=${pass_all}
 openloop_summary=${openloop_summary}
 EOF
@@ -195,4 +233,11 @@ echo "  - loss_suspect_total <= ${TARGET_LOSS_SUSPECT_MAX}: ${pass_loss}"
 echo "  - offered_rps_ratio >= ${TARGET_OFFERED_RPS_RATIO_MIN}: ${pass_offered}"
 echo "  - dropped_offer_ratio <= ${TARGET_DROPPED_OFFER_RATIO_MAX}: ${pass_drop}"
 echo "  - unsent_total <= ${TARGET_UNSENT_TOTAL_MAX}: ${pass_unsent}"
+echo "  - lane_topology: ${pass_lane_topology}"
+echo "  - lane_checks: ${pass_lane_checks}"
+echo "    - lane_coverage: ${pass_lane_coverage}"
+echo "    - lane_inflight_cap: ${pass_lane_inflight_cap}"
+echo "    - global_inflight_cap: ${pass_global_inflight_cap}"
+echo "    - lane_inflight_skew <= ${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}: ${pass_lane_inflight_skew}"
+echo "    - lane_hot_lane_share <= ${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}: ${pass_lane_hot_lane_share}"
 exit 1
