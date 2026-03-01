@@ -14,3 +14,4 @@ rootProject.name = 'event-switchyard'
 include('app')
 include('gateway')
 include('backoffice')
+include('ai-assist')

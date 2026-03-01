@@ -1,0 +1,19 @@
+server:
+  port: ${AI_ASSIST_PORT:38080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+ai:
+  assist:
+    llm:
+      enabled: ${AI_ASSIST_LLM_ENABLED:false}
+      timeout-ms: ${AI_ASSIST_LLM_TIMEOUT_MS:600}
+

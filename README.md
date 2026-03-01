@@ -40,6 +40,8 @@
 - `scripts/ops/run_v3_phase2_compare.sh`
 - `scripts/ops/run_v3_phase2_compare_when_quiet.sh`
 - `scripts/ops/run_v3_capacity_sweep.sh`
+- `scripts/ops/run_ai_assist_probe.sh`
+- `scripts/ops/check_ai_assist_gate.sh`
 - `scripts/ops/open_loop_v3_load.py`
 - `scripts/ops/open_loop_v3_tcp_load.py`
 - `scripts/ops/perf_noise_guard.sh`
@@ -87,6 +89,11 @@ curl -sS http://127.0.0.1:29001/metrics
 - `GET /orders/client/{client_order_id}`
 - `POST /orders/{order_id}/cancel`
 
+### AI Assist（新規）
+- `POST /ai/risk-navigator/check`
+- health: `GET /actuator/health`
+- metrics: `GET /actuator/prometheus`
+
 ## v3 の制御要点
 - 同期境界: `parse -> risk -> try_enqueue -> response`
 - 返却: `202 VOLATILE_ACCEPT`
@@ -126,6 +133,16 @@ RUNS=5 WARMUP_RUNS=1 scripts/ops/run_v3_phase2_compare.sh
 ### open-loop probe
 ```bash
 TARGET_RPS=10000 DURATION=300 scripts/ops/run_v3_open_loop_probe.sh
+```
+
+### AI Assist probe
+```bash
+REQUESTS=300 scripts/ops/run_ai_assist_probe.sh
+```
+
+### AI Assist gate
+```bash
+REQUESTS=300 scripts/ops/check_ai_assist_gate.sh
 ```
 
 ## 主要メトリクス（v3）
