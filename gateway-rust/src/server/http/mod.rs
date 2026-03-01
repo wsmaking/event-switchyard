@@ -1206,6 +1206,7 @@ pub(super) struct AppState {
     pub(super) v3_durable_worker_batch_wait_us: u64,
     pub(super) v3_durable_worker_receipt_timeout_us: u64,
     pub(super) v3_durable_worker_max_inflight_receipts: usize,
+    pub(super) v3_durable_worker_max_inflight_receipts_global: usize,
     pub(super) v3_durable_worker_inflight_soft_cap_pct: u64,
     pub(super) v3_durable_worker_inflight_hard_cap_pct: u64,
     pub(super) v3_durable_worker_batch_adaptive: bool,
@@ -1244,6 +1245,8 @@ pub(super) struct AppState {
     pub(super) v3_durable_backpressure_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_write_error_total: Arc<AtomicU64>,
     pub(super) v3_durable_receipt_timeout_total: Arc<AtomicU64>,
+    pub(super) v3_durable_receipt_inflight_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_receipt_inflight_max_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_receipt_inflight: Arc<AtomicU64>,
     pub(super) v3_durable_receipt_inflight_max: Arc<AtomicU64>,
     pub(super) v3_soft_reject_pct: u64,
@@ -1656,27 +1659,34 @@ pub async fn run(
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20_000_000);
-    let v3_durable_worker_max_inflight_receipts = std::env::var(
-        "V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS",
-    )
-    .ok()
-    .and_then(|v| v.parse::<usize>().ok())
-    .filter(|v| *v > 0)
-    .unwrap_or(v3_durable_worker_batch_max.saturating_mul(2048).max(8192));
-    let mut v3_durable_worker_inflight_soft_cap_pct = std::env::var(
-        "V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT",
-    )
-    .ok()
-    .and_then(|v| v.parse::<u64>().ok())
-    .map(|v| v.clamp(1, 100))
-    .unwrap_or(50);
-    let mut v3_durable_worker_inflight_hard_cap_pct = std::env::var(
-        "V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT",
-    )
-    .ok()
-    .and_then(|v| v.parse::<u64>().ok())
-    .map(|v| v.clamp(1, 100))
-    .unwrap_or(25);
+    let v3_durable_worker_max_inflight_receipts =
+        std::env::var("V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(v3_durable_worker_batch_max.saturating_mul(2048).max(8192));
+    let v3_durable_worker_max_inflight_receipts_global =
+        std::env::var("V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS_GLOBAL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(
+                v3_durable_worker_max_inflight_receipts
+                    .saturating_mul(v3_durable_lane_count.max(1))
+                    .max(v3_durable_worker_max_inflight_receipts),
+            );
+    let mut v3_durable_worker_inflight_soft_cap_pct =
+        std::env::var("V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.clamp(1, 100))
+            .unwrap_or(50);
+    let mut v3_durable_worker_inflight_hard_cap_pct =
+        std::env::var("V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.clamp(1, 100))
+            .unwrap_or(25);
     if v3_durable_worker_inflight_hard_cap_pct > v3_durable_worker_inflight_soft_cap_pct {
         v3_durable_worker_inflight_hard_cap_pct = v3_durable_worker_inflight_soft_cap_pct;
     }
@@ -2039,6 +2049,7 @@ pub async fn run(
         v3_durable_worker_batch_wait_us,
         v3_durable_worker_receipt_timeout_us,
         v3_durable_worker_max_inflight_receipts,
+        v3_durable_worker_max_inflight_receipts_global,
         v3_durable_worker_inflight_soft_cap_pct,
         v3_durable_worker_inflight_hard_cap_pct,
         v3_durable_worker_batch_adaptive,
@@ -2077,6 +2088,8 @@ pub async fn run(
         v3_durable_backpressure_hard_total_per_lane: new_lane_u64_counters(),
         v3_durable_write_error_total: Arc::new(AtomicU64::new(0)),
         v3_durable_receipt_timeout_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_receipt_inflight_per_lane: new_lane_u64_counters(),
+        v3_durable_receipt_inflight_max_per_lane: new_lane_u64_counters(),
         v3_durable_receipt_inflight: Arc::new(AtomicU64::new(0)),
         v3_durable_receipt_inflight_max: Arc::new(AtomicU64::new(0)),
         v3_soft_reject_pct,
@@ -2428,6 +2441,7 @@ async fn run_v3_durable_worker(
     let max_inflight_receipts = state
         .v3_durable_worker_max_inflight_receipts
         .max(fallback_batch_max);
+    let max_inflight_receipts_global = state.v3_durable_worker_max_inflight_receipts_global.max(1);
     let inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
     let inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
     let mut ingress_closed = false;
@@ -2441,7 +2455,9 @@ async fn run_v3_durable_worker(
                 .fetch_add(1, Ordering::Relaxed);
         }
         if outcome.fdatasync_ns > 0 {
-            state.v3_durable_wal_fsync_hist.record(outcome.fdatasync_ns / 1_000);
+            state
+                .v3_durable_wal_fsync_hist
+                .record(outcome.fdatasync_ns / 1_000);
             if let Some(hist) = state.v3_durable_wal_fsync_hist_per_lane.get(lane_id) {
                 hist.record(outcome.fdatasync_ns / 1_000);
             }
@@ -2449,9 +2465,11 @@ async fn run_v3_durable_worker(
 
         let now_ns = gateway_core::now_nanos();
         if outcome.durable_done_ns > 0 {
-            state
-                .v3_confirm_store
-                .mark_durable_accepted(&task.session_id, task.session_seq, now_ns);
+            state.v3_confirm_store.mark_durable_accepted(
+                &task.session_id,
+                task.session_seq,
+                now_ns,
+            );
             state
                 .v3_durable_accepted_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -2472,6 +2490,26 @@ async fn run_v3_durable_worker(
         let elapsed_us = now_ns.saturating_sub(task.received_at_ns) / 1_000;
         state.v3_durable_confirm_hist.record(elapsed_us);
     };
+    let refresh_inflight_metrics = |lane_inflight: usize| -> usize {
+        if let Some(gauge) = state.v3_durable_receipt_inflight_per_lane.get(lane_id) {
+            gauge.store(lane_inflight as u64, Ordering::Relaxed);
+        }
+        if let Some(gauge) = state.v3_durable_receipt_inflight_max_per_lane.get(lane_id) {
+            gauge.fetch_max(lane_inflight as u64, Ordering::Relaxed);
+        }
+        let total_inflight = state
+            .v3_durable_receipt_inflight_per_lane
+            .iter()
+            .map(|v| v.load(Ordering::Relaxed))
+            .sum::<u64>() as usize;
+        state
+            .v3_durable_receipt_inflight
+            .store(total_inflight as u64, Ordering::Relaxed);
+        state
+            .v3_durable_receipt_inflight_max
+            .fetch_max(total_inflight as u64, Ordering::Relaxed);
+        total_inflight
+    };
 
     loop {
         let worker_loop_t0 = gateway_core::now_nanos();
@@ -2490,12 +2528,7 @@ async fn run_v3_durable_worker(
             }
         }
 
-        state
-            .v3_durable_receipt_inflight
-            .store(inflight.len() as u64, Ordering::Relaxed);
-        state
-            .v3_durable_receipt_inflight_max
-            .fetch_max(inflight.len() as u64, Ordering::Relaxed);
+        let total_inflight = refresh_inflight_metrics(inflight.len());
 
         let lane_level = state
             .v3_durable_admission_level_per_lane
@@ -2513,7 +2546,9 @@ async fn run_v3_durable_worker(
             .max(fallback_batch_max)
             .min(max_inflight_receipts);
 
-        if inflight.len() >= effective_max_inflight {
+        if inflight.len() >= effective_max_inflight
+            || total_inflight >= max_inflight_receipts_global
+        {
             if let Some((task, outcome)) = inflight.next().await {
                 apply_outcome(task, outcome);
                 progressed = true;
@@ -2595,6 +2630,11 @@ async fn run_v3_durable_worker(
                 } else {
                     (fallback_batch_max, fallback_batch_wait)
                 };
+                let lane_headroom = effective_max_inflight.saturating_sub(inflight.len());
+                let global_headroom = max_inflight_receipts_global.saturating_sub(total_inflight);
+                let target_batch_max = target_batch_max
+                    .min(lane_headroom.max(1))
+                    .min(global_headroom.max(1));
                 let mut batch = Vec::with_capacity(target_batch_max.max(1));
                 batch.push(first);
                 if target_batch_max > 1 {
@@ -2647,32 +2687,35 @@ async fn run_v3_durable_worker(
 
                     if let Some(durable_rx) = append.durable_rx {
                         inflight.push(async move {
-                            let outcome = match tokio::time::timeout(receipt_timeout, durable_rx).await {
-                                Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => DurableResolution {
-                                    durable_done_ns: receipt.durable_done_ns,
-                                    fdatasync_ns: receipt.fdatasync_ns,
-                                    reject_reason: "",
-                                    timed_out: false,
-                                },
-                                Ok(Ok(_)) => DurableResolution {
-                                    durable_done_ns: 0,
-                                    fdatasync_ns: 0,
-                                    reject_reason: "WAL_DURABILITY_FAILED",
-                                    timed_out: false,
-                                },
-                                Ok(Err(_)) => DurableResolution {
-                                    durable_done_ns: 0,
-                                    fdatasync_ns: 0,
-                                    reject_reason: "WAL_DURABILITY_RECEIPT_CLOSED",
-                                    timed_out: false,
-                                },
-                                Err(_) => DurableResolution {
-                                    durable_done_ns: 0,
-                                    fdatasync_ns: 0,
-                                    reject_reason: "WAL_DURABILITY_RECEIPT_TIMEOUT",
-                                    timed_out: true,
-                                },
-                            };
+                            let outcome =
+                                match tokio::time::timeout(receipt_timeout, durable_rx).await {
+                                    Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => {
+                                        DurableResolution {
+                                            durable_done_ns: receipt.durable_done_ns,
+                                            fdatasync_ns: receipt.fdatasync_ns,
+                                            reject_reason: "",
+                                            timed_out: false,
+                                        }
+                                    }
+                                    Ok(Ok(_)) => DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: 0,
+                                        reject_reason: "WAL_DURABILITY_FAILED",
+                                        timed_out: false,
+                                    },
+                                    Ok(Err(_)) => DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: 0,
+                                        reject_reason: "WAL_DURABILITY_RECEIPT_CLOSED",
+                                        timed_out: false,
+                                    },
+                                    Err(_) => DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: 0,
+                                        reject_reason: "WAL_DURABILITY_RECEIPT_TIMEOUT",
+                                        timed_out: true,
+                                    },
+                                };
                             (task, outcome)
                         });
                     } else {
@@ -2690,12 +2733,7 @@ async fn run_v3_durable_worker(
             }
         }
 
-        state
-            .v3_durable_receipt_inflight
-            .store(inflight.len() as u64, Ordering::Relaxed);
-        state
-            .v3_durable_receipt_inflight_max
-            .fetch_max(inflight.len() as u64, Ordering::Relaxed);
+        let _ = refresh_inflight_metrics(inflight.len());
 
         if ingress_closed && inflight.is_empty() {
             break;
