@@ -121,10 +121,23 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_durable_receipt_timeout_total
         .load(Ordering::Relaxed);
     let v3_durable_receipt_inflight = state.v3_durable_receipt_inflight.load(Ordering::Relaxed);
-    let v3_durable_receipt_inflight_max =
-        state.v3_durable_receipt_inflight_max.load(Ordering::Relaxed);
+    let v3_durable_receipt_inflight_max = state
+        .v3_durable_receipt_inflight_max
+        .load(Ordering::Relaxed);
+    let v3_durable_receipt_inflight_per_lane = state
+        .v3_durable_receipt_inflight_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_receipt_inflight_max_per_lane = state
+        .v3_durable_receipt_inflight_max_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
     let v3_durable_worker_receipt_timeout_us = state.v3_durable_worker_receipt_timeout_us;
     let v3_durable_worker_max_inflight_receipts = state.v3_durable_worker_max_inflight_receipts;
+    let v3_durable_worker_max_inflight_receipts_global =
+        state.v3_durable_worker_max_inflight_receipts_global;
     let v3_durable_worker_inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
     let v3_durable_worker_inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
     let v3_durable_backpressure_soft_total = state
@@ -819,19 +832,22 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_durable_worker_receipt_timeout_us Configured /v3 durable receipt timeout in durable worker (microseconds)\n\
          # TYPE gateway_v3_durable_worker_receipt_timeout_us gauge\n\
          gateway_v3_durable_worker_receipt_timeout_us {}\n\
-         # HELP gateway_v3_durable_worker_max_inflight_receipts Configured max in-flight durable receipts per worker\n\
+         # HELP gateway_v3_durable_worker_max_inflight_receipts Configured max in-flight durable receipts per durable lane worker\n\
          # TYPE gateway_v3_durable_worker_max_inflight_receipts gauge\n\
          gateway_v3_durable_worker_max_inflight_receipts {}\n\
+         # HELP gateway_v3_durable_worker_max_inflight_receipts_global Configured global max in-flight durable receipts across all lanes\n\
+         # TYPE gateway_v3_durable_worker_max_inflight_receipts_global gauge\n\
+         gateway_v3_durable_worker_max_inflight_receipts_global {}\n\
          # HELP gateway_v3_durable_worker_inflight_soft_cap_pct In-flight receipt cap percentage applied when durable admission level is soft\n\
          # TYPE gateway_v3_durable_worker_inflight_soft_cap_pct gauge\n\
          gateway_v3_durable_worker_inflight_soft_cap_pct {}\n\
          # HELP gateway_v3_durable_worker_inflight_hard_cap_pct In-flight receipt cap percentage applied when durable admission level is hard\n\
          # TYPE gateway_v3_durable_worker_inflight_hard_cap_pct gauge\n\
          gateway_v3_durable_worker_inflight_hard_cap_pct {}\n\
-         # HELP gateway_v3_durable_receipt_inflight Current in-flight durable receipts inside worker\n\
+         # HELP gateway_v3_durable_receipt_inflight Current total in-flight durable receipts across all lanes\n\
          # TYPE gateway_v3_durable_receipt_inflight gauge\n\
          gateway_v3_durable_receipt_inflight {}\n\
-         # HELP gateway_v3_durable_receipt_inflight_max Max in-flight durable receipts observed since process start\n\
+         # HELP gateway_v3_durable_receipt_inflight_max Max total in-flight durable receipts observed since process start\n\
          # TYPE gateway_v3_durable_receipt_inflight_max gauge\n\
          gateway_v3_durable_receipt_inflight_max {}\n\
          # HELP gateway_v3_durable_backpressure_soft_total Total /v3 soft rejects triggered by durable backpressure\n\
@@ -898,6 +914,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_receipt_timeout_total,
         v3_durable_worker_receipt_timeout_us,
         v3_durable_worker_max_inflight_receipts,
+        v3_durable_worker_max_inflight_receipts_global,
         v3_durable_worker_inflight_soft_cap_pct,
         v3_durable_worker_inflight_hard_cap_pct,
         v3_durable_receipt_inflight,
@@ -941,6 +958,26 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         snapshot.push_str(&format!(
             "gateway_v3_durable_queue_utilization_pct_per_lane{{lane=\"{}\"}} {}\n",
             lane, util_pct
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_receipt_inflight_per_lane Current in-flight durable receipts per lane\n\
+         # TYPE gateway_v3_durable_receipt_inflight_per_lane gauge\n",
+    );
+    for (lane, inflight) in v3_durable_receipt_inflight_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_receipt_inflight_per_lane{{lane=\"{}\"}} {}\n",
+            lane, inflight
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_receipt_inflight_max_per_lane Max in-flight durable receipts observed per lane since process start\n\
+         # TYPE gateway_v3_durable_receipt_inflight_max_per_lane gauge\n",
+    );
+    for (lane, inflight) in v3_durable_receipt_inflight_max_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_receipt_inflight_max_per_lane{{lane=\"{}\"}} {}\n",
+            lane, inflight
         ));
     }
     snapshot.push_str(
