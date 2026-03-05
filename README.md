@@ -57,6 +57,15 @@ cargo build --release
 cd ..
 ```
 
+補足:
+- 既定ビルドは Kafka 依存を含まない（`kafka-bus` feature OFF）。
+- Kafka 連携を有効化してビルドする場合のみ:
+```bash
+cd gateway-rust
+cargo build --release --features kafka-bus
+cd ..
+```
+
 ### 2. 起動（ローカル検証）
 ```bash
 GATEWAY_PORT=29001 \
