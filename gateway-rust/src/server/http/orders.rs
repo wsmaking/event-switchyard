@@ -584,7 +584,8 @@ pub(super) fn process_order_v3_hot_path(
         .get(durable_lane_id)
         .map(|v| v.load(Ordering::Relaxed))
         .unwrap_or(confirm_oldest_age_us_global);
-    let confirm_oldest_age_us = confirm_oldest_age_us_global.max(confirm_oldest_age_us_lane);
+    // Admission is lane-scoped: one degraded lane should not globally throttle healthy lanes.
+    let confirm_oldest_age_us = confirm_oldest_age_us_lane;
     let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
     if confirm_hard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_age_us {
         state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
@@ -647,13 +648,12 @@ pub(super) fn process_order_v3_hot_path(
         );
     }
     if state.v3_durable_admission_controller_enabled {
-        let durable_level_global = state.v3_durable_admission_level.load(Ordering::Relaxed);
-        let durable_level_lane = state
+        let durable_level = state
             .v3_durable_admission_level_per_lane
             .get(durable_lane_id)
             .map(|v| v.load(Ordering::Relaxed))
-            .unwrap_or(0);
-        match durable_level_global.max(durable_level_lane) {
+            .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
+        match durable_level {
             2 => {
                 state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
                 state
@@ -2462,6 +2462,9 @@ mod tests {
         let mut state = build_test_state();
         state.v3_durable_admission_controller_enabled = true;
         state.v3_durable_admission_level.store(1, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(1, Ordering::Relaxed);
+        }
 
         let account_id = "v3-durable-controller-soft-1";
         let req = request_with_client_id("cid_v3_durable_controller_soft");
@@ -2482,6 +2485,9 @@ mod tests {
         let mut state = build_test_state();
         state.v3_durable_admission_controller_enabled = true;
         state.v3_durable_admission_level.store(2, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(2, Ordering::Relaxed);
+        }
 
         let account_id = "v3-durable-controller-hard-1";
         let req = request_with_client_id("cid_v3_durable_controller_hard");
@@ -2558,6 +2564,81 @@ mod tests {
                 .v3_durable_confirm_age_hard_reject_total
                 .load(Ordering::Relaxed),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_does_not_soft_reject_when_only_global_confirm_age_is_high() {
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(6_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(1_000, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-global-only-soft";
+        let req = request_with_client_id("cid_v3_confirm_global_only_soft");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_global_only_soft")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "VOLATILE_ACCEPT");
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_soft_reject_total
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_does_not_reject_when_only_global_durable_controller_level_is_set() {
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(2, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(0, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-durable-controller-global-only";
+        let req = request_with_client_id("cid_v3_durable_controller_global_only");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_durable_controller_global_only")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "VOLATILE_ACCEPT");
+        assert_eq!(
+            state
+                .v3_durable_backpressure_soft_total
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .v3_durable_backpressure_hard_total
+                .load(Ordering::Relaxed),
+            0
         );
     }
 

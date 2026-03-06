@@ -6,20 +6,20 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
 #[cfg(feature = "kafka-bus")]
+use rdkafka::ClientConfig;
+#[cfg(feature = "kafka-bus")]
 use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 #[cfg(feature = "kafka-bus")]
-use rdkafka::ClientConfig;
+use std::sync::Mutex;
 #[cfg(feature = "kafka-bus")]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "kafka-bus")]
 use std::sync::mpsc;
-#[cfg(feature = "kafka-bus")]
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

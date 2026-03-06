@@ -49,7 +49,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::audit::AuditLog;
-use crate::audit::{AuditDurableNotification, AuditEvent};
+use crate::audit::{AuditAppendWithReceipt, AuditDurableNotification, AuditEvent};
 use crate::auth::JwtAuth;
 use crate::backpressure::BackpressureConfig;
 use crate::bus::BusPublisher;
@@ -1390,6 +1390,10 @@ fn v3_durable_lane_wal_path(base: &Path, lane_id: usize) -> PathBuf {
     PathBuf::from(format!("{}.v3.lane{}.log", base.display(), lane_id))
 }
 
+fn v3_durable_lane_replica_wal_path(lane_primary: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.replica", lane_primary.display()))
+}
+
 fn rebuild_v3_confirm_store_from_reader<R: BufRead>(
     confirm_store: &V3ConfirmStore,
     reader: R,
@@ -2283,6 +2287,17 @@ async fn handle_v3_tcp_connection(
     state: AppState,
 ) -> anyhow::Result<()> {
     socket.set_nodelay(true)?;
+    let auth_cache_enabled = parse_bool_env("V3_TCP_AUTH_CACHE_ENABLE").unwrap_or(true);
+    let auth_cache_capacity = std::env::var("V3_TCP_AUTH_CACHE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(256);
+    let mut auth_cache: HashMap<String, crate::auth::Principal> = if auth_cache_enabled {
+        HashMap::with_capacity(auth_cache_capacity.min(1024))
+    } else {
+        HashMap::new()
+    };
     let mut req = [0u8; V3_TCP_REQUEST_SIZE];
     loop {
         match socket.read_exact(&mut req).await {
@@ -2292,18 +2307,40 @@ async fn handle_v3_tcp_connection(
         }
         let t0 = gateway_core::now_nanos();
         let resp = match decode_v3_tcp_request(&req) {
-            Ok(decoded) => match authenticate_v3_tcp_token(&state, &decoded.jwt_token) {
-                Ok(principal) => {
-                    let (status, body) = process_order_v3_hot_path(
-                        &state,
-                        principal.session_id,
-                        decoded.order_req,
-                        t0,
-                    );
-                    encode_v3_tcp_response(status, &body)
+            Ok(decoded) => {
+                let principal = if auth_cache_enabled {
+                    if let Some(cached) = auth_cache.get(&decoded.jwt_token) {
+                        Ok(cached.clone())
+                    } else {
+                        match authenticate_v3_tcp_token(&state, &decoded.jwt_token) {
+                            Ok(principal) => {
+                                if auth_cache.len() >= auth_cache_capacity {
+                                    auth_cache.clear();
+                                }
+                                auth_cache.insert(decoded.jwt_token.clone(), principal.clone());
+                                Ok(principal)
+                            }
+                            Err(err) => Err(err),
+                        }
+                    }
+                } else {
+                    authenticate_v3_tcp_token(&state, &decoded.jwt_token)
+                };
+                match principal {
+                    Ok(principal) => {
+                        let (status, body) = process_order_v3_hot_path(
+                            &state,
+                            principal.session_id,
+                            decoded.order_req,
+                            t0,
+                        );
+                        encode_v3_tcp_response(status, &body)
+                    }
+                    Err((status, reason_code)) => {
+                        encode_v3_tcp_decode_error(status, reason_code, t0)
+                    }
                 }
-                Err((status, reason_code)) => encode_v3_tcp_decode_error(status, reason_code, t0),
-            },
+            }
             Err(code) => encode_v3_tcp_decode_error(StatusCode::UNPROCESSABLE_ENTITY, code, t0),
         };
         socket.write_all(&resp).await?;
@@ -2380,6 +2417,27 @@ fn v3_fsync_pressure_ratio(current_us: u64, soft_us: u64, hard_us: u64) -> f64 {
     }
 }
 
+async fn resolve_audit_append_receipt(
+    append: AuditAppendWithReceipt,
+    timeout: Duration,
+    failed_reason: &'static str,
+    closed_reason: &'static str,
+    timeout_reason: &'static str,
+) -> (bool, u64, bool, &'static str) {
+    if append.timings.durable_done_ns > 0 {
+        return (true, append.timings.fdatasync_ns, false, "");
+    }
+    let Some(durable_rx) = append.durable_rx else {
+        return (false, 0, false, failed_reason);
+    };
+    match tokio::time::timeout(timeout, durable_rx).await {
+        Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => (true, receipt.fdatasync_ns, false, ""),
+        Ok(Ok(_)) => (false, 0, false, failed_reason),
+        Ok(Err(_)) => (false, 0, false, closed_reason),
+        Err(_) => (false, 0, true, timeout_reason),
+    }
+}
+
 /// /v3/orders の single-writer worker。
 /// ホットキューを直列消費し、durable confirm 経路へ渡す。
 async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, state: AppState) {
@@ -2437,6 +2495,37 @@ async fn run_v3_durable_worker(
         .get(lane_id)
         .cloned()
         .unwrap_or_else(|| Arc::clone(&state.audit_log));
+    let replica_enabled = parse_bool_env("V3_DURABLE_REPLICA_ENABLED").unwrap_or(false);
+    let replica_required =
+        replica_enabled && parse_bool_env("V3_DURABLE_REPLICA_REQUIRED").unwrap_or(false);
+    let replica_receipt_timeout = Duration::from_micros(
+        std::env::var("V3_DURABLE_REPLICA_RECEIPT_TIMEOUT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(state.v3_durable_worker_receipt_timeout_us.max(1)),
+    );
+    let replica_audit_log = if replica_enabled {
+        let replica_path = v3_durable_lane_replica_wal_path(lane_audit_log.path());
+        match AuditLog::new(&replica_path) {
+            Ok(log) => {
+                let log = Arc::new(log);
+                log.clone().start_async_writer(None);
+                Some(log)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    lane_id = lane_id,
+                    path = %replica_path.display(),
+                    error = %err,
+                    "failed to initialize durable replica wal; fallback to single wal"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let receipt_timeout = Duration::from_micros(state.v3_durable_worker_receipt_timeout_us.max(1));
     let max_inflight_receipts = state
         .v3_durable_worker_max_inflight_receipts
@@ -2444,9 +2533,24 @@ async fn run_v3_durable_worker(
     let max_inflight_receipts_global = state.v3_durable_worker_max_inflight_receipts_global.max(1);
     let inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
     let inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
+    let age_soft_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 100);
+    let mut age_hard_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    if age_hard_inflight_cap_pct > age_soft_inflight_cap_pct {
+        age_hard_inflight_cap_pct = age_soft_inflight_cap_pct;
+    }
     let mut ingress_closed = false;
-    let mut inflight = futures::stream::FuturesUnordered::new();
-    use futures::{FutureExt, StreamExt};
+    use futures::{FutureExt, StreamExt, future::BoxFuture};
+    let mut inflight: futures::stream::FuturesUnordered<
+        BoxFuture<'static, (V3DurableTask, DurableResolution)>,
+    > = futures::stream::FuturesUnordered::new();
 
     let apply_outcome = |task: V3DurableTask, outcome: DurableResolution| {
         if outcome.timed_out {
@@ -2545,6 +2649,36 @@ async fn run_v3_durable_worker(
             / 100) as usize)
             .max(fallback_batch_max)
             .min(max_inflight_receipts);
+        let confirm_oldest_age_us_lane = state
+            .v3_confirm_oldest_inflight_us_per_lane
+            .get(lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or_else(|| state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed));
+        let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
+        let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+        let mut effective_max_inflight = effective_max_inflight;
+        if confirm_soft_age_us > 0 {
+            let soft_pressure_age_us = confirm_soft_age_us.saturating_mul(8) / 10;
+            if confirm_oldest_age_us_lane >= soft_pressure_age_us {
+                let soft_cap = (((max_inflight_receipts as u128)
+                    .saturating_mul(age_soft_inflight_cap_pct as u128)
+                    / 100) as usize)
+                    .max(fallback_batch_max)
+                    .min(max_inflight_receipts);
+                effective_max_inflight = effective_max_inflight.min(soft_cap);
+            }
+        }
+        if confirm_hard_age_us > 0 {
+            let hard_pressure_age_us = confirm_hard_age_us.saturating_mul(9) / 10;
+            if confirm_oldest_age_us_lane >= hard_pressure_age_us {
+                let hard_cap = (((max_inflight_receipts as u128)
+                    .saturating_mul(age_hard_inflight_cap_pct as u128)
+                    / 100) as usize)
+                    .max(fallback_batch_max)
+                    .min(max_inflight_receipts);
+                effective_max_inflight = effective_max_inflight.min(hard_cap);
+            }
+        }
 
         if inflight.len() >= effective_max_inflight
             || total_inflight >= max_inflight_receipts_global
@@ -2630,6 +2764,23 @@ async fn run_v3_durable_worker(
                 } else {
                     (fallback_batch_max, fallback_batch_wait)
                 };
+                // Confirm age approaches soft/hard guard: prioritize latency over batch efficiency.
+                let mut target_batch_max = target_batch_max;
+                let mut target_batch_wait = target_batch_wait;
+                if confirm_soft_age_us > 0 {
+                    let soft_pressure_age_us = confirm_soft_age_us.saturating_mul(8) / 10;
+                    if confirm_oldest_age_us_lane >= soft_pressure_age_us {
+                        target_batch_wait = target_batch_wait.min(batch_adaptive_cfg.wait_min);
+                        target_batch_max = target_batch_max.min((fallback_batch_max / 2).max(1));
+                    }
+                }
+                if confirm_hard_age_us > 0 {
+                    let hard_pressure_age_us = confirm_hard_age_us.saturating_mul(9) / 10;
+                    if confirm_oldest_age_us_lane >= hard_pressure_age_us {
+                        target_batch_wait = Duration::from_micros(1);
+                        target_batch_max = 1;
+                    }
+                }
                 let lane_headroom = effective_max_inflight.saturating_sub(inflight.len());
                 let global_headroom = max_inflight_receipts_global.saturating_sub(total_inflight);
                 let target_batch_max = target_batch_max
@@ -2664,61 +2815,186 @@ async fn run_v3_durable_worker(
                             "attemptId": format!("att_{}", task.attempt_seq),
                         }),
                     };
-                    let append = lane_audit_log.append_with_durable_receipt(event, append_t0);
-                    let append_elapsed_us = if append.timings.enqueue_done_ns >= append_t0 {
-                        (append.timings.enqueue_done_ns - append_t0) / 1_000
+                    if !replica_enabled {
+                        // Fast-path for default mode: primary WAL only, no replica branches/clones.
+                        let primary_append =
+                            lane_audit_log.append_with_durable_receipt(event, append_t0);
+                        let append_elapsed_us =
+                            if primary_append.timings.enqueue_done_ns >= append_t0 {
+                                (primary_append.timings.enqueue_done_ns - append_t0) / 1_000
+                            } else {
+                                gateway_core::now_nanos().saturating_sub(append_t0) / 1_000
+                            };
+                        state.v3_durable_wal_append_hist.record(append_elapsed_us);
+
+                        if primary_append.timings.durable_done_ns > 0 {
+                            apply_outcome(
+                                task,
+                                DurableResolution {
+                                    durable_done_ns: primary_append.timings.durable_done_ns,
+                                    fdatasync_ns: primary_append.timings.fdatasync_ns,
+                                    reject_reason: "",
+                                    timed_out: false,
+                                },
+                            );
+                            continue;
+                        }
+
+                        if primary_append.durable_rx.is_none() {
+                            apply_outcome(
+                                task,
+                                DurableResolution {
+                                    durable_done_ns: 0,
+                                    fdatasync_ns: 0,
+                                    reject_reason: "WAL_DURABILITY_ENQUEUE_FAILED",
+                                    timed_out: false,
+                                },
+                            );
+                            continue;
+                        }
+
+                        inflight.push(
+                            async move {
+                                let (
+                                    primary_ok,
+                                    primary_fsync_ns,
+                                    primary_timed_out,
+                                    primary_reason,
+                                ) = resolve_audit_append_receipt(
+                                    primary_append,
+                                    receipt_timeout,
+                                    "WAL_DURABILITY_FAILED",
+                                    "WAL_DURABILITY_RECEIPT_CLOSED",
+                                    "WAL_DURABILITY_RECEIPT_TIMEOUT",
+                                )
+                                .await;
+                                let outcome = if !primary_ok {
+                                    DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: 0,
+                                        reject_reason: primary_reason,
+                                        timed_out: primary_timed_out,
+                                    }
+                                } else {
+                                    DurableResolution {
+                                        durable_done_ns: gateway_core::now_nanos(),
+                                        fdatasync_ns: primary_fsync_ns,
+                                        reject_reason: "",
+                                        timed_out: false,
+                                    }
+                                };
+                                (task, outcome)
+                            }
+                            .boxed(),
+                        );
+                        continue;
+                    }
+
+                    let primary_append =
+                        lane_audit_log.append_with_durable_receipt(event.clone(), append_t0);
+                    let append_elapsed_us = if primary_append.timings.enqueue_done_ns >= append_t0 {
+                        (primary_append.timings.enqueue_done_ns - append_t0) / 1_000
                     } else {
                         gateway_core::now_nanos().saturating_sub(append_t0) / 1_000
                     };
                     state.v3_durable_wal_append_hist.record(append_elapsed_us);
 
-                    if append.timings.durable_done_ns > 0 {
+                    if replica_required {
+                        let replica_required_append = replica_audit_log
+                            .as_ref()
+                            .map(|replica| replica.append_with_durable_receipt(event, append_t0));
+                        let state_for_receipt = state.clone();
+                        inflight.push(
+                            async move {
+                                let (
+                                    primary_ok,
+                                    primary_fsync_ns,
+                                    primary_timed_out,
+                                    primary_reason,
+                                ) = resolve_audit_append_receipt(
+                                    primary_append,
+                                    receipt_timeout,
+                                    "WAL_DURABILITY_FAILED",
+                                    "WAL_DURABILITY_RECEIPT_CLOSED",
+                                    "WAL_DURABILITY_RECEIPT_TIMEOUT",
+                                )
+                                .await;
+                                let (
+                                    replica_ok,
+                                    replica_fsync_ns,
+                                    replica_timed_out,
+                                    replica_reason,
+                                ) = if let Some(replica_append) = replica_required_append {
+                                    resolve_audit_append_receipt(
+                                        replica_append,
+                                        replica_receipt_timeout,
+                                        "WAL_REPLICA_DURABILITY_FAILED",
+                                        "WAL_REPLICA_DURABILITY_RECEIPT_CLOSED",
+                                        "WAL_REPLICA_DURABILITY_RECEIPT_TIMEOUT",
+                                    )
+                                    .await
+                                } else {
+                                    (false, 0, false, "WAL_REPLICA_UNAVAILABLE")
+                                };
+                                let outcome = if !primary_ok {
+                                    DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: 0,
+                                        reject_reason: primary_reason,
+                                        timed_out: primary_timed_out,
+                                    }
+                                } else if !replica_ok {
+                                    DurableResolution {
+                                        durable_done_ns: 0,
+                                        fdatasync_ns: primary_fsync_ns,
+                                        reject_reason: replica_reason,
+                                        timed_out: replica_timed_out,
+                                    }
+                                } else {
+                                    DurableResolution {
+                                        durable_done_ns: gateway_core::now_nanos(),
+                                        fdatasync_ns: primary_fsync_ns.max(replica_fsync_ns),
+                                        reject_reason: "",
+                                        timed_out: false,
+                                    }
+                                };
+                                if outcome.reject_reason == "WAL_REPLICA_UNAVAILABLE" {
+                                    state_for_receipt
+                                        .v3_durable_write_error_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                (task, outcome)
+                            }
+                            .boxed(),
+                        );
+                        continue;
+                    }
+
+                    let replica_best_effort_timings = replica_audit_log
+                        .as_ref()
+                        .map(|replica| replica.append_with_timings(event, append_t0));
+                    if let Some(replica_timings) = replica_best_effort_timings {
+                        if replica_timings.enqueue_done_ns == 0
+                            && replica_timings.durable_done_ns == 0
+                        {
+                            state
+                                .v3_durable_write_error_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    if primary_append.timings.durable_done_ns > 0 {
                         apply_outcome(
                             task,
                             DurableResolution {
-                                durable_done_ns: append.timings.durable_done_ns,
-                                fdatasync_ns: append.timings.fdatasync_ns,
+                                durable_done_ns: primary_append.timings.durable_done_ns,
+                                fdatasync_ns: primary_append.timings.fdatasync_ns,
                                 reject_reason: "",
                                 timed_out: false,
                             },
                         );
                         continue;
                     }
-
-                    if let Some(durable_rx) = append.durable_rx {
-                        inflight.push(async move {
-                            let outcome =
-                                match tokio::time::timeout(receipt_timeout, durable_rx).await {
-                                    Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => {
-                                        DurableResolution {
-                                            durable_done_ns: receipt.durable_done_ns,
-                                            fdatasync_ns: receipt.fdatasync_ns,
-                                            reject_reason: "",
-                                            timed_out: false,
-                                        }
-                                    }
-                                    Ok(Ok(_)) => DurableResolution {
-                                        durable_done_ns: 0,
-                                        fdatasync_ns: 0,
-                                        reject_reason: "WAL_DURABILITY_FAILED",
-                                        timed_out: false,
-                                    },
-                                    Ok(Err(_)) => DurableResolution {
-                                        durable_done_ns: 0,
-                                        fdatasync_ns: 0,
-                                        reject_reason: "WAL_DURABILITY_RECEIPT_CLOSED",
-                                        timed_out: false,
-                                    },
-                                    Err(_) => DurableResolution {
-                                        durable_done_ns: 0,
-                                        fdatasync_ns: 0,
-                                        reject_reason: "WAL_DURABILITY_RECEIPT_TIMEOUT",
-                                        timed_out: true,
-                                    },
-                                };
-                            (task, outcome)
-                        });
-                    } else {
+                    if primary_append.durable_rx.is_none() {
                         apply_outcome(
                             task,
                             DurableResolution {
@@ -2728,7 +3004,38 @@ async fn run_v3_durable_worker(
                                 timed_out: false,
                             },
                         );
+                        continue;
                     }
+                    inflight.push(
+                        async move {
+                            let (primary_ok, primary_fsync_ns, primary_timed_out, primary_reason) =
+                                resolve_audit_append_receipt(
+                                    primary_append,
+                                    receipt_timeout,
+                                    "WAL_DURABILITY_FAILED",
+                                    "WAL_DURABILITY_RECEIPT_CLOSED",
+                                    "WAL_DURABILITY_RECEIPT_TIMEOUT",
+                                )
+                                .await;
+                            let outcome = if !primary_ok {
+                                DurableResolution {
+                                    durable_done_ns: 0,
+                                    fdatasync_ns: 0,
+                                    reject_reason: primary_reason,
+                                    timed_out: primary_timed_out,
+                                }
+                            } else {
+                                DurableResolution {
+                                    durable_done_ns: gateway_core::now_nanos(),
+                                    fdatasync_ns: primary_fsync_ns,
+                                    reject_reason: "",
+                                    timed_out: false,
+                                }
+                            };
+                            (task, outcome)
+                        }
+                        .boxed(),
+                    );
                 }
             }
         }

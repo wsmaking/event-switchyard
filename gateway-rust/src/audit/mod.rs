@@ -14,10 +14,10 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -50,6 +50,7 @@ pub struct AuditLog {
     wal_last_append_ms: AtomicU64,
     wal_pending_enqueue_ms: Mutex<VecDeque<u64>>,
     fdatasync_enabled: bool,
+    fdatasync_serialize: bool,
     async_enabled: bool,
     fdatasync_max_wait_us: u64,
     fdatasync_max_batch: usize,
@@ -60,7 +61,23 @@ pub struct AuditLog {
     fdatasync_adaptive_max_batch: usize,
     fdatasync_adaptive_target_sync_us: u64,
     fdatasync_coalesce_us: u64,
+    fdatasync_max_defer_us: u64,
     append_tx: Mutex<Option<Sender<AuditAppendRequest>>>,
+}
+
+fn sync_data_with_mode(file: &File, serialize: bool) -> std::io::Result<()> {
+    static FDATASYNC_SERIALIZER: OnceLock<Mutex<()>> = OnceLock::new();
+    if !serialize {
+        return file.sync_data();
+    }
+    let lock = FDATASYNC_SERIALIZER.get_or_init(|| Mutex::new(()));
+    let guard = match lock.lock() {
+        Ok(v) => v,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let result = file.sync_data();
+    drop(guard);
+    result
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +144,9 @@ impl AuditLog {
         let fdatasync_enabled = std::env::var("AUDIT_FDATASYNC")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
+        let fdatasync_serialize = std::env::var("AUDIT_FDATASYNC_SERIALIZE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let async_enabled = std::env::var("AUDIT_ASYNC_WAL")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
@@ -166,6 +186,10 @@ impl AuditLog {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
+        let fdatasync_max_defer_us = std::env::var("AUDIT_FDATASYNC_MAX_DEFER_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
         let (hash_path, hash_writer, hmac_keys, active_key_id, prev_hash, seq, last_key_id) =
             init_hash_chain(&path)?;
         let anchor_path = std::env::var("AUDIT_ANCHOR_PATH")
@@ -196,6 +220,7 @@ impl AuditLog {
             wal_last_append_ms: AtomicU64::new(wal_last_append_ms),
             wal_pending_enqueue_ms: Mutex::new(VecDeque::new()),
             fdatasync_enabled,
+            fdatasync_serialize,
             async_enabled,
             fdatasync_max_wait_us,
             fdatasync_max_batch,
@@ -206,6 +231,7 @@ impl AuditLog {
             fdatasync_adaptive_max_batch,
             fdatasync_adaptive_target_sync_us,
             fdatasync_coalesce_us,
+            fdatasync_max_defer_us,
             append_tx: Mutex::new(None),
         })
     }
@@ -323,9 +349,11 @@ impl AuditLog {
         drop(guard);
 
         let fdatasync_enabled = self.fdatasync_enabled;
+        let fdatasync_serialize = self.fdatasync_serialize;
         let max_wait_us = self.fdatasync_max_wait_us.max(1);
         let max_batch = self.fdatasync_max_batch.max(1);
         let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
+        let fdatasync_max_defer_us = self.fdatasync_max_defer_us;
         let target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -381,9 +409,11 @@ impl AuditLog {
                 rx,
                 durable_tx,
                 fdatasync_enabled,
+                fdatasync_serialize,
                 max_wait_us,
                 max_batch,
                 fdatasync_coalesce_us,
+                fdatasync_max_defer_us,
                 coalesce_min_us,
                 coalesce_max_us,
                 target_batch_bytes,
@@ -426,7 +456,7 @@ impl AuditLog {
 
                 if self.fdatasync_enabled {
                     let sync_start = now_nanos();
-                    if writer.get_ref().sync_data().is_err() {
+                    if sync_data_with_mode(writer.get_ref(), self.fdatasync_serialize).is_err() {
                         return AuditAppendTimings {
                             enqueue_done_ns,
                             durable_done_ns: 0,
@@ -1001,9 +1031,11 @@ fn run_async_writer(
     rx: Receiver<AuditAppendRequest>,
     durable_tx: Option<UnboundedSender<AuditDurableNotification>>,
     fdatasync_enabled: bool,
+    fdatasync_serialize: bool,
     max_wait_us: u64,
     max_batch: usize,
     fdatasync_coalesce_us: u64,
+    fdatasync_max_defer_us: u64,
     coalesce_min_us: u64,
     coalesce_max_us: u64,
     target_batch_bytes: usize,
@@ -1068,6 +1100,7 @@ fn run_async_writer(
     let mut cur_target_batch_bytes = target_batch_bytes.max(min_target_batch_bytes);
     let mut pending_bytes_since_sync = 0usize;
     let mut last_sync_ns = now_nanos();
+    let mut pending_sync_start_ns: Option<u64> = None;
     loop {
         let first = match rx.recv() {
             Ok(v) => v,
@@ -1079,7 +1112,8 @@ fn run_async_writer(
                     if fdatasync_enabled {
                         if let Ok(writer) = audit.writer.lock() {
                             let sync_start = now_nanos();
-                            sync_ok = writer.get_ref().sync_data().is_ok();
+                            sync_ok =
+                                sync_data_with_mode(writer.get_ref(), fdatasync_serialize).is_ok();
                             fdatasync_ns = now_nanos().saturating_sub(sync_start);
                         } else {
                             sync_ok = false;
@@ -1170,6 +1204,8 @@ fn run_async_writer(
         if !write_ok {
             pending_durable.append(&mut batch);
             notify_durable_batch(&mut pending_durable, &durable_tx, 0, 0, false);
+            pending_bytes_since_sync = 0;
+            pending_sync_start_ns = None;
             if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
                 let drain = processed_len.min(pending.len());
                 for _ in 0..drain {
@@ -1180,12 +1216,20 @@ fn run_async_writer(
         }
 
         let candidate_pending_bytes = pending_bytes_since_sync.saturating_add(total_bytes);
-        let should_defer_sync =
-            within_coalesce_window && candidate_pending_bytes < cur_target_batch_bytes;
+        let pending_age_us = pending_sync_start_ns
+            .map(|start_ns| now_ns.saturating_sub(start_ns) / 1_000)
+            .unwrap_or(0);
+        let over_max_defer_age = fdatasync_enabled
+            && fdatasync_max_defer_us > 0
+            && pending_sync_start_ns.is_some()
+            && pending_age_us >= fdatasync_max_defer_us;
+        let should_defer_sync = within_coalesce_window
+            && candidate_pending_bytes < cur_target_batch_bytes
+            && !over_max_defer_age;
         if fdatasync_enabled && !should_defer_sync {
             if let Ok(writer) = audit.writer.lock() {
                 let sync_start = now_nanos();
-                if writer.get_ref().sync_data().is_err() {
+                if sync_data_with_mode(writer.get_ref(), fdatasync_serialize).is_err() {
                     write_ok = false;
                 }
                 fdatasync_ns = now_nanos().saturating_sub(sync_start);
@@ -1197,6 +1241,8 @@ fn run_async_writer(
         if !write_ok {
             pending_durable.append(&mut batch);
             notify_durable_batch(&mut pending_durable, &durable_tx, 0, 0, false);
+            pending_bytes_since_sync = 0;
+            pending_sync_start_ns = None;
             if let Ok(mut pending) = audit.wal_pending_enqueue_ms.lock() {
                 let drain = processed_len.min(pending.len());
                 for _ in 0..drain {
@@ -1208,6 +1254,9 @@ fn run_async_writer(
 
         if should_defer_sync {
             pending_bytes_since_sync = candidate_pending_bytes;
+            if pending_sync_start_ns.is_none() {
+                pending_sync_start_ns = Some(now_ns);
+            }
             pending_durable.append(&mut batch);
         } else {
             let durable_done_ns = now_nanos();
@@ -1215,6 +1264,7 @@ fn run_async_writer(
                 last_sync_ns = durable_done_ns;
             }
             pending_bytes_since_sync = 0;
+            pending_sync_start_ns = None;
             pending_durable.append(&mut batch);
             notify_durable_batch(
                 &mut pending_durable,
