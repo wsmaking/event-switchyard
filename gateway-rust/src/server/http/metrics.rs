@@ -134,6 +134,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .iter()
         .map(|v| v.load(Ordering::Relaxed))
         .collect::<Vec<_>>();
+    let v3_durable_pressure_pct_per_lane = state
+        .v3_durable_pressure_pct_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_dynamic_cap_pct_per_lane = state
+        .v3_durable_dynamic_cap_pct_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
     let v3_durable_worker_receipt_timeout_us = state.v3_durable_worker_receipt_timeout_us;
     let v3_durable_worker_max_inflight_receipts = state.v3_durable_worker_max_inflight_receipts;
     let v3_durable_worker_max_inflight_receipts_global =
@@ -217,6 +227,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
     let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
     let v3_durable_fsync_p99 = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
+    let v3_durable_fsync_p99_cached = state
+        .v3_durable_fsync_p99_cached_us
+        .load(Ordering::Relaxed);
     let v3_durable_worker_loop_p50 = state
         .v3_durable_worker_loop_hist
         .snapshot()
@@ -250,6 +263,11 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .iter()
         .map(|hist| hist.snapshot().percentile(99.0))
         .collect::<Vec<_>>();
+    let v3_durable_fsync_p99_cached_per_lane = state
+        .v3_durable_fsync_p99_cached_us_per_lane
+        .iter()
+        .map(|value| value.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
     let v3_durable_worker_loop_p99_per_lane = state
         .v3_durable_worker_loop_hist_per_lane
         .iter()
@@ -257,8 +275,14 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .collect::<Vec<_>>();
     let v3_processed_total = state.v3_ingress.processed_total();
     let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
+    let v3_live_ack_p999 = state.v3_live_ack_hist.snapshot().percentile(99.9);
     let v3_live_ack_accepted_p99 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.0);
+    let v3_live_ack_accepted_p999 = state
+        .v3_live_ack_accepted_hist
+        .snapshot()
+        .percentile(99.9);
     let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
+    let v3_durable_confirm_p999 = state.v3_durable_confirm_hist.snapshot().percentile(99.9);
     let v3_total = v3_accepted_total
         + v3_rejected_soft_total
         + v3_rejected_hard_total
@@ -674,12 +698,21 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_live_ack_p99_us /v3 ACK latency p99 in microseconds\n\
          # TYPE gateway_v3_live_ack_p99_us gauge\n\
          gateway_v3_live_ack_p99_us {}\n\
+         # HELP gateway_v3_live_ack_p999_us /v3 ACK latency p99.9 in microseconds\n\
+         # TYPE gateway_v3_live_ack_p999_us gauge\n\
+         gateway_v3_live_ack_p999_us {}\n\
          # HELP gateway_v3_live_ack_accepted_p99_us /v3 ACK latency p99 in microseconds (accepted-only)\n\
          # TYPE gateway_v3_live_ack_accepted_p99_us gauge\n\
          gateway_v3_live_ack_accepted_p99_us {}\n\
+         # HELP gateway_v3_live_ack_accepted_p999_us /v3 ACK latency p99.9 in microseconds (accepted-only)\n\
+         # TYPE gateway_v3_live_ack_accepted_p999_us gauge\n\
+         gateway_v3_live_ack_accepted_p999_us {}\n\
          # HELP gateway_v3_durable_confirm_p99_us /v3 durable confirm latency p99 in microseconds\n\
          # TYPE gateway_v3_durable_confirm_p99_us gauge\n\
          gateway_v3_durable_confirm_p99_us {}\n\
+         # HELP gateway_v3_durable_confirm_p999_us /v3 durable confirm latency p99.9 in microseconds\n\
+         # TYPE gateway_v3_durable_confirm_p999_us gauge\n\
+         gateway_v3_durable_confirm_p999_us {}\n\
          # HELP gateway_v3_accepted_rate /v3 accepted ratio against total responses\n\
          # TYPE gateway_v3_accepted_rate gauge\n\
          gateway_v3_accepted_rate {}\n\
@@ -785,8 +818,11 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_live_ack_p99,
         v3_live_ack_accepted_p99,
         v3_live_ack_p99,
+        v3_live_ack_p999,
         v3_live_ack_accepted_p99,
+        v3_live_ack_accepted_p999,
         v3_durable_confirm_p99,
+        v3_durable_confirm_p999,
         v3_accepted_rate,
         v3_rejected_hard_total,
         v3_hard_reject_pct,
@@ -821,6 +857,12 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_wal_append_p99,
         v3_durable_fsync_p50,
         v3_durable_fsync_p99,
+    ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_durable_fdatasync_p99_cached_us /v3 durable fdatasync latency p99 cache value used by worker control loop (us)\n\
+         # TYPE gateway_v3_durable_fdatasync_p99_cached_us gauge\n\
+         gateway_v3_durable_fdatasync_p99_cached_us {}\n",
+        v3_durable_fsync_p99_cached,
     ));
     snapshot.push_str(&format!(
         "# HELP gateway_v3_durable_write_error_total Total /v3 durable write/receipt errors\n\
@@ -978,6 +1020,26 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         snapshot.push_str(&format!(
             "gateway_v3_durable_receipt_inflight_max_per_lane{{lane=\"{}\"}} {}\n",
             lane, inflight
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_pressure_pct_per_lane Smoothed durable pressure percentage per lane used by inflight controller\n\
+         # TYPE gateway_v3_durable_pressure_pct_per_lane gauge\n",
+    );
+    for (lane, pressure) in v3_durable_pressure_pct_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_pressure_pct_per_lane{{lane=\"{}\"}} {}\n",
+            lane, pressure
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_dynamic_cap_pct_per_lane Dynamic inflight cap percentage applied per durable lane\n\
+         # TYPE gateway_v3_durable_dynamic_cap_pct_per_lane gauge\n",
+    );
+    for (lane, cap_pct) in v3_durable_dynamic_cap_pct_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_dynamic_cap_pct_per_lane{{lane=\"{}\"}} {}\n",
+            lane, cap_pct
         ));
     }
     snapshot.push_str(
@@ -1140,6 +1202,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     for (lane, p99) in v3_durable_fsync_p99_per_lane.iter().enumerate() {
         snapshot.push_str(&format!(
             "gateway_v3_durable_fdatasync_p99_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, p99
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_fdatasync_p99_cached_us_per_lane /v3 durable fdatasync latency p99 cache value per lane (us)\n\
+         # TYPE gateway_v3_durable_fdatasync_p99_cached_us_per_lane gauge\n",
+    );
+    for (lane, p99) in v3_durable_fsync_p99_cached_per_lane.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_fdatasync_p99_cached_us_per_lane{{lane=\"{}\"}} {}\n",
             lane, p99
         ));
     }

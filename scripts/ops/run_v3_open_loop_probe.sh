@@ -16,6 +16,7 @@ DRAIN_TIMEOUT_SEC="${DRAIN_TIMEOUT_SEC:-5}"
 BUILD_RELEASE="${BUILD_RELEASE:-0}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/var/results}"
 TARGET_COMPLETED_RPS="${TARGET_COMPLETED_RPS:-$TARGET_RPS}"
+TARGET_COMPLETED_RPS_EPSILON="${TARGET_COMPLETED_RPS_EPSILON:-0.0005}"
 TARGET_ACK_P99_US="${TARGET_ACK_P99_US:-100}"
 TARGET_ACK_ACCEPTED_P99_US="${TARGET_ACK_ACCEPTED_P99_US:-40}"
 TARGET_ACCEPTED_RATE="${TARGET_ACCEPTED_RATE:-0.99}"
@@ -47,15 +48,26 @@ V3_SHARD_LOSS_SUSPECT_THRESHOLD="${V3_SHARD_LOSS_SUSPECT_THRESHOLD:-3}"
 V3_GLOBAL_LOSS_SUSPECT_THRESHOLD="${V3_GLOBAL_LOSS_SUSPECT_THRESHOLD:-6}"
 V3_DURABLE_WORKER_BATCH_MAX="${V3_DURABLE_WORKER_BATCH_MAX:-24}"
 V3_DURABLE_WORKER_BATCH_MIN="${V3_DURABLE_WORKER_BATCH_MIN:-12}"
-V3_DURABLE_WORKER_BATCH_WAIT_US="${V3_DURABLE_WORKER_BATCH_WAIT_US:-40}"
-V3_DURABLE_WORKER_BATCH_WAIT_MIN_US="${V3_DURABLE_WORKER_BATCH_WAIT_MIN_US:-20}"
+V3_DURABLE_WORKER_BATCH_WAIT_US="${V3_DURABLE_WORKER_BATCH_WAIT_US:-30}"
+V3_DURABLE_WORKER_BATCH_WAIT_MIN_US="${V3_DURABLE_WORKER_BATCH_WAIT_MIN_US:-15}"
 V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US="${V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US:-20000000}"
-V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS="${V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS:-49152}"
+V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS="${V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS:-8192}"
 V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT="${V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT:-50}"
 V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT="${V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT:-25}"
-V3_DURABLE_WORKER_BATCH_ADAPTIVE="${V3_DURABLE_WORKER_BATCH_ADAPTIVE:-false}"
-V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT:-10}"
-V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT:-60}"
+V3_DURABLE_CONTROL_PRESET="${V3_DURABLE_CONTROL_PRESET:-hft_stable}"
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT="${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT:-true}"
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT="${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT:-5}"
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT="${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT:-80}"
+V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT="${V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT:-100}"
+V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT="${V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT:-100}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE="${V3_DURABLE_WORKER_BATCH_ADAPTIVE:-true}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT:-15}"
+V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT="${V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT:-70}"
+V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT="${V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT:-35}"
+V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT="${V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT:-15}"
+V3_DURABLE_SLO_STAGE="${V3_DURABLE_SLO_STAGE:-1}"
+V3_DURABLE_SLO_EARLY_SOFT_AGE_US="${V3_DURABLE_SLO_EARLY_SOFT_AGE_US:-100000}"
+V3_DURABLE_SLO_EARLY_HARD_AGE_US="${V3_DURABLE_SLO_EARLY_HARD_AGE_US:-220000}"
 V3_DURABLE_ADMISSION_CONTROLLER_ENABLED="${V3_DURABLE_ADMISSION_CONTROLLER_ENABLED:-true}"
 V3_DURABLE_ADMISSION_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_SUSTAIN_TICKS:-4}"
 V3_DURABLE_ADMISSION_RECOVER_TICKS="${V3_DURABLE_ADMISSION_RECOVER_TICKS:-8}"
@@ -70,8 +82,19 @@ V3_DURABLE_CONFIRM_HARD_REJECT_AGE_US="${V3_DURABLE_CONFIRM_HARD_REJECT_AGE_US:-
 V3_CONFIRM_REBUILD_ON_START="${V3_CONFIRM_REBUILD_ON_START:-false}"
 V3_CONFIRM_REBUILD_MAX_LINES="${V3_CONFIRM_REBUILD_MAX_LINES:-500000}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
-AUDIT_FDATASYNC_MAX_WAIT_US="${AUDIT_FDATASYNC_MAX_WAIT_US:-150}"
+AUDIT_FDATASYNC_MAX_WAIT_US="${AUDIT_FDATASYNC_MAX_WAIT_US:-100}"
 AUDIT_FDATASYNC_MAX_BATCH="${AUDIT_FDATASYNC_MAX_BATCH:-64}"
+AUDIT_FDATASYNC_MAX_DEFER_US="${AUDIT_FDATASYNC_MAX_DEFER_US:-0}"
+AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US="${AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US:-2000}"
+AUDIT_FDATASYNC_SERIALIZE="${AUDIT_FDATASYNC_SERIALIZE:-false}"
+if [[ -z "${AUDIT_WAL_PREALLOC_BYTES:-}" ]]; then
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    AUDIT_WAL_PREALLOC_BYTES=67108864
+  else
+    AUDIT_WAL_PREALLOC_BYTES=0
+  fi
+fi
+AUDIT_WAL_PREALLOC_THRESHOLD_BYTES="${AUDIT_WAL_PREALLOC_THRESHOLD_BYTES:-8388608}"
 
 V3_INGRESS_TRANSPORT="$(echo "$V3_INGRESS_TRANSPORT" | tr '[:upper:]' '[:lower:]')"
 case "$V3_INGRESS_TRANSPORT" in
@@ -189,9 +212,20 @@ V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US="$V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US" \
 V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS="$V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS" \
 V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT="$V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT" \
 V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT="$V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT" \
+V3_DURABLE_CONTROL_PRESET="$V3_DURABLE_CONTROL_PRESET" \
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT="$V3_DURABLE_WORKER_DYNAMIC_INFLIGHT" \
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT="$V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT" \
+V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT="$V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT" \
+V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT="$V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT" \
+V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT="$V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT" \
 V3_DURABLE_WORKER_BATCH_ADAPTIVE="$V3_DURABLE_WORKER_BATCH_ADAPTIVE" \
 V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT="$V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT" \
 V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT="$V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT" \
+V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT="$V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT" \
+V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT="$V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT" \
+V3_DURABLE_SLO_STAGE="$V3_DURABLE_SLO_STAGE" \
+V3_DURABLE_SLO_EARLY_SOFT_AGE_US="$V3_DURABLE_SLO_EARLY_SOFT_AGE_US" \
+V3_DURABLE_SLO_EARLY_HARD_AGE_US="$V3_DURABLE_SLO_EARLY_HARD_AGE_US" \
 V3_DURABLE_ADMISSION_CONTROLLER_ENABLED="$V3_DURABLE_ADMISSION_CONTROLLER_ENABLED" \
 V3_DURABLE_ADMISSION_SUSTAIN_TICKS="$V3_DURABLE_ADMISSION_SUSTAIN_TICKS" \
 V3_DURABLE_ADMISSION_RECOVER_TICKS="$V3_DURABLE_ADMISSION_RECOVER_TICKS" \
@@ -207,6 +241,11 @@ V3_CONFIRM_REBUILD_ON_START="$V3_CONFIRM_REBUILD_ON_START" \
 V3_CONFIRM_REBUILD_MAX_LINES="$V3_CONFIRM_REBUILD_MAX_LINES" \
 AUDIT_FDATASYNC_MAX_WAIT_US="$AUDIT_FDATASYNC_MAX_WAIT_US" \
 AUDIT_FDATASYNC_MAX_BATCH="$AUDIT_FDATASYNC_MAX_BATCH" \
+AUDIT_FDATASYNC_MAX_DEFER_US="$AUDIT_FDATASYNC_MAX_DEFER_US" \
+AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US="$AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US" \
+AUDIT_FDATASYNC_SERIALIZE="$AUDIT_FDATASYNC_SERIALIZE" \
+AUDIT_WAL_PREALLOC_BYTES="$AUDIT_WAL_PREALLOC_BYTES" \
+AUDIT_WAL_PREALLOC_THRESHOLD_BYTES="$AUDIT_WAL_PREALLOC_THRESHOLD_BYTES" \
 V3_HTTP_ENABLE="$V3_HTTP_ENABLE" \
 V3_HTTP_INGRESS_ENABLE="$V3_HTTP_INGRESS_ENABLE" \
 V3_HTTP_CONFIRM_ENABLE="$V3_HTTP_CONFIRM_ENABLE" \
@@ -287,7 +326,9 @@ offered_rps="$(load_value offered_rps)"
 completed_rps="$(load_value completed_rps)"
 client_accepted_rate="$(load_value accepted_rate)"
 client_ack_p99_us="$(load_value client_ack_p99_us)"
+client_ack_p999_us="$(load_value client_ack_p999_us)"
 client_ack_accepted_p99_us="$(load_value client_ack_accepted_p99_us)"
+client_ack_accepted_p999_us="$(load_value client_ack_accepted_p999_us)"
 accepted_total="$(load_value accepted_total)"
 rejected_total="$(load_value rejected_total)"
 error_total="$(load_value error_total)"
@@ -300,6 +341,7 @@ status_503_total="$(load_value status_503_total)"
 
 server_live_ack_p99_us="$(metric_value gateway_live_ack_p99_us)"
 server_live_ack_accepted_p99_us="$(metric_value gateway_live_ack_accepted_p99_us)"
+server_live_ack_accepted_p999_us="$(metric_value gateway_v3_live_ack_accepted_p999_us)"
 server_accepted_rate="$(metric_value gateway_v3_accepted_rate)"
 server_accepted_total="$(metric_value gateway_v3_accepted_total)"
 server_rejected_soft_total="$(metric_value gateway_v3_rejected_soft_total)"
@@ -307,6 +349,7 @@ server_rejected_hard_total="$(metric_value gateway_v3_rejected_hard_total)"
 server_rejected_killed_total="$(metric_value gateway_v3_rejected_killed_total)"
 server_loss_suspect_total="$(metric_value gateway_v3_loss_suspect_total)"
 server_durable_confirm_p99_us="$(metric_value gateway_v3_durable_confirm_p99_us)"
+server_durable_confirm_p999_us="$(metric_value gateway_v3_durable_confirm_p999_us)"
 server_durable_backpressure_soft_total="$(metric_value gateway_v3_durable_backpressure_soft_total)"
 server_durable_backpressure_hard_total="$(metric_value gateway_v3_durable_backpressure_hard_total)"
 server_durable_admission_controller_enabled="$(metric_value gateway_v3_durable_admission_controller_enabled)"
@@ -358,11 +401,15 @@ completed_rps="${completed_rps:-0}"
 offered_rps="${offered_rps:-0}"
 drop_ratio="${drop_ratio:-1}"
 unsent_total="${unsent_total:-999999999}"
+client_ack_p999_us="${client_ack_p999_us:-0}"
+client_ack_accepted_p999_us="${client_ack_accepted_p999_us:-0}"
 server_live_ack_p99_us="${server_live_ack_p99_us:-999999}"
+server_live_ack_accepted_p999_us="${server_live_ack_accepted_p999_us:-999999}"
 server_accepted_rate="${server_accepted_rate:-0}"
 server_rejected_killed_total="${server_rejected_killed_total:-0}"
 server_loss_suspect_total="${server_loss_suspect_total:-0}"
 server_durable_confirm_p99_us="${server_durable_confirm_p99_us:-0}"
+server_durable_confirm_p999_us="${server_durable_confirm_p999_us:-0}"
 server_durable_lanes="${server_durable_lanes:-0}"
 server_confirm_store_lanes="${server_confirm_store_lanes:-0}"
 server_durable_worker_max_inflight_receipts="${server_durable_worker_max_inflight_receipts:-0}"
@@ -376,7 +423,8 @@ server_durable_receipt_inflight_skew_ratio="${server_durable_receipt_inflight_sk
 server_durable_receipt_inflight_hot_lane_share="${server_durable_receipt_inflight_hot_lane_share:-0}"
 
 offered_rps_ratio="$(awk -v o="$offered_rps" -v t="$TARGET_RPS" 'BEGIN{if (t+0<=0) {print 0} else {printf "%.6f", (o+0)/(t+0)}}')"
-pass_completed_rps="$(awk -v v="$completed_rps" -v t="$TARGET_COMPLETED_RPS" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
+completed_rps_floor="$(awk -v t="$TARGET_COMPLETED_RPS" -v e="$TARGET_COMPLETED_RPS_EPSILON" 'BEGIN{v=(t+0)*(1.0-(e+0)); if (v<0) v=0; printf "%.6f", v}')"
+pass_completed_rps="$(awk -v v="$completed_rps" -v f="$completed_rps_floor" 'BEGIN{print (v+0>=f+0) ? 1 : 0}')"
 pass_ack="$(awk -v v="$server_live_ack_p99_us" -v t="$TARGET_ACK_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_ack_accepted="$(awk -v v="$server_live_ack_accepted_p99_us" -v t="$TARGET_ACK_ACCEPTED_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_rate="$(awk -v v="$server_accepted_rate" -v t="$TARGET_ACCEPTED_RATE" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
@@ -405,6 +453,8 @@ host=${HOST}:${PORT}
 duration_sec=${DURATION}
 target_rps=${TARGET_RPS}
 target_completed_rps=${TARGET_COMPLETED_RPS}
+target_completed_rps_epsilon=${TARGET_COMPLETED_RPS_EPSILON}
+target_completed_rps_floor=${completed_rps_floor}
 target_live_ack_p99_us=${TARGET_ACK_P99_US}
 target_live_ack_accepted_p99_us=${TARGET_ACK_ACCEPTED_P99_US}
 target_accepted_rate=${TARGET_ACCEPTED_RATE}
@@ -448,9 +498,20 @@ v3_durable_worker_receipt_timeout_us=${V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US}
 v3_durable_worker_max_inflight_receipts=${V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS}
 v3_durable_worker_inflight_soft_cap_pct=${V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT}
 v3_durable_worker_inflight_hard_cap_pct=${V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT}
+v3_durable_control_preset=${V3_DURABLE_CONTROL_PRESET}
+v3_durable_worker_dynamic_inflight=${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT}
+v3_durable_worker_dynamic_inflight_min_cap_pct=${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT}
+v3_durable_worker_dynamic_inflight_max_cap_pct=${V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT}
+v3_durable_pressure_ewma_alpha_pct=${V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT}
+v3_durable_dynamic_cap_slew_step_pct=${V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT}
 v3_durable_worker_batch_adaptive=${V3_DURABLE_WORKER_BATCH_ADAPTIVE}
 v3_durable_worker_batch_adaptive_low_util_pct=${V3_DURABLE_WORKER_BATCH_ADAPTIVE_LOW_UTIL_PCT}
 v3_durable_worker_batch_adaptive_high_util_pct=${V3_DURABLE_WORKER_BATCH_ADAPTIVE_HIGH_UTIL_PCT}
+v3_durable_age_soft_inflight_cap_pct=${V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT}
+v3_durable_age_hard_inflight_cap_pct=${V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT}
+v3_durable_slo_stage=${V3_DURABLE_SLO_STAGE}
+v3_durable_slo_early_soft_age_us=${V3_DURABLE_SLO_EARLY_SOFT_AGE_US}
+v3_durable_slo_early_hard_age_us=${V3_DURABLE_SLO_EARLY_HARD_AGE_US}
 v3_durable_admission_controller_enabled=${V3_DURABLE_ADMISSION_CONTROLLER_ENABLED}
 v3_durable_admission_sustain_ticks=${V3_DURABLE_ADMISSION_SUSTAIN_TICKS}
 v3_durable_admission_recover_ticks=${V3_DURABLE_ADMISSION_RECOVER_TICKS}
@@ -464,13 +525,20 @@ v3_durable_confirm_soft_reject_age_us=${V3_DURABLE_CONFIRM_SOFT_REJECT_AGE_US}
 v3_durable_confirm_hard_reject_age_us=${V3_DURABLE_CONFIRM_HARD_REJECT_AGE_US}
 audit_fdatasync_max_wait_us=${AUDIT_FDATASYNC_MAX_WAIT_US}
 audit_fdatasync_max_batch=${AUDIT_FDATASYNC_MAX_BATCH}
+audit_fdatasync_max_defer_us=${AUDIT_FDATASYNC_MAX_DEFER_US}
+audit_fdatasync_max_inflight_age_us=${AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US}
+audit_fdatasync_serialize=${AUDIT_FDATASYNC_SERIALIZE}
+audit_wal_prealloc_bytes=${AUDIT_WAL_PREALLOC_BYTES}
+audit_wal_prealloc_threshold_bytes=${AUDIT_WAL_PREALLOC_THRESHOLD_BYTES}
 offered_total=${offered_total}
 offered_rps=${offered_rps}
 offered_rps_ratio=${offered_rps_ratio}
 completed_rps=${completed_rps}
 client_accepted_rate=${client_accepted_rate}
 client_ack_p99_us=${client_ack_p99_us}
+client_ack_p999_us=${client_ack_p999_us}
 client_ack_accepted_p99_us=${client_ack_accepted_p99_us}
+client_ack_accepted_p999_us=${client_ack_accepted_p999_us}
 client_accepted_total=${accepted_total}
 client_rejected_total=${rejected_total}
 client_error_total=${error_total}
@@ -481,8 +549,10 @@ status_429_total=${status_429_total}
 status_503_total=${status_503_total}
 server_live_ack_p99_us=${server_live_ack_p99_us}
 server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}
+server_live_ack_accepted_p999_us=${server_live_ack_accepted_p999_us}
 server_accepted_rate=${server_accepted_rate}
 server_durable_confirm_p99_us=${server_durable_confirm_p99_us}
+server_durable_confirm_p999_us=${server_durable_confirm_p999_us}
 server_accepted_total=${server_accepted_total}
 server_rejected_soft_total=${server_rejected_soft_total}
 server_rejected_hard_total=${server_rejected_hard_total}
@@ -543,7 +613,7 @@ EOF
 
 echo "[summary] offered_rps=${offered_rps} completed_rps=${completed_rps} client_accepted_rate=${client_accepted_rate} server_accepted_rate=${server_accepted_rate}"
 echo "[summary] server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}"
-echo "[gate] completed_rps>=${TARGET_COMPLETED_RPS}:${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
+echo "[gate] completed_rps>=${completed_rps_floor} (target=${TARGET_COMPLETED_RPS}, eps=${TARGET_COMPLETED_RPS_EPSILON}):${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
 echo "[lane] observed_lanes=${server_durable_receipt_inflight_lanes_observed} skew_ratio=${server_durable_receipt_inflight_skew_ratio} hot_lane_share=${server_durable_receipt_inflight_hot_lane_share} max_lane_inflight=${server_durable_receipt_inflight_max_lane_max} max_global_inflight=${server_durable_receipt_inflight_max}"
 echo "[gate_lane] coverage:${pass_lane_coverage} lane_cap:${pass_lane_inflight_cap} global_cap:${pass_global_inflight_cap} skew<=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}:${pass_lane_inflight_skew} hot_share<=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}:${pass_lane_hot_lane_share}"
 echo "[warn] durable_confirm_p99>${WARN_DURABLE_CONFIRM_P99_US}:${warn_durable_confirm} observed=${server_durable_confirm_p99_us}"

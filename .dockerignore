@@ -18,3 +18,8 @@ prometheus.yml
 grafana-*.yml
 .dockerignore
 Dockerfile
+**/target/
+**/target/**
+**/node_modules/
+**/.pytest_cache/
+**/__pycache__/

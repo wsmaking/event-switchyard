@@ -52,13 +52,14 @@ dashmap = "6"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
-# Kafka (Rust client, build bundled librdkafka to avoid system version mismatch)
-rdkafka = { version = "0.36", features = ["cmake-build"] }
+# Kafka (optional: integration/backoffice path only, not hot path)
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 libc = "0.2"
 
 [features]
 default = []
 iouring = ["monoio"]
+kafka-bus = ["dep:rdkafka"]
 
 [profile.release]
 opt-level = 3
