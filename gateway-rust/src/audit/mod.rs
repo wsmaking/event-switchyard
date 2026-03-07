@@ -49,6 +49,9 @@ pub struct AuditLog {
     wal_bytes: AtomicU64,
     wal_last_append_ms: AtomicU64,
     wal_pending_enqueue_ms: Mutex<VecDeque<u64>>,
+    wal_prealloc_bytes: AtomicU64,
+    wal_prealloc_threshold_bytes: u64,
+    wal_prealloc_next_target_bytes: AtomicU64,
     fdatasync_enabled: bool,
     fdatasync_serialize: bool,
     async_enabled: bool,
@@ -141,6 +144,25 @@ impl AuditLog {
             }
             Err(_) => (0, 0),
         };
+        let wal_prealloc_bytes = std::env::var("AUDIT_WAL_PREALLOC_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                if cfg!(target_os = "linux") {
+                    64 * 1024 * 1024
+                } else {
+                    0
+                }
+            });
+        let wal_prealloc_threshold_bytes = std::env::var("AUDIT_WAL_PREALLOC_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or((wal_prealloc_bytes / 8).max(1 * 1024 * 1024));
+        let wal_prealloc_next_target_bytes = if wal_prealloc_bytes > 0 {
+            round_up_to_multiple(wal_bytes.max(1), wal_prealloc_bytes)
+        } else {
+            0
+        };
         let fdatasync_enabled = std::env::var("AUDIT_FDATASYNC")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
@@ -219,6 +241,9 @@ impl AuditLog {
             wal_bytes: AtomicU64::new(wal_bytes),
             wal_last_append_ms: AtomicU64::new(wal_last_append_ms),
             wal_pending_enqueue_ms: Mutex::new(VecDeque::new()),
+            wal_prealloc_bytes: AtomicU64::new(wal_prealloc_bytes),
+            wal_prealloc_threshold_bytes,
+            wal_prealloc_next_target_bytes: AtomicU64::new(wal_prealloc_next_target_bytes),
             fdatasync_enabled,
             fdatasync_serialize,
             async_enabled,
@@ -354,6 +379,14 @@ impl AuditLog {
         let max_batch = self.fdatasync_max_batch.max(1);
         let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
         let fdatasync_max_defer_us = self.fdatasync_max_defer_us;
+        let fdatasync_max_inflight_age_us = std::env::var("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(
+                fdatasync_max_defer_us
+                    .max(max_wait_us.saturating_mul(8))
+                    .max(1_000),
+            );
         let target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -414,6 +447,7 @@ impl AuditLog {
                 max_batch,
                 fdatasync_coalesce_us,
                 fdatasync_max_defer_us,
+                fdatasync_max_inflight_age_us,
                 coalesce_min_us,
                 coalesce_max_us,
                 target_batch_bytes,
@@ -432,6 +466,7 @@ impl AuditLog {
             if let Ok(line) = serde_json::to_string(&event) {
                 let mut line_bytes = line.into_bytes();
                 line_bytes.push(b'\n');
+                self.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
                 if writer.write_all(&line_bytes).is_err() {
                     return AuditAppendTimings {
                         enqueue_done_ns: 0,
@@ -472,6 +507,52 @@ impl AuditLog {
             enqueue_done_ns,
             durable_done_ns,
             fdatasync_ns,
+        }
+    }
+
+    fn maybe_preallocate(&self, file: &File, append_bytes: u64) {
+        if append_bytes == 0 {
+            return;
+        }
+        let chunk_bytes = self.wal_prealloc_bytes.load(Ordering::Relaxed);
+        if chunk_bytes == 0 {
+            return;
+        }
+        let threshold = self
+            .wal_prealloc_threshold_bytes
+            .min(chunk_bytes.saturating_sub(1));
+        let projected = self
+            .wal_bytes
+            .load(Ordering::Relaxed)
+            .saturating_add(append_bytes);
+        let current_target = self.wal_prealloc_next_target_bytes.load(Ordering::Relaxed);
+        let guard_point = current_target.saturating_sub(threshold);
+        if projected < guard_point {
+            return;
+        }
+
+        let mut next_target = current_target.max(chunk_bytes);
+        while projected >= next_target.saturating_sub(threshold) {
+            next_target = next_target.saturating_add(chunk_bytes);
+        }
+        if next_target <= current_target {
+            return;
+        }
+        match preallocate_file(
+            file,
+            current_target,
+            next_target.saturating_sub(current_target),
+        ) {
+            Ok(()) => {
+                self.wal_prealloc_next_target_bytes
+                    .store(next_target, Ordering::Relaxed);
+            }
+            Err(err) => {
+                // Preallocate failure should not block durability. Disable and continue.
+                if self.wal_prealloc_bytes.swap(0, Ordering::Relaxed) > 0 {
+                    eprintln!("audit: WAL preallocate disabled after error: {err}");
+                }
+            }
         }
     }
 
@@ -1036,6 +1117,7 @@ fn run_async_writer(
     max_batch: usize,
     fdatasync_coalesce_us: u64,
     fdatasync_max_defer_us: u64,
+    fdatasync_max_inflight_age_us: u64,
     coalesce_min_us: u64,
     coalesce_max_us: u64,
     target_batch_bytes: usize,
@@ -1173,6 +1255,7 @@ fn run_async_writer(
                     Ok(line) => {
                         let mut line_bytes = line.into_bytes();
                         line_bytes.push(b'\n');
+                        audit.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
                         if writer.write_all(&line_bytes).is_err() {
                             write_ok = false;
                             break;
@@ -1223,9 +1306,29 @@ fn run_async_writer(
             && fdatasync_max_defer_us > 0
             && pending_sync_start_ns.is_some()
             && pending_age_us >= fdatasync_max_defer_us;
+        let oldest_inflight_age_us = if fdatasync_enabled && fdatasync_max_inflight_age_us > 0 {
+            if let Ok(pending) = audit.wal_pending_enqueue_ms.lock() {
+                pending
+                    .front()
+                    .map(|oldest_ms| {
+                        now_millis()
+                            .saturating_sub(*oldest_ms)
+                            .saturating_mul(1_000)
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let over_inflight_age = fdatasync_enabled
+            && fdatasync_max_inflight_age_us > 0
+            && oldest_inflight_age_us >= fdatasync_max_inflight_age_us;
         let should_defer_sync = within_coalesce_window
             && candidate_pending_bytes < cur_target_batch_bytes
-            && !over_max_defer_age;
+            && !over_max_defer_age
+            && !over_inflight_age;
         if fdatasync_enabled && !should_defer_sync {
             if let Ok(writer) = audit.writer.lock() {
                 let sync_start = now_nanos();
@@ -1337,6 +1440,45 @@ struct FdatasyncAdaptiveConfig {
     min_batch: usize,
     max_batch: usize,
     target_sync_us: u64,
+}
+
+fn round_up_to_multiple(value: u64, unit: u64) -> u64 {
+    if unit == 0 {
+        return value;
+    }
+    let rem = value % unit;
+    if rem == 0 {
+        value
+    } else {
+        value.saturating_add(unit.saturating_sub(rem))
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn preallocate_file(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if len == 0 {
+        return Ok(());
+    }
+    let fd = file.as_raw_fd();
+    let rc = unsafe { libc::posix_fallocate(fd, offset as libc::off_t, len as libc::off_t) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(rc))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn preallocate_file(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    // Best-effort fallback on non-Linux Unix platforms (e.g. Darwin/APFS).
+    file.set_len(offset.saturating_add(len))
+}
+
+#[cfg(not(unix))]
+fn preallocate_file(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    let _ = (file, offset, len);
+    Ok(())
 }
 
 pub fn now_millis() -> u64 {

@@ -354,8 +354,10 @@ def main() -> None:
     print(f"rejected_rps={rejected_rps:.3f}")
     print(f"client_ack_p50_us={percentile(latencies_us, 50.0):.3f}")
     print(f"client_ack_p99_us={percentile(latencies_us, 99.0):.3f}")
+    print(f"client_ack_p999_us={percentile(latencies_us, 99.9):.3f}")
     print(f"client_ack_accepted_p50_us={percentile(accepted_latencies_us, 50.0):.3f}")
     print(f"client_ack_accepted_p99_us={percentile(accepted_latencies_us, 99.0):.3f}")
+    print(f"client_ack_accepted_p999_us={percentile(accepted_latencies_us, 99.9):.3f}")
     for status, count in sorted(status_counts.items()):
         print(f"status_{status}_total={count}")
 

@@ -1950,6 +1950,8 @@ mod tests {
             v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_fsync_hist_per_lane,
+            v3_durable_fsync_p99_cached_us: Arc::new(AtomicU64::new(6_000)),
+            v3_durable_fsync_p99_cached_us_per_lane: lane_u64(),
             v3_durable_worker_loop_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_worker_loop_hist_per_lane,
             v3_durable_worker_batch_min: 4,
@@ -2001,6 +2003,8 @@ mod tests {
             v3_durable_receipt_inflight_max_per_lane: lane_u64(),
             v3_durable_receipt_inflight: Arc::new(AtomicU64::new(0)),
             v3_durable_receipt_inflight_max: Arc::new(AtomicU64::new(0)),
+            v3_durable_pressure_pct_per_lane: lane_u64(),
+            v3_durable_dynamic_cap_pct_per_lane: lane_u64(),
             v3_soft_reject_pct: 85,
             v3_hard_reject_pct: 90,
             v3_kill_reject_pct: 95,
@@ -2667,6 +2671,9 @@ mod tests {
                 low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
                 high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
             },
+            super::super::V3DurableWorkerPressureConfig::from_env(
+                state.v3_durable_worker_inflight_hard_cap_pct,
+            ),
         ));
 
         let account_id = "v3-int-acc-1";

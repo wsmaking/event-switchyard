@@ -87,7 +87,6 @@ pub(super) struct V3DurableTask {
     pub(super) session_seq: u64,
     pub(super) attempt_seq: u64,
     pub(super) received_at_ns: u64,
-    pub(super) shard_id: usize,
 }
 
 impl From<V3OrderTask> for V3DurableTask {
@@ -97,7 +96,6 @@ impl From<V3OrderTask> for V3DurableTask {
             session_seq: task.session_seq,
             attempt_seq: task.attempt_seq,
             received_at_ns: task.received_at_ns,
-            shard_id: task.shard_id,
         }
     }
 }
@@ -145,9 +143,13 @@ impl V3DurableIngress {
         shard_id % self.lane_count()
     }
 
-    fn try_enqueue(&self, task: V3DurableTask) -> Result<(), TrySendError<V3DurableTask>> {
+    fn try_enqueue(
+        &self,
+        shard_id: usize,
+        task: V3DurableTask,
+    ) -> Result<(), TrySendError<V3DurableTask>> {
         // durable lane は ingress shard と同じ分割キーで固定し、順序と局所性を揃える。
-        let lane_id = self.lane_for_shard(task.shard_id);
+        let lane_id = self.lane_for_shard(shard_id);
         let Some(lane) = self.lanes.get(lane_id) else {
             return Err(TrySendError::Closed(task));
         };
@@ -508,6 +510,17 @@ impl V3ConfirmStore {
 
     pub(super) fn mark_durable_accepted(&self, session_id: &str, session_seq: u64, now_ns: u64) {
         let lane = self.lane_for_session(session_id);
+        self.mark_durable_accepted_in_lane(lane, session_id, session_seq, now_ns);
+    }
+
+    pub(super) fn mark_durable_accepted_in_lane(
+        &self,
+        lane_id: usize,
+        session_id: &str,
+        session_seq: u64,
+        now_ns: u64,
+    ) {
+        let lane = lane_id.min(self.lane_count().saturating_sub(1));
         if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
         {
             entry.status = V3ConfirmStatus::DurableAccepted;
@@ -538,6 +551,18 @@ impl V3ConfirmStore {
         now_ns: u64,
     ) {
         let lane = self.lane_for_session(session_id);
+        self.mark_durable_rejected_in_lane(lane, session_id, session_seq, reason, now_ns);
+    }
+
+    pub(super) fn mark_durable_rejected_in_lane(
+        &self,
+        lane_id: usize,
+        session_id: &str,
+        session_seq: u64,
+        reason: &str,
+        now_ns: u64,
+    ) {
+        let lane = lane_id.min(self.lane_count().saturating_sub(1));
         if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
         {
             entry.status = V3ConfirmStatus::DurableRejected;
@@ -1198,6 +1223,8 @@ pub(super) struct AppState {
     pub(super) v3_durable_wal_append_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_fsync_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_fsync_hist_per_lane: Arc<Vec<Arc<LatencyHistogram>>>,
+    pub(super) v3_durable_fsync_p99_cached_us: Arc<AtomicU64>,
+    pub(super) v3_durable_fsync_p99_cached_us_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_worker_loop_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_worker_loop_hist_per_lane: Arc<Vec<Arc<LatencyHistogram>>>,
     pub(super) v3_durable_worker_batch_min: usize,
@@ -1249,6 +1276,8 @@ pub(super) struct AppState {
     pub(super) v3_durable_receipt_inflight_max_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_receipt_inflight: Arc<AtomicU64>,
     pub(super) v3_durable_receipt_inflight_max: Arc<AtomicU64>,
+    pub(super) v3_durable_pressure_pct_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_dynamic_cap_pct_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_soft_reject_pct: u64,
     pub(super) v3_hard_reject_pct: u64,
     pub(super) v3_kill_reject_pct: u64,
@@ -1657,7 +1686,7 @@ pub async fn run(
     let v3_durable_worker_batch_wait_us = std::env::var("V3_DURABLE_WORKER_BATCH_WAIT_US")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(80);
+        .unwrap_or(30);
     let v3_durable_worker_receipt_timeout_us =
         std::env::var("V3_DURABLE_WORKER_RECEIPT_TIMEOUT_US")
             .ok()
@@ -1668,7 +1697,7 @@ pub async fn run(
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(v3_durable_worker_batch_max.saturating_mul(2048).max(8192));
+            .unwrap_or(8192);
     let v3_durable_worker_max_inflight_receipts_global =
         std::env::var("V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS_GLOBAL")
             .ok()
@@ -1701,7 +1730,7 @@ pub async fn run(
         std::env::var("V3_DURABLE_WORKER_BATCH_WAIT_MIN_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or((v3_durable_worker_batch_wait_us / 2).max(20));
+            .unwrap_or((v3_durable_worker_batch_wait_us / 2).max(15));
     if v3_durable_worker_batch_wait_min_us > v3_durable_worker_batch_wait_us {
         v3_durable_worker_batch_wait_min_us = v3_durable_worker_batch_wait_us.max(1);
     }
@@ -1740,6 +1769,8 @@ pub async fn run(
         low_util_pct: v3_durable_worker_batch_adaptive_low_util_pct,
         high_util_pct: v3_durable_worker_batch_adaptive_high_util_pct,
     };
+    let v3_durable_worker_pressure_cfg =
+        V3DurableWorkerPressureConfig::from_env(v3_durable_worker_inflight_hard_cap_pct);
     let durable_soft_reject_default = v3_soft_reject_pct.saturating_sub(15).max(50);
     let v3_durable_soft_reject_pct = std::env::var("V3_DURABLE_SOFT_REJECT_PCT")
         .ok()
@@ -2045,6 +2076,14 @@ pub async fn run(
         v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_fsync_hist_per_lane,
+        v3_durable_fsync_p99_cached_us: Arc::new(AtomicU64::new(
+            v3_durable_admission_soft_fsync_p99_us,
+        )),
+        v3_durable_fsync_p99_cached_us_per_lane: Arc::new(
+            (0..v3_durable_lane_count)
+                .map(|_| Arc::new(AtomicU64::new(v3_durable_admission_soft_fsync_p99_us)))
+                .collect::<Vec<_>>(),
+        ),
         v3_durable_worker_loop_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_worker_loop_hist_per_lane,
         v3_durable_worker_batch_min,
@@ -2096,6 +2135,8 @@ pub async fn run(
         v3_durable_receipt_inflight_max_per_lane: new_lane_u64_counters(),
         v3_durable_receipt_inflight: Arc::new(AtomicU64::new(0)),
         v3_durable_receipt_inflight_max: Arc::new(AtomicU64::new(0)),
+        v3_durable_pressure_pct_per_lane: new_lane_u64_counters(),
+        v3_durable_dynamic_cap_pct_per_lane: new_lane_u64_counters(),
         v3_soft_reject_pct,
         v3_hard_reject_pct,
         v3_kill_reject_pct,
@@ -2169,6 +2210,7 @@ pub async fn run(
         let durable_batch_max = durable_state.v3_durable_worker_batch_max;
         let durable_batch_wait_us = durable_state.v3_durable_worker_batch_wait_us;
         let durable_batch_adaptive_cfg = v3_durable_worker_batch_adaptive_cfg;
+        let durable_pressure_cfg = v3_durable_worker_pressure_cfg;
         tokio::spawn(async move {
             run_v3_durable_worker(
                 lane_id,
@@ -2177,6 +2219,7 @@ pub async fn run(
                 durable_batch_max,
                 durable_batch_wait_us,
                 durable_batch_adaptive_cfg,
+                durable_pressure_cfg,
             )
             .await;
         });
@@ -2388,6 +2431,137 @@ impl V3DurableWorkerBatchAdaptiveConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum V3DurableControlPreset {
+    Legacy,
+    HftStable,
+}
+
+impl V3DurableControlPreset {
+    fn from_env() -> Self {
+        match std::env::var("V3_DURABLE_CONTROL_PRESET")
+            .unwrap_or_else(|_| "hft_stable".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "legacy" => Self::Legacy,
+            "hft_stable" | "stable" | "hft" => Self::HftStable,
+            _ => Self::HftStable,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::HftStable => "hft_stable",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct V3DurableWorkerPressureConfig {
+    control_preset: V3DurableControlPreset,
+    durable_slo_stage: u64,
+    dynamic_inflight_enabled: bool,
+    dynamic_inflight_min_cap_pct: u64,
+    dynamic_inflight_max_cap_pct: u64,
+    early_soft_age_us: u64,
+    early_hard_age_us: u64,
+    age_soft_inflight_cap_pct: u64,
+    age_hard_inflight_cap_pct: u64,
+    pressure_ewma_alpha_pct: u64,
+    dynamic_cap_slew_step_pct: u64,
+}
+
+impl V3DurableWorkerPressureConfig {
+    fn from_env(inflight_hard_cap_pct: u64) -> Self {
+        let control_preset = V3DurableControlPreset::from_env();
+        let durable_slo_stage = std::env::var("V3_DURABLE_SLO_STAGE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1);
+        let (stage_soft_age_us, stage_hard_age_us) =
+            v3_durable_slo_age_targets(durable_slo_stage, control_preset);
+        let defaults = match control_preset {
+            V3DurableControlPreset::Legacy => (inflight_hard_cap_pct.max(1), 100, 50, 20, 100, 100),
+            V3DurableControlPreset::HftStable => (5, 80, 35, 15, 100, 100),
+        };
+        let (default_dynamic_min, default_dynamic_max, default_age_soft, default_age_hard, default_alpha, default_slew) =
+            defaults;
+
+        let dynamic_inflight_enabled =
+            parse_bool_env("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT").unwrap_or(true);
+        let mut dynamic_inflight_min_cap_pct =
+            std::env::var("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(default_dynamic_min)
+                .clamp(1, 100);
+        let dynamic_inflight_max_cap_pct =
+            std::env::var("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(default_dynamic_max)
+                .clamp(1, 100);
+        if dynamic_inflight_min_cap_pct > dynamic_inflight_max_cap_pct {
+            dynamic_inflight_min_cap_pct = dynamic_inflight_max_cap_pct;
+        }
+
+        let early_soft_age_us = std::env::var("V3_DURABLE_SLO_EARLY_SOFT_AGE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(stage_soft_age_us);
+        let mut early_hard_age_us = std::env::var("V3_DURABLE_SLO_EARLY_HARD_AGE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(stage_hard_age_us);
+        if early_soft_age_us > 0 && early_hard_age_us > 0 && early_hard_age_us <= early_soft_age_us
+        {
+            early_hard_age_us = early_soft_age_us.saturating_add(1);
+        }
+
+        let age_soft_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_age_soft)
+            .clamp(1, 100);
+        let mut age_hard_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_age_hard)
+            .clamp(1, 100);
+        if age_hard_inflight_cap_pct > age_soft_inflight_cap_pct {
+            age_hard_inflight_cap_pct = age_soft_inflight_cap_pct;
+        }
+
+        let pressure_ewma_alpha_pct = std::env::var("V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_alpha)
+            .clamp(1, 100);
+        let dynamic_cap_slew_step_pct = std::env::var("V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_slew)
+            .clamp(1, 100);
+
+        Self {
+            control_preset,
+            durable_slo_stage,
+            dynamic_inflight_enabled,
+            dynamic_inflight_min_cap_pct,
+            dynamic_inflight_max_cap_pct,
+            early_soft_age_us,
+            early_hard_age_us,
+            age_soft_inflight_cap_pct,
+            age_hard_inflight_cap_pct,
+            pressure_ewma_alpha_pct,
+            dynamic_cap_slew_step_pct,
+        }
+    }
+}
+
 fn v3_pressure_ratio(current: i64, soft: i64, hard: i64) -> f64 {
     if hard <= soft {
         return if current >= hard { 1.0 } else { 0.0 };
@@ -2414,6 +2588,57 @@ fn v3_fsync_pressure_ratio(current_us: u64, soft_us: u64, hard_us: u64) -> f64 {
         1.0
     } else {
         (current_us - soft_us) as f64 / (hard_us - soft_us) as f64
+    }
+}
+
+fn v3_confirm_age_pressure_ratio(current_us: u64, soft_us: u64, hard_us: u64) -> f64 {
+    if soft_us == 0 && hard_us == 0 {
+        return 0.0;
+    }
+    if soft_us > 0 && hard_us > soft_us {
+        if current_us <= soft_us {
+            0.0
+        } else if current_us >= hard_us {
+            1.0
+        } else {
+            (current_us - soft_us) as f64 / (hard_us - soft_us) as f64
+        }
+    } else if soft_us > 0 {
+        (current_us as f64 / soft_us as f64).clamp(0.0, 1.0)
+    } else if hard_us > 0 {
+        (current_us as f64 / hard_us as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn v3_durable_slo_age_targets(stage: u64, preset: V3DurableControlPreset) -> (u64, u64) {
+    match preset {
+        V3DurableControlPreset::Legacy => match stage {
+            0 => (0, 0),
+            1 => (250_000, 750_000),
+            2 => (150_000, 500_000),
+            3 => (100_000, 300_000),
+            4 => (50_000, 150_000),
+            _ => (250_000, 750_000),
+        },
+        V3DurableControlPreset::HftStable => match stage {
+            0 => (0, 0),
+            1 => (100_000, 220_000),
+            2 => (80_000, 180_000),
+            3 => (60_000, 140_000),
+            4 => (40_000, 100_000),
+            _ => (100_000, 220_000),
+        },
+    }
+}
+
+fn choose_tighter_age_target(preferred: u64, fallback: u64) -> u64 {
+    match (preferred, fallback) {
+        (0, 0) => 0,
+        (a, 0) => a,
+        (0, b) => b,
+        (a, b) => a.min(b),
     }
 }
 
@@ -2446,13 +2671,16 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
         state
             .v3_confirm_store
             .record_volatile(&task, gateway_core::now_nanos());
-        match state.v3_durable_ingress.try_enqueue(task.into()) {
+        match state
+            .v3_durable_ingress
+            .try_enqueue(task.shard_id, task.into())
+        {
             Ok(()) => {}
             Err(TrySendError::Full(task)) => {
                 state.register_v3_loss_suspect(
                     &task.session_id,
                     task.session_seq,
-                    task.shard_id,
+                    shard_id,
                     "DURABILITY_QUEUE_FULL",
                     gateway_core::now_nanos(),
                 );
@@ -2461,7 +2689,7 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
                 state.register_v3_loss_suspect(
                     &task.session_id,
                     task.session_seq,
-                    task.shard_id,
+                    shard_id,
                     "DURABILITY_QUEUE_CLOSED",
                     gateway_core::now_nanos(),
                 );
@@ -2479,6 +2707,7 @@ async fn run_v3_durable_worker(
     batch_max: usize,
     batch_wait_us: u64,
     batch_adaptive_cfg: V3DurableWorkerBatchAdaptiveConfig,
+    pressure_cfg: V3DurableWorkerPressureConfig,
 ) {
     #[derive(Clone, Copy)]
     struct DurableResolution {
@@ -2533,24 +2762,41 @@ async fn run_v3_durable_worker(
     let max_inflight_receipts_global = state.v3_durable_worker_max_inflight_receipts_global.max(1);
     let inflight_soft_cap_pct = state.v3_durable_worker_inflight_soft_cap_pct;
     let inflight_hard_cap_pct = state.v3_durable_worker_inflight_hard_cap_pct;
-    let age_soft_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_SOFT_INFLIGHT_CAP_PCT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(50)
-        .clamp(1, 100);
-    let mut age_hard_inflight_cap_pct = std::env::var("V3_DURABLE_AGE_HARD_INFLIGHT_CAP_PCT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(20)
-        .clamp(1, 100);
-    if age_hard_inflight_cap_pct > age_soft_inflight_cap_pct {
-        age_hard_inflight_cap_pct = age_soft_inflight_cap_pct;
+    let dynamic_inflight_enabled = pressure_cfg.dynamic_inflight_enabled;
+    let dynamic_inflight_min_cap_pct = pressure_cfg.dynamic_inflight_min_cap_pct;
+    let dynamic_inflight_max_cap_pct = pressure_cfg.dynamic_inflight_max_cap_pct;
+    let early_soft_age_us = pressure_cfg.early_soft_age_us;
+    let early_hard_age_us = pressure_cfg.early_hard_age_us;
+    let age_soft_inflight_cap_pct = pressure_cfg.age_soft_inflight_cap_pct;
+    let age_hard_inflight_cap_pct = pressure_cfg.age_hard_inflight_cap_pct;
+    let pressure_alpha = (pressure_cfg.pressure_ewma_alpha_pct as f64 / 100.0).clamp(0.01, 1.0);
+    let cap_slew_step_pct = pressure_cfg.dynamic_cap_slew_step_pct.max(1);
+    let confirm_lane_aligned = state.v3_confirm_store.lane_count_metric() as usize
+        == state.v3_durable_ingress.lane_count();
+    if lane_id == 0 {
+        info!(
+            preset = pressure_cfg.control_preset.as_str(),
+            stage = pressure_cfg.durable_slo_stage,
+            dynamic_inflight_enabled = dynamic_inflight_enabled,
+            dynamic_min_cap_pct = dynamic_inflight_min_cap_pct,
+            dynamic_max_cap_pct = dynamic_inflight_max_cap_pct,
+            early_soft_age_us = early_soft_age_us,
+            early_hard_age_us = early_hard_age_us,
+            age_soft_inflight_cap_pct = age_soft_inflight_cap_pct,
+            age_hard_inflight_cap_pct = age_hard_inflight_cap_pct,
+            pressure_ewma_alpha_pct = pressure_cfg.pressure_ewma_alpha_pct,
+            dynamic_cap_slew_step_pct = cap_slew_step_pct,
+            "v3 durable worker pressure config"
+        );
     }
     let mut ingress_closed = false;
     use futures::{FutureExt, StreamExt, future::BoxFuture};
     let mut inflight: futures::stream::FuturesUnordered<
         BoxFuture<'static, (V3DurableTask, DurableResolution)>,
     > = futures::stream::FuturesUnordered::new();
+    let mut smoothed_pressure_pct = 0.0f64;
+    let mut pressure_initialized = false;
+    let mut prev_dynamic_cap_pct = dynamic_inflight_max_cap_pct;
 
     let apply_outcome = |task: V3DurableTask, outcome: DurableResolution| {
         if outcome.timed_out {
@@ -2569,21 +2815,40 @@ async fn run_v3_durable_worker(
 
         let now_ns = gateway_core::now_nanos();
         if outcome.durable_done_ns > 0 {
-            state.v3_confirm_store.mark_durable_accepted(
-                &task.session_id,
-                task.session_seq,
-                now_ns,
-            );
+            if confirm_lane_aligned {
+                state.v3_confirm_store.mark_durable_accepted_in_lane(
+                    lane_id,
+                    &task.session_id,
+                    task.session_seq,
+                    now_ns,
+                );
+            } else {
+                state.v3_confirm_store.mark_durable_accepted(
+                    &task.session_id,
+                    task.session_seq,
+                    now_ns,
+                );
+            }
             state
                 .v3_durable_accepted_total
                 .fetch_add(1, Ordering::Relaxed);
         } else {
-            state.v3_confirm_store.mark_durable_rejected(
-                &task.session_id,
-                task.session_seq,
-                outcome.reject_reason,
-                now_ns,
-            );
+            if confirm_lane_aligned {
+                state.v3_confirm_store.mark_durable_rejected_in_lane(
+                    lane_id,
+                    &task.session_id,
+                    task.session_seq,
+                    outcome.reject_reason,
+                    now_ns,
+                );
+            } else {
+                state.v3_confirm_store.mark_durable_rejected(
+                    &task.session_id,
+                    task.session_seq,
+                    outcome.reject_reason,
+                    now_ns,
+                );
+            }
             state
                 .v3_durable_rejected_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -2633,6 +2898,17 @@ async fn run_v3_durable_worker(
         }
 
         let total_inflight = refresh_inflight_metrics(inflight.len());
+        let lane_util_pct = state.v3_durable_ingress.lane_utilization_pct(lane_id);
+        let lane_backlog_growth_per_sec = state
+            .v3_durable_backlog_growth_per_sec_per_lane
+            .get(lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let lane_fsync_p99_us = state
+            .v3_durable_fsync_p99_cached_us_per_lane
+            .get(lane_id)
+            .map(|value| value.load(Ordering::Relaxed))
+            .unwrap_or_else(|| state.v3_durable_fsync_p99_cached_us.load(Ordering::Relaxed));
 
         let lane_level = state
             .v3_durable_admission_level_per_lane
@@ -2656,9 +2932,57 @@ async fn run_v3_durable_worker(
             .unwrap_or_else(|| state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed));
         let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
         let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+        let soft_pressure_age_us = choose_tighter_age_target(
+            early_soft_age_us,
+            if confirm_soft_age_us > 0 {
+                confirm_soft_age_us.saturating_mul(8) / 10
+            } else {
+                0
+            },
+        );
+        let hard_pressure_age_us = choose_tighter_age_target(
+            early_hard_age_us,
+            if confirm_hard_age_us > 0 {
+                confirm_hard_age_us.saturating_mul(9) / 10
+            } else {
+                0
+            },
+        );
+        let util_ratio = (lane_util_pct / 100.0).clamp(0.0, 1.0);
+        let backlog_ratio = v3_pressure_ratio(
+            lane_backlog_growth_per_sec,
+            state.v3_durable_backlog_soft_reject_per_sec,
+            state.v3_durable_backlog_hard_reject_per_sec,
+        );
+        let fsync_ratio = v3_fsync_pressure_ratio(
+            lane_fsync_p99_us,
+            state.v3_durable_admission_soft_fsync_p99_us,
+            state.v3_durable_admission_hard_fsync_p99_us,
+        );
+        let confirm_ratio = v3_confirm_age_pressure_ratio(
+            confirm_oldest_age_us_lane,
+            soft_pressure_age_us,
+            hard_pressure_age_us,
+        );
+        let lane_pressure_pct_raw = ((util_ratio * 0.45
+            + backlog_ratio * 0.25
+            + fsync_ratio * 0.15
+            + confirm_ratio * 0.15)
+            * 100.0)
+            .clamp(0.0, 100.0);
+        if !pressure_initialized {
+            smoothed_pressure_pct = lane_pressure_pct_raw;
+            pressure_initialized = true;
+        } else {
+            smoothed_pressure_pct =
+                (pressure_alpha * lane_pressure_pct_raw) + ((1.0 - pressure_alpha) * smoothed_pressure_pct);
+        }
+        let lane_pressure_pct = smoothed_pressure_pct.clamp(0.0, 100.0);
+        if let Some(gauge) = state.v3_durable_pressure_pct_per_lane.get(lane_id) {
+            gauge.store(lane_pressure_pct.round() as u64, Ordering::Relaxed);
+        }
         let mut effective_max_inflight = effective_max_inflight;
-        if confirm_soft_age_us > 0 {
-            let soft_pressure_age_us = confirm_soft_age_us.saturating_mul(8) / 10;
+        if soft_pressure_age_us > 0 {
             if confirm_oldest_age_us_lane >= soft_pressure_age_us {
                 let soft_cap = (((max_inflight_receipts as u128)
                     .saturating_mul(age_soft_inflight_cap_pct as u128)
@@ -2668,8 +2992,7 @@ async fn run_v3_durable_worker(
                 effective_max_inflight = effective_max_inflight.min(soft_cap);
             }
         }
-        if confirm_hard_age_us > 0 {
-            let hard_pressure_age_us = confirm_hard_age_us.saturating_mul(9) / 10;
+        if hard_pressure_age_us > 0 {
             if confirm_oldest_age_us_lane >= hard_pressure_age_us {
                 let hard_cap = (((max_inflight_receipts as u128)
                     .saturating_mul(age_hard_inflight_cap_pct as u128)
@@ -2678,6 +3001,39 @@ async fn run_v3_durable_worker(
                     .min(max_inflight_receipts);
                 effective_max_inflight = effective_max_inflight.min(hard_cap);
             }
+        }
+        let mut dynamic_cap_pct_applied = 100u64;
+        if dynamic_inflight_enabled {
+            let dynamic_range =
+                dynamic_inflight_max_cap_pct.saturating_sub(dynamic_inflight_min_cap_pct);
+            let dynamic_step =
+                ((dynamic_range as f64) * (lane_pressure_pct / 100.0)).round() as u64;
+            let target_dynamic_cap_pct = dynamic_inflight_max_cap_pct
+                .saturating_sub(dynamic_step)
+                .max(dynamic_inflight_min_cap_pct);
+            let mut dynamic_cap_pct = target_dynamic_cap_pct;
+            if cap_slew_step_pct < 100 {
+                let lower = prev_dynamic_cap_pct.saturating_sub(cap_slew_step_pct);
+                let upper = prev_dynamic_cap_pct
+                    .saturating_add(cap_slew_step_pct)
+                    .min(100);
+                dynamic_cap_pct = dynamic_cap_pct.clamp(lower, upper);
+            }
+            dynamic_cap_pct = dynamic_cap_pct
+                .clamp(dynamic_inflight_min_cap_pct, dynamic_inflight_max_cap_pct);
+            prev_dynamic_cap_pct = dynamic_cap_pct;
+            dynamic_cap_pct_applied = dynamic_cap_pct;
+            let dynamic_cap = (((max_inflight_receipts as u128)
+                .saturating_mul(dynamic_cap_pct as u128)
+                / 100) as usize)
+                .max(fallback_batch_max)
+                .min(max_inflight_receipts);
+            effective_max_inflight = effective_max_inflight.min(dynamic_cap);
+        } else {
+            prev_dynamic_cap_pct = 100;
+        }
+        if let Some(gauge) = state.v3_durable_dynamic_cap_pct_per_lane.get(lane_id) {
+            gauge.store(dynamic_cap_pct_applied, Ordering::Relaxed);
         }
 
         if inflight.len() >= effective_max_inflight
@@ -2734,31 +3090,6 @@ async fn run_v3_durable_worker(
             }
 
             if let Some(first) = first {
-                let lane_util_pct = state.v3_durable_ingress.lane_utilization_pct(lane_id);
-                let lane_backlog_growth_per_sec = state
-                    .v3_durable_backlog_growth_per_sec_per_lane
-                    .get(lane_id)
-                    .map(|v| v.load(Ordering::Relaxed))
-                    .unwrap_or(0);
-                let lane_fsync_p99_us = state
-                    .v3_durable_wal_fsync_hist_per_lane
-                    .get(lane_id)
-                    .map(|hist| hist.snapshot().percentile(99.0))
-                    .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
-                let util_ratio = (lane_util_pct / 100.0).clamp(0.0, 1.0);
-                let backlog_ratio = v3_pressure_ratio(
-                    lane_backlog_growth_per_sec,
-                    state.v3_durable_backlog_soft_reject_per_sec,
-                    state.v3_durable_backlog_hard_reject_per_sec,
-                );
-                let fsync_ratio = v3_fsync_pressure_ratio(
-                    lane_fsync_p99_us,
-                    state.v3_durable_admission_soft_fsync_p99_us,
-                    state.v3_durable_admission_hard_fsync_p99_us,
-                );
-                let lane_pressure_pct =
-                    ((util_ratio * 0.60 + backlog_ratio * 0.25 + fsync_ratio * 0.15) * 100.0)
-                        .clamp(0.0, 100.0);
                 let (target_batch_max, target_batch_wait) = if batch_adaptive_cfg.enabled {
                     batch_adaptive_cfg.target_for_pressure(lane_pressure_pct)
                 } else {
@@ -2767,19 +3098,13 @@ async fn run_v3_durable_worker(
                 // Confirm age approaches soft/hard guard: prioritize latency over batch efficiency.
                 let mut target_batch_max = target_batch_max;
                 let mut target_batch_wait = target_batch_wait;
-                if confirm_soft_age_us > 0 {
-                    let soft_pressure_age_us = confirm_soft_age_us.saturating_mul(8) / 10;
-                    if confirm_oldest_age_us_lane >= soft_pressure_age_us {
-                        target_batch_wait = target_batch_wait.min(batch_adaptive_cfg.wait_min);
-                        target_batch_max = target_batch_max.min((fallback_batch_max / 2).max(1));
-                    }
+                if soft_pressure_age_us > 0 && confirm_oldest_age_us_lane >= soft_pressure_age_us {
+                    target_batch_wait = target_batch_wait.min(batch_adaptive_cfg.wait_min);
+                    target_batch_max = target_batch_max.min((fallback_batch_max / 2).max(1));
                 }
-                if confirm_hard_age_us > 0 {
-                    let hard_pressure_age_us = confirm_hard_age_us.saturating_mul(9) / 10;
-                    if confirm_oldest_age_us_lane >= hard_pressure_age_us {
-                        target_batch_wait = Duration::from_micros(1);
-                        target_batch_max = 1;
-                    }
+                if hard_pressure_age_us > 0 && confirm_oldest_age_us_lane >= hard_pressure_age_us {
+                    target_batch_wait = Duration::from_micros(1);
+                    target_batch_max = 1;
                 }
                 let lane_headroom = effective_max_inflight.saturating_sub(inflight.len());
                 let global_headroom = max_inflight_receipts_global.saturating_sub(total_inflight);
@@ -3125,6 +3450,11 @@ async fn run_v3_loss_monitor(state: AppState) {
         state
             .v3_durable_backlog_growth_per_sec
             .store(growth, Ordering::Relaxed);
+        let fsync_p99_global = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
+        state
+            .v3_durable_fsync_p99_cached_us
+            .store(fsync_p99_global, Ordering::Relaxed);
+        let mut fsync_p99_per_lane = Vec::with_capacity(lane_count);
         for lane_id in 0..lane_count {
             let lane_depth_now = state.v3_durable_ingress.lane_depth(lane_id);
             let lane_depth_prev = state
@@ -3144,6 +3474,15 @@ async fn run_v3_loss_monitor(state: AppState) {
             {
                 gauge.store(lane_growth, Ordering::Relaxed);
             }
+            let lane_fsync_p99_us = state
+                .v3_durable_wal_fsync_hist_per_lane
+                .get(lane_id)
+                .map(|hist| hist.snapshot().percentile(99.0))
+                .unwrap_or(fsync_p99_global);
+            fsync_p99_per_lane.push(lane_fsync_p99_us);
+            if let Some(cached) = state.v3_durable_fsync_p99_cached_us_per_lane.get(lane_id) {
+                cached.store(lane_fsync_p99_us, Ordering::Relaxed);
+            }
         }
         if state.v3_durable_admission_controller_enabled {
             let prev_level = state.v3_durable_admission_level.load(Ordering::Relaxed);
@@ -3155,11 +3494,10 @@ async fn run_v3_loss_monitor(state: AppState) {
                     .get(lane_id)
                     .map(|v| v.load(Ordering::Relaxed))
                     .unwrap_or(0);
-                let lane_fsync_p99_us = state
-                    .v3_durable_wal_fsync_hist_per_lane
+                let lane_fsync_p99_us = fsync_p99_per_lane
                     .get(lane_id)
-                    .map(|hist| hist.snapshot().percentile(99.0))
-                    .unwrap_or_else(|| state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0));
+                    .copied()
+                    .unwrap_or(fsync_p99_global);
                 let queue_pressure_soft =
                     lane_queue_pct_now >= state.v3_durable_soft_reject_pct as f64;
                 let queue_pressure_hard =
@@ -3416,10 +3754,9 @@ mod tests {
                 session_seq: shard_id as u64,
                 attempt_seq: shard_id as u64,
                 received_at_ns: 1_000_000,
-                shard_id,
             };
             ingress
-                .try_enqueue(task)
+                .try_enqueue(shard_id, task)
                 .expect("enqueue should succeed for test lane capacity");
         }
 
