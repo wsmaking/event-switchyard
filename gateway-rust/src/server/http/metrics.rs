@@ -3,7 +3,7 @@
 //! - 位置: 運用監視のための読み取り専用パス。
 //! - 内包: health と Prometheus metrics の出力。
 
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,8 +97,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_session_killed_total = state.v3_session_killed_total.load(Ordering::Relaxed);
     let v3_shard_killed_total = state.v3_shard_killed_total.load(Ordering::Relaxed);
     let v3_global_killed_total = state.v3_global_killed_total.load(Ordering::Relaxed);
-    let v3_durable_accepted_total = state.v3_durable_accepted_total.load(Ordering::Relaxed);
-    let v3_durable_rejected_total = state.v3_durable_rejected_total.load(Ordering::Relaxed);
+    let v3_durable_accepted_total = state.v3_durable_accepted_total_current();
+    let v3_durable_rejected_total = state.v3_durable_rejected_total_current();
     let v3_durable_queue_depth = state.v3_durable_ingress.total_depth();
     let v3_durable_queue_capacity = state.v3_durable_ingress.total_capacity();
     let v3_durable_queue_utilization_pct = if v3_durable_queue_capacity == 0 {
@@ -367,8 +367,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
             0
         };
     let v3_durable_confirm_guard_min_queue_pct = state.v3_durable_confirm_guard_min_queue_pct;
-    let v3_durable_confirm_guard_min_inflight_pct =
-        state.v3_durable_confirm_guard_min_inflight_pct;
+    let v3_durable_confirm_guard_min_inflight_pct = state.v3_durable_confirm_guard_min_inflight_pct;
     let v3_durable_confirm_guard_min_backlog_per_sec =
         state.v3_durable_confirm_guard_min_backlog_per_sec;
     let v3_durable_confirm_guard_soft_sustain_ticks =

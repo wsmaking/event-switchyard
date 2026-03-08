@@ -12,9 +12,9 @@ use crate::order::{OrderRequest, OrderResponse};
 use crate::store::OrderSnapshot;
 use axum::http::HeaderMap;
 use axum::{
-    extract::{Path, State},
-    http::{header::AUTHORIZATION, StatusCode},
     Json,
+    extract::{Path, State},
+    http::{StatusCode, header::AUTHORIZATION},
 };
 use gateway_core::now_nanos;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -649,8 +649,10 @@ pub(super) fn process_order_v3_hot_path(
         !(state.v3_durable_confirm_guard_hard_requires_admission && lane_level == 0);
     let soft_guard_admission_enabled =
         !(state.v3_durable_confirm_guard_soft_requires_admission && lane_level == 0);
-    let hard_guard_enabled = hard_guard_admission_enabled && guard_secondary_enabled && hard_guard_armed;
-    let soft_guard_enabled = soft_guard_admission_enabled && guard_secondary_enabled && soft_guard_armed;
+    let hard_guard_enabled =
+        hard_guard_admission_enabled && guard_secondary_enabled && hard_guard_armed;
+    let soft_guard_enabled =
+        soft_guard_admission_enabled && guard_secondary_enabled && soft_guard_armed;
     if confirm_hard_guard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_guard_age_us {
         if hard_guard_enabled {
             state.increment_v3_rejected_hard_total(shard_id);
@@ -1932,13 +1934,13 @@ mod tests {
     use crate::sse::SseHub;
     use crate::store::{OrderIdMap, OrderStatus, OrderStore, ShardedOrderStore};
     use axum::http::HeaderValue;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use gateway_core::LatencyHistogram;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     type HmacSha256 = Hmac<Sha256>;
@@ -2042,7 +2044,9 @@ mod tests {
             v3_global_killed_total: Arc::new(AtomicU64::new(0)),
             v3_durable_ingress: Arc::clone(&v3_durable_ingress),
             v3_durable_accepted_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_accepted_total_per_lane: lane_u64(),
             v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_rejected_total_per_lane: lane_u64(),
             v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
             v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
@@ -2051,6 +2055,7 @@ mod tests {
             v3_durable_wal_fsync_hist_per_lane,
             v3_durable_fsync_p99_cached_us: Arc::new(AtomicU64::new(6_000)),
             v3_durable_fsync_p99_cached_us_per_lane: lane_u64(),
+            v3_durable_fsync_ewma_alpha_pct: 30,
             v3_durable_worker_loop_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_worker_loop_hist_per_lane,
             v3_durable_worker_batch_min: 4,
@@ -2146,20 +2151,16 @@ mod tests {
             v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_soft_reject_skipped_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_hard_reject_skipped_total: Arc::new(AtomicU64::new(0)),
-            v3_durable_confirm_age_soft_reject_skipped_unarmed_total: Arc::new(
-                AtomicU64::new(0),
-            ),
-            v3_durable_confirm_age_hard_reject_skipped_unarmed_total: Arc::new(
-                AtomicU64::new(0),
-            ),
-            v3_durable_confirm_age_soft_reject_skipped_low_load_total: Arc::new(
-                AtomicU64::new(0),
-            ),
-            v3_durable_confirm_age_hard_reject_skipped_low_load_total: Arc::new(
-                AtomicU64::new(0),
-            ),
+            v3_durable_confirm_age_soft_reject_skipped_unarmed_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_hard_reject_skipped_unarmed_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_soft_reject_skipped_low_load_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_hard_reject_skipped_low_load_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_autotune_enabled: false,
             v3_durable_confirm_age_autotune_alpha_pct: 20,
+            v3_durable_confirm_age_fsync_linked: true,
+            v3_durable_confirm_age_fsync_soft_ref_us: 6_000,
+            v3_durable_confirm_age_fsync_hard_ref_us: 12_000,
+            v3_durable_confirm_age_fsync_max_relax_pct: 100,
             v3_durable_confirm_soft_reject_age_min_us: 0,
             v3_durable_confirm_soft_reject_age_max_us: 0,
             v3_durable_confirm_hard_reject_age_min_us: 0,
@@ -2405,9 +2406,11 @@ mod tests {
         .unwrap_or_else(|_| panic!("pending lookup failed"));
         assert_eq!(pending.status, "PENDING");
 
-        assert!(state
-            .sharded_store
-            .mark_durable(order_id, account_id, audit::now_millis()));
+        assert!(
+            state
+                .sharded_store
+                .mark_durable(order_id, account_id, audit::now_millis())
+        );
         let Json(durable) = handle_get_order_v2(
             State(state.clone()),
             headers(account_id, None),
@@ -2464,9 +2467,11 @@ mod tests {
         .unwrap_or_else(|_| panic!("pending client lookup failed"));
         assert_eq!(pending.status, "PENDING");
 
-        assert!(state
-            .sharded_store
-            .mark_durable(order_id, account_id, audit::now_millis()));
+        assert!(
+            state
+                .sharded_store
+                .mark_durable(order_id, account_id, audit::now_millis())
+        );
         let Json(durable) = handle_get_order_by_client_id(
             State(state.clone()),
             headers(account_id, None),
@@ -3023,7 +3028,7 @@ mod tests {
         }
         assert!(durable_seen, "expected eventual DURABLE_ACCEPTED");
         assert_eq!(state.v3_accepted_total_current(), 1);
-        assert_eq!(state.v3_durable_accepted_total.load(Ordering::Relaxed), 1);
+        assert_eq!(state.v3_durable_accepted_total_current(), 1);
 
         let metrics = super::super::metrics::handle_metrics(State(state.clone())).await;
         assert!(metrics.contains("gateway_v3_confirm_store_size "));
