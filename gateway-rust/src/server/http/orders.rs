@@ -12,9 +12,9 @@ use crate::order::{OrderRequest, OrderResponse};
 use crate::store::OrderSnapshot;
 use axum::http::HeaderMap;
 use axum::{
-    Json,
     extract::{Path, State},
-    http::{StatusCode, header::AUTHORIZATION},
+    http::{header::AUTHORIZATION, StatusCode},
+    Json,
 };
 use gateway_core::now_nanos;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -501,9 +501,7 @@ pub(super) fn process_order_v3_hot_path(
     state.v3_stage_parse_hist.record(parse_elapsed);
 
     if ingress.is_global_killed() {
-        state
-            .v3_rejected_killed_total
-            .fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -511,9 +509,7 @@ pub(super) fn process_order_v3_hot_path(
         );
     }
     if ingress.is_session_killed(&session_id) {
-        state
-            .v3_rejected_killed_total
-            .fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -521,9 +517,7 @@ pub(super) fn process_order_v3_hot_path(
         );
     }
     if ingress.is_shard_killed(shard_id) {
-        state
-            .v3_rejected_killed_total
-            .fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -588,7 +582,7 @@ pub(super) fn process_order_v3_hot_path(
     let confirm_oldest_age_us = confirm_oldest_age_us_lane;
     let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
     if confirm_hard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_age_us {
-        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_hard_total(shard_id);
         state
             .v3_durable_confirm_age_hard_reject_total
             .fetch_add(1, Ordering::Relaxed);
@@ -609,7 +603,7 @@ pub(super) fn process_order_v3_hot_path(
     }
     let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
     if confirm_soft_age_us > 0 && confirm_oldest_age_us >= confirm_soft_age_us {
-        state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_soft_total(shard_id);
         state
             .v3_durable_confirm_age_soft_reject_total
             .fetch_add(1, Ordering::Relaxed);
@@ -633,7 +627,7 @@ pub(super) fn process_order_v3_hot_path(
         || (durable_backlog_signal_enabled
             && durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe);
     if durable_failsafe_hard {
-        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_hard_total(shard_id);
         state
             .v3_durable_backpressure_hard_total
             .fetch_add(1, Ordering::Relaxed);
@@ -655,7 +649,7 @@ pub(super) fn process_order_v3_hot_path(
             .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
         match durable_level {
             2 => {
-                state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+                state.increment_v3_rejected_hard_total(shard_id);
                 state
                     .v3_durable_backpressure_hard_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -676,7 +670,7 @@ pub(super) fn process_order_v3_hot_path(
                 );
             }
             1 => {
-                state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+                state.increment_v3_rejected_soft_total(shard_id);
                 state
                     .v3_durable_backpressure_soft_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -703,7 +697,7 @@ pub(super) fn process_order_v3_hot_path(
             || (durable_backlog_signal_enabled
                 && durable_backlog_growth_per_sec >= state.v3_durable_backlog_hard_reject_per_sec)
         {
-            state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+            state.increment_v3_rejected_hard_total(shard_id);
             state
                 .v3_durable_backpressure_hard_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -727,7 +721,7 @@ pub(super) fn process_order_v3_hot_path(
             || (durable_backlog_signal_enabled
                 && durable_backlog_growth_per_sec >= state.v3_durable_backlog_soft_reject_per_sec)
         {
-            state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+            state.increment_v3_rejected_soft_total(shard_id);
             state
                 .v3_durable_backpressure_soft_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -755,9 +749,7 @@ pub(super) fn process_order_v3_hot_path(
         if ingress.kill_shard_due_to_watermark(shard_id, t0) {
             state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
         }
-        state
-            .v3_rejected_killed_total
-            .fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -765,7 +757,7 @@ pub(super) fn process_order_v3_hot_path(
         );
     }
     if queue_pct >= state.v3_hard_reject_pct {
-        state.v3_rejected_hard_total.fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_hard_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -774,7 +766,7 @@ pub(super) fn process_order_v3_hot_path(
     }
 
     if queue_pct >= state.v3_soft_reject_pct {
-        state.v3_rejected_soft_total.fetch_add(1, Ordering::Relaxed);
+        state.increment_v3_rejected_soft_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -797,7 +789,7 @@ pub(super) fn process_order_v3_hot_path(
         Ok(()) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
-            state.v3_accepted_total.fetch_add(1, Ordering::Relaxed);
+            state.increment_v3_accepted_total(shard_id);
             let serialize_t0 = now_nanos();
             let body = VolatileOrderResponse::accepted(session_id, session_seq, received_at_ns);
             let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
@@ -819,9 +811,7 @@ pub(super) fn process_order_v3_hot_path(
                 "V3_INGRESS_QUEUE_FULL",
                 now_nanos(),
             );
-            state
-                .v3_rejected_killed_total
-                .fetch_add(1, Ordering::Relaxed);
+            state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -841,9 +831,7 @@ pub(super) fn process_order_v3_hot_path(
                 "V3_INGRESS_CLOSED",
                 now_nanos(),
             );
-            state
-                .v3_rejected_killed_total
-                .fetch_add(1, Ordering::Relaxed);
+            state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1839,13 +1827,13 @@ mod tests {
     use crate::sse::SseHub;
     use crate::store::{OrderIdMap, OrderStatus, OrderStore, ShardedOrderStore};
     use axum::http::HeaderValue;
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use gateway_core::LatencyHistogram;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use std::collections::HashMap;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, AtomicU64};
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     type HmacSha256 = Hmac<Sha256>;
@@ -1879,6 +1867,7 @@ mod tests {
         let audit_read_path = Arc::new(audit_log.path().to_path_buf());
         let v3_durable_audit_logs = Arc::new(vec![Arc::clone(&audit_log)]);
         let v3_confirm_rebuild_paths = Arc::new(vec![audit_log.path().to_path_buf()]);
+        let shard_u64 = || Arc::new(vec![Arc::new(AtomicU64::new(0))]);
         let lane_u64 = || Arc::new(vec![Arc::new(AtomicU64::new(0))]);
         let lane_i64 = || Arc::new(vec![Arc::new(AtomicI64::new(0))]);
         let confirm_lane_hist = || Arc::new(vec![Arc::new(LatencyHistogram::new())]);
@@ -1933,9 +1922,13 @@ mod tests {
             backpressure_disk_free: Arc::new(AtomicU64::new(0)),
             v3_ingress: Arc::clone(&v3_ingress),
             v3_accepted_total: Arc::new(AtomicU64::new(0)),
+            v3_accepted_total_per_shard: shard_u64(),
             v3_rejected_soft_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_soft_total_per_shard: shard_u64(),
             v3_rejected_hard_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_hard_total_per_shard: shard_u64(),
             v3_rejected_killed_total: Arc::new(AtomicU64::new(0)),
+            v3_rejected_killed_total_per_shard: shard_u64(),
             v3_kill_recovered_total: Arc::new(AtomicU64::new(0)),
             v3_loss_suspect_total: Arc::new(AtomicU64::new(0)),
             v3_session_killed_total: Arc::new(AtomicU64::new(0)),
@@ -2259,11 +2252,9 @@ mod tests {
         .unwrap_or_else(|_| panic!("pending lookup failed"));
         assert_eq!(pending.status, "PENDING");
 
-        assert!(
-            state
-                .sharded_store
-                .mark_durable(order_id, account_id, audit::now_millis())
-        );
+        assert!(state
+            .sharded_store
+            .mark_durable(order_id, account_id, audit::now_millis()));
         let Json(durable) = handle_get_order_v2(
             State(state.clone()),
             headers(account_id, None),
@@ -2320,11 +2311,9 @@ mod tests {
         .unwrap_or_else(|_| panic!("pending client lookup failed"));
         assert_eq!(pending.status, "PENDING");
 
-        assert!(
-            state
-                .sharded_store
-                .mark_durable(order_id, account_id, audit::now_millis())
-        );
+        assert!(state
+            .sharded_store
+            .mark_durable(order_id, account_id, audit::now_millis()));
         let Json(durable) = handle_get_order_by_client_id(
             State(state.clone()),
             headers(account_id, None),
@@ -2705,7 +2694,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(durable_seen, "expected eventual DURABLE_ACCEPTED");
-        assert_eq!(state.v3_accepted_total.load(Ordering::Relaxed), 1);
+        assert_eq!(state.v3_accepted_total_current(), 1);
         assert_eq!(state.v3_durable_accepted_total.load(Ordering::Relaxed), 1);
 
         let metrics = super::super::metrics::handle_metrics(State(state.clone())).await;

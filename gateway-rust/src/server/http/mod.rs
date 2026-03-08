@@ -27,23 +27,24 @@ mod orders;
 mod sse;
 
 use axum::{
-    Router,
     http::StatusCode,
     routing::{get, post},
+    Router,
 };
 use gateway_core::SymbolLimits;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{
-    Receiver, Sender, UnboundedReceiver,
     error::{TryRecvError, TrySendError},
+    Receiver, Sender, UnboundedReceiver,
 };
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -64,10 +65,10 @@ use std::path::{Path, PathBuf};
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
 use orders::{
-    V3_TCP_REQUEST_SIZE, authenticate_v3_tcp_token, decode_v3_tcp_request,
-    encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_cancel_order, handle_get_order,
-    handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3, handle_order,
-    handle_order_v2, handle_order_v3, process_order_v3_hot_path,
+    authenticate_v3_tcp_token, decode_v3_tcp_request, encode_v3_tcp_decode_error,
+    encode_v3_tcp_response, handle_cancel_order, handle_get_order, handle_get_order_by_client_id,
+    handle_get_order_v2, handle_get_order_v3, handle_order, handle_order_v2, handle_order_v3,
+    process_order_v3_hot_path, V3_TCP_REQUEST_SIZE,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -393,6 +394,11 @@ impl V3ConfirmStore {
         self.records.len().max(1)
     }
 
+    #[inline]
+    fn clamp_lane(&self, lane_id: usize) -> usize {
+        lane_id.min(self.lane_count().saturating_sub(1))
+    }
+
     fn lane_for_session(&self, session_id: &str) -> usize {
         index_for_key(session_id, self.lane_count())
     }
@@ -488,6 +494,11 @@ impl V3ConfirmStore {
 
     pub(super) fn record_volatile(&self, task: &V3OrderTask, now_ns: u64) {
         let lane = self.lane_for_session(&task.session_id);
+        self.record_volatile_in_lane(lane, task, now_ns);
+    }
+
+    pub(super) fn record_volatile_in_lane(&self, lane_id: usize, task: &V3OrderTask, now_ns: u64) {
+        let lane = self.clamp_lane(lane_id);
         self.records[lane].insert(
             (task.session_id.clone(), task.session_seq),
             V3ConfirmRecord {
@@ -520,7 +531,7 @@ impl V3ConfirmStore {
         session_seq: u64,
         now_ns: u64,
     ) {
-        let lane = lane_id.min(self.lane_count().saturating_sub(1));
+        let lane = self.clamp_lane(lane_id);
         if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
         {
             entry.status = V3ConfirmStatus::DurableAccepted;
@@ -562,7 +573,7 @@ impl V3ConfirmStore {
         reason: &str,
         now_ns: u64,
     ) {
-        let lane = lane_id.min(self.lane_count().saturating_sub(1));
+        let lane = self.clamp_lane(lane_id);
         if let Some(mut entry) = self.records[lane].get_mut(&(session_id.to_string(), session_seq))
         {
             entry.status = V3ConfirmStatus::DurableRejected;
@@ -1206,9 +1217,13 @@ pub(super) struct AppState {
     pub(super) backpressure_disk_free: Arc<AtomicU64>,
     pub(super) v3_ingress: Arc<V3Ingress>,
     pub(super) v3_accepted_total: Arc<AtomicU64>,
+    pub(super) v3_accepted_total_per_shard: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_rejected_soft_total: Arc<AtomicU64>,
+    pub(super) v3_rejected_soft_total_per_shard: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_rejected_hard_total: Arc<AtomicU64>,
+    pub(super) v3_rejected_hard_total_per_shard: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_rejected_killed_total: Arc<AtomicU64>,
+    pub(super) v3_rejected_killed_total_per_shard: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_kill_recovered_total: Arc<AtomicU64>,
     pub(super) v3_loss_suspect_total: Arc<AtomicU64>,
     pub(super) v3_session_killed_total: Arc<AtomicU64>,
@@ -1320,6 +1335,100 @@ pub(super) struct AppState {
 }
 
 impl AppState {
+    #[inline]
+    fn load_shard_counter_total(counters: &[Arc<AtomicU64>], fallback: &AtomicU64) -> u64 {
+        if counters.is_empty() {
+            fallback.load(Ordering::Relaxed)
+        } else {
+            counters
+                .iter()
+                .map(|value| value.load(Ordering::Relaxed))
+                .sum()
+        }
+    }
+
+    #[inline]
+    fn increment_shard_counter(counters: &[Arc<AtomicU64>], fallback: &AtomicU64, shard_id: usize) {
+        if counters.is_empty() {
+            fallback.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let slot = shard_id % counters.len();
+        if let Some(counter) = counters.get(slot) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            fallback.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub(super) fn increment_v3_accepted_total(&self, shard_id: usize) {
+        Self::increment_shard_counter(
+            &self.v3_accepted_total_per_shard,
+            self.v3_accepted_total.as_ref(),
+            shard_id,
+        );
+    }
+
+    #[inline]
+    pub(super) fn increment_v3_rejected_soft_total(&self, shard_id: usize) {
+        Self::increment_shard_counter(
+            &self.v3_rejected_soft_total_per_shard,
+            self.v3_rejected_soft_total.as_ref(),
+            shard_id,
+        );
+    }
+
+    #[inline]
+    pub(super) fn increment_v3_rejected_hard_total(&self, shard_id: usize) {
+        Self::increment_shard_counter(
+            &self.v3_rejected_hard_total_per_shard,
+            self.v3_rejected_hard_total.as_ref(),
+            shard_id,
+        );
+    }
+
+    #[inline]
+    pub(super) fn increment_v3_rejected_killed_total(&self, shard_id: usize) {
+        Self::increment_shard_counter(
+            &self.v3_rejected_killed_total_per_shard,
+            self.v3_rejected_killed_total.as_ref(),
+            shard_id,
+        );
+    }
+
+    #[inline]
+    pub(super) fn v3_accepted_total_current(&self) -> u64 {
+        Self::load_shard_counter_total(
+            &self.v3_accepted_total_per_shard,
+            self.v3_accepted_total.as_ref(),
+        )
+    }
+
+    #[inline]
+    pub(super) fn v3_rejected_soft_total_current(&self) -> u64 {
+        Self::load_shard_counter_total(
+            &self.v3_rejected_soft_total_per_shard,
+            self.v3_rejected_soft_total.as_ref(),
+        )
+    }
+
+    #[inline]
+    pub(super) fn v3_rejected_hard_total_current(&self) -> u64 {
+        Self::load_shard_counter_total(
+            &self.v3_rejected_hard_total_per_shard,
+            self.v3_rejected_hard_total.as_ref(),
+        )
+    }
+
+    #[inline]
+    pub(super) fn v3_rejected_killed_total_current(&self) -> u64 {
+        Self::load_shard_counter_total(
+            &self.v3_rejected_killed_total_per_shard,
+            self.v3_rejected_killed_total.as_ref(),
+        )
+    }
+
     pub(super) fn register_v3_loss_suspect(
         &self,
         session_id: &str,
@@ -1968,6 +2077,13 @@ pub async fn run(
                 .collect::<Vec<_>>(),
         )
     };
+    let new_shard_u64_counters = || {
+        Arc::new(
+            (0..v3_shard_count.max(1))
+                .map(|_| Arc::new(AtomicU64::new(0)))
+                .collect::<Vec<_>>(),
+        )
+    };
     let new_lane_i64_gauges = || {
         Arc::new(
             (0..v3_durable_lane_count)
@@ -2059,9 +2175,13 @@ pub async fn run(
         backpressure_disk_free: Arc::new(AtomicU64::new(0)),
         v3_ingress: Arc::clone(&v3_ingress),
         v3_accepted_total: Arc::new(AtomicU64::new(0)),
+        v3_accepted_total_per_shard: new_shard_u64_counters(),
         v3_rejected_soft_total: Arc::new(AtomicU64::new(0)),
+        v3_rejected_soft_total_per_shard: new_shard_u64_counters(),
         v3_rejected_hard_total: Arc::new(AtomicU64::new(0)),
+        v3_rejected_hard_total_per_shard: new_shard_u64_counters(),
         v3_rejected_killed_total: Arc::new(AtomicU64::new(0)),
+        v3_rejected_killed_total_per_shard: new_shard_u64_counters(),
         v3_kill_recovered_total: Arc::new(AtomicU64::new(0)),
         v3_loss_suspect_total: Arc::new(AtomicU64::new(0)),
         v3_session_killed_total: Arc::new(AtomicU64::new(0)),
@@ -2485,10 +2605,17 @@ impl V3DurableWorkerPressureConfig {
             v3_durable_slo_age_targets(durable_slo_stage, control_preset);
         let defaults = match control_preset {
             V3DurableControlPreset::Legacy => (inflight_hard_cap_pct.max(1), 100, 50, 20, 100, 100),
-            V3DurableControlPreset::HftStable => (5, 80, 35, 15, 100, 100),
+            // HFT-stable baseline: avoid cap oscillation by smoothing pressure and limiting slew.
+            V3DurableControlPreset::HftStable => (5, 80, 35, 15, 30, 8),
         };
-        let (default_dynamic_min, default_dynamic_max, default_age_soft, default_age_hard, default_alpha, default_slew) =
-            defaults;
+        let (
+            default_dynamic_min,
+            default_dynamic_max,
+            default_age_soft,
+            default_age_hard,
+            default_alpha,
+            default_slew,
+        ) = defaults;
 
         let dynamic_inflight_enabled =
             parse_bool_env("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT").unwrap_or(true);
@@ -2668,9 +2795,12 @@ async fn resolve_audit_append_receipt(
 async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, state: AppState) {
     while let Some(task) = rx.recv().await {
         state.v3_ingress.on_processed_one(shard_id);
-        state
-            .v3_confirm_store
-            .record_volatile(&task, gateway_core::now_nanos());
+        let confirm_lane_id = state.v3_durable_ingress.lane_for_shard(task.shard_id);
+        state.v3_confirm_store.record_volatile_in_lane(
+            confirm_lane_id,
+            &task,
+            gateway_core::now_nanos(),
+        );
         match state
             .v3_durable_ingress
             .try_enqueue(task.shard_id, task.into())
@@ -2771,8 +2901,6 @@ async fn run_v3_durable_worker(
     let age_hard_inflight_cap_pct = pressure_cfg.age_hard_inflight_cap_pct;
     let pressure_alpha = (pressure_cfg.pressure_ewma_alpha_pct as f64 / 100.0).clamp(0.01, 1.0);
     let cap_slew_step_pct = pressure_cfg.dynamic_cap_slew_step_pct.max(1);
-    let confirm_lane_aligned = state.v3_confirm_store.lane_count_metric() as usize
-        == state.v3_durable_ingress.lane_count();
     if lane_id == 0 {
         info!(
             preset = pressure_cfg.control_preset.as_str(),
@@ -2790,13 +2918,44 @@ async fn run_v3_durable_worker(
         );
     }
     let mut ingress_closed = false;
-    use futures::{FutureExt, StreamExt, future::BoxFuture};
+    use futures::{future::BoxFuture, FutureExt, StreamExt};
     let mut inflight: futures::stream::FuturesUnordered<
         BoxFuture<'static, (V3DurableTask, DurableResolution)>,
     > = futures::stream::FuturesUnordered::new();
     let mut smoothed_pressure_pct = 0.0f64;
     let mut pressure_initialized = false;
     let mut prev_dynamic_cap_pct = dynamic_inflight_max_cap_pct;
+
+    #[inline]
+    fn build_v3_durable_accepted_event(task: &V3DurableTask, event_at_ms: u64) -> AuditEvent {
+        let mut order_id = String::with_capacity(4 + task.session_id.len() + 1 + 20);
+        order_id.push_str("v3/");
+        order_id.push_str(task.session_id.as_str());
+        order_id.push('/');
+        let _ = write!(&mut order_id, "{}", task.session_seq);
+
+        let mut attempt_id = String::with_capacity(4 + 20);
+        attempt_id.push_str("att_");
+        let _ = write!(&mut attempt_id, "{}", task.attempt_seq);
+
+        let mut data = serde_json::Map::with_capacity(2);
+        data.insert(
+            "sessionSeq".to_string(),
+            serde_json::Value::from(task.session_seq),
+        );
+        data.insert(
+            "attemptId".to_string(),
+            serde_json::Value::String(attempt_id),
+        );
+
+        AuditEvent {
+            event_type: "V3DurableAccepted".to_string(),
+            at: event_at_ms,
+            account_id: task.session_id.clone(),
+            order_id: Some(order_id),
+            data: serde_json::Value::Object(data),
+        }
+    }
 
     let apply_outcome = |task: V3DurableTask, outcome: DurableResolution| {
         if outcome.timed_out {
@@ -2815,40 +2974,23 @@ async fn run_v3_durable_worker(
 
         let now_ns = gateway_core::now_nanos();
         if outcome.durable_done_ns > 0 {
-            if confirm_lane_aligned {
-                state.v3_confirm_store.mark_durable_accepted_in_lane(
-                    lane_id,
-                    &task.session_id,
-                    task.session_seq,
-                    now_ns,
-                );
-            } else {
-                state.v3_confirm_store.mark_durable_accepted(
-                    &task.session_id,
-                    task.session_seq,
-                    now_ns,
-                );
-            }
+            state.v3_confirm_store.mark_durable_accepted_in_lane(
+                lane_id,
+                &task.session_id,
+                task.session_seq,
+                now_ns,
+            );
             state
                 .v3_durable_accepted_total
                 .fetch_add(1, Ordering::Relaxed);
         } else {
-            if confirm_lane_aligned {
-                state.v3_confirm_store.mark_durable_rejected_in_lane(
-                    lane_id,
-                    &task.session_id,
-                    task.session_seq,
-                    outcome.reject_reason,
-                    now_ns,
-                );
-            } else {
-                state.v3_confirm_store.mark_durable_rejected(
-                    &task.session_id,
-                    task.session_seq,
-                    outcome.reject_reason,
-                    now_ns,
-                );
-            }
+            state.v3_confirm_store.mark_durable_rejected_in_lane(
+                lane_id,
+                &task.session_id,
+                task.session_seq,
+                outcome.reject_reason,
+                now_ns,
+            );
             state
                 .v3_durable_rejected_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -2885,7 +3027,10 @@ async fn run_v3_durable_worker(
         let mut progressed = false;
 
         let mut drained = 0usize;
-        let drain_budget = fallback_batch_max.saturating_mul(4).max(64);
+        let drain_budget = inflight
+            .len()
+            .max(fallback_batch_max.saturating_mul(8))
+            .clamp(64, 4096);
         while drained < drain_budget {
             match inflight.next().now_or_never() {
                 Some(Some((task, outcome))) => {
@@ -2974,8 +3119,8 @@ async fn run_v3_durable_worker(
             smoothed_pressure_pct = lane_pressure_pct_raw;
             pressure_initialized = true;
         } else {
-            smoothed_pressure_pct =
-                (pressure_alpha * lane_pressure_pct_raw) + ((1.0 - pressure_alpha) * smoothed_pressure_pct);
+            smoothed_pressure_pct = (pressure_alpha * lane_pressure_pct_raw)
+                + ((1.0 - pressure_alpha) * smoothed_pressure_pct);
         }
         let lane_pressure_pct = smoothed_pressure_pct.clamp(0.0, 100.0);
         if let Some(gauge) = state.v3_durable_pressure_pct_per_lane.get(lane_id) {
@@ -3019,8 +3164,8 @@ async fn run_v3_durable_worker(
                     .min(100);
                 dynamic_cap_pct = dynamic_cap_pct.clamp(lower, upper);
             }
-            dynamic_cap_pct = dynamic_cap_pct
-                .clamp(dynamic_inflight_min_cap_pct, dynamic_inflight_max_cap_pct);
+            dynamic_cap_pct =
+                dynamic_cap_pct.clamp(dynamic_inflight_min_cap_pct, dynamic_inflight_max_cap_pct);
             prev_dynamic_cap_pct = dynamic_cap_pct;
             dynamic_cap_pct_applied = dynamic_cap_pct;
             let dynamic_cap = (((max_inflight_receipts as u128)
@@ -3130,16 +3275,7 @@ async fn run_v3_durable_worker(
                 for task in batch {
                     state.v3_durable_ingress.on_processed_one(lane_id);
                     let append_t0 = gateway_core::now_nanos();
-                    let event = AuditEvent {
-                        event_type: "V3DurableAccepted".to_string(),
-                        at: crate::audit::now_millis(),
-                        account_id: task.session_id.clone(),
-                        order_id: Some(format!("v3/{}/{}", task.session_id, task.session_seq)),
-                        data: serde_json::json!({
-                            "sessionSeq": task.session_seq,
-                            "attemptId": format!("att_{}", task.attempt_seq),
-                        }),
-                    };
+                    let event = build_v3_durable_accepted_event(&task, crate::audit::now_millis());
                     if !replica_enabled {
                         // Fast-path for default mode: primary WAL only, no replica branches/clones.
                         let primary_append =

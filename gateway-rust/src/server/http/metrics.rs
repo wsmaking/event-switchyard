@@ -3,7 +3,7 @@
 //! - 位置: 運用監視のための読み取り専用パス。
 //! - 内包: health と Prometheus metrics の出力。
 
-use axum::{Json, extract::State};
+use axum::{extract::State, Json};
 use std::sync::atomic::Ordering;
 
 use crate::order::HealthResponse;
@@ -63,10 +63,10 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let backpressure_wal_bytes = state.backpressure_wal_bytes.load(Ordering::Relaxed);
     let backpressure_wal_age = state.backpressure_wal_age.load(Ordering::Relaxed);
     let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
-    let v3_accepted_total = state.v3_accepted_total.load(Ordering::Relaxed);
-    let v3_rejected_soft_total = state.v3_rejected_soft_total.load(Ordering::Relaxed);
-    let v3_rejected_hard_total = state.v3_rejected_hard_total.load(Ordering::Relaxed);
-    let v3_rejected_killed_total = state.v3_rejected_killed_total.load(Ordering::Relaxed);
+    let v3_accepted_total = state.v3_accepted_total_current();
+    let v3_rejected_soft_total = state.v3_rejected_soft_total_current();
+    let v3_rejected_hard_total = state.v3_rejected_hard_total_current();
+    let v3_rejected_killed_total = state.v3_rejected_killed_total_current();
     let v3_queue_depth = state.v3_ingress.total_depth();
     let v3_queue_capacity = state
         .v3_ingress
@@ -227,9 +227,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
     let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
     let v3_durable_fsync_p99 = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
-    let v3_durable_fsync_p99_cached = state
-        .v3_durable_fsync_p99_cached_us
-        .load(Ordering::Relaxed);
+    let v3_durable_fsync_p99_cached = state.v3_durable_fsync_p99_cached_us.load(Ordering::Relaxed);
     let v3_durable_worker_loop_p50 = state
         .v3_durable_worker_loop_hist
         .snapshot()
@@ -277,10 +275,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
     let v3_live_ack_p999 = state.v3_live_ack_hist.snapshot().percentile(99.9);
     let v3_live_ack_accepted_p99 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.0);
-    let v3_live_ack_accepted_p999 = state
-        .v3_live_ack_accepted_hist
-        .snapshot()
-        .percentile(99.9);
+    let v3_live_ack_accepted_p999 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.9);
     let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
     let v3_durable_confirm_p999 = state.v3_durable_confirm_hist.snapshot().percentile(99.9);
     let v3_total = v3_accepted_total
