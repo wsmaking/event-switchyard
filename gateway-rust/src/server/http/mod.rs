@@ -1311,6 +1311,8 @@ pub(super) struct AppState {
     pub(super) v3_confirm_rebuild_elapsed_ms: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_soft_reject_age_us: u64,
     pub(super) v3_durable_confirm_hard_reject_age_us: u64,
+    pub(super) v3_durable_confirm_guard_soft_slack_pct: u64,
+    pub(super) v3_durable_confirm_guard_hard_slack_pct: u64,
     pub(super) v3_durable_confirm_age_soft_reject_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_age_hard_reject_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_age_autotune_enabled: bool,
@@ -2050,6 +2052,18 @@ pub async fn run(
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20)
             .clamp(1, 100);
+    let v3_durable_confirm_guard_soft_slack_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_SOFT_SLACK_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20)
+            .min(50);
+    let v3_durable_confirm_guard_hard_slack_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_HARD_SLACK_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(40)
+            .min(100);
     let default_soft_min_us = if v3_durable_confirm_soft_reject_age_us > 0 {
         (v3_durable_confirm_soft_reject_age_us.saturating_mul(7) / 10).max(10_000)
     } else {
@@ -2399,6 +2413,8 @@ pub async fn run(
         v3_confirm_rebuild_elapsed_ms: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_soft_reject_age_us,
         v3_durable_confirm_hard_reject_age_us,
+        v3_durable_confirm_guard_soft_slack_pct,
+        v3_durable_confirm_guard_hard_slack_pct,
         v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_age_autotune_enabled,
@@ -2894,6 +2910,30 @@ fn v3_durable_confirm_age_target_us(min_us: u64, max_us: u64, pressure_pct: u64)
     (upper as u128)
         .saturating_sub((span.saturating_mul(pressure) + 50) / 100)
         .clamp(lower as u128, upper as u128) as u64
+}
+
+#[inline]
+fn v3_confirm_autotune_admission_floor_pct(admission_level: u64) -> u64 {
+    match admission_level {
+        0 => 0,
+        1 => 70,
+        _ => 90,
+    }
+}
+
+#[inline]
+fn v3_confirm_autotune_queue_pressure_pct(
+    lane_pressure_pct: u64,
+    age_pressure_pct: u64,
+    admission_level: u64,
+) -> u64 {
+    // Queue pressure alone can over-tighten confirm-age under healthy age latency.
+    // Use it only when confirm age has started rising or admission is already elevated.
+    if age_pressure_pct > 0 || admission_level > 0 {
+        lane_pressure_pct.min(100)
+    } else {
+        0
+    }
 }
 
 #[inline]
@@ -3861,21 +3901,21 @@ async fn run_v3_loss_monitor(state: AppState) {
                     base_hard_age_us,
                 ) * 100.0)
                     .round() as u64;
-                let lane_fsync_p99_us = fsync_p99_per_lane
+                let lane_admission_level = state
+                    .v3_durable_admission_level_per_lane
                     .get(lane_id)
-                    .copied()
-                    .unwrap_or(fsync_p99_global);
-                let fsync_floor_pct =
-                    if lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us {
-                        90
-                    } else if lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us {
-                        70
-                    } else {
-                        0
-                    };
-                let raw_pressure_pct = lane_pressure_pct
+                    .map(|v| v.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                let queue_pressure_pct = v3_confirm_autotune_queue_pressure_pct(
+                    lane_pressure_pct,
+                    age_pressure_pct,
+                    lane_admission_level,
+                );
+                let admission_floor_pct =
+                    v3_confirm_autotune_admission_floor_pct(lane_admission_level);
+                let raw_pressure_pct = queue_pressure_pct
                     .max(age_pressure_pct)
-                    .max(fsync_floor_pct)
+                    .max(admission_floor_pct)
                     .min(100);
                 let hourly_index = lane_id.saturating_mul(24).saturating_add(hour_slot);
                 let mut hourly_ewma_pct = raw_pressure_pct;
@@ -4463,6 +4503,21 @@ mod tests {
         assert!(tightened < current);
         assert!(relaxed > current);
         assert!(current - tightened > relaxed - current);
+    }
+
+    #[test]
+    fn v3_confirm_autotune_queue_pressure_is_gated_in_safe_zone() {
+        assert_eq!(v3_confirm_autotune_queue_pressure_pct(92, 0, 0), 0);
+        assert_eq!(v3_confirm_autotune_queue_pressure_pct(92, 1, 0), 92);
+        assert_eq!(v3_confirm_autotune_queue_pressure_pct(92, 0, 1), 92);
+    }
+
+    #[test]
+    fn v3_confirm_autotune_admission_floor_maps_levels() {
+        assert_eq!(v3_confirm_autotune_admission_floor_pct(0), 0);
+        assert_eq!(v3_confirm_autotune_admission_floor_pct(1), 70);
+        assert_eq!(v3_confirm_autotune_admission_floor_pct(2), 90);
+        assert_eq!(v3_confirm_autotune_admission_floor_pct(9), 90);
     }
 
     #[test]

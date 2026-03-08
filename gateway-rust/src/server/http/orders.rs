@@ -109,6 +109,16 @@ fn record_v3_ack_accepted(state: &AppState, start_ns: u64) {
     state.v3_live_ack_accepted_hist.record(elapsed_us);
 }
 
+#[inline]
+fn apply_confirm_guard_slack(age_us: u64, slack_pct: u64) -> u64 {
+    if age_us == 0 || slack_pct == 0 {
+        return age_us;
+    }
+    age_us.saturating_add(
+        (((age_us as u128).saturating_mul(slack_pct.min(100) as u128) + 50) / 100) as u64,
+    )
+}
+
 // WAL enqueue完了までの遅延を観測。
 fn record_wal_enqueue(state: &AppState, start_ns: u64, timings: audit::AuditAppendTimings) {
     if timings.enqueue_done_ns >= start_ns {
@@ -582,7 +592,30 @@ pub(super) fn process_order_v3_hot_path(
     let confirm_oldest_age_us = confirm_oldest_age_us_lane;
     let (confirm_soft_age_us, confirm_hard_age_us) =
         state.v3_durable_confirm_reject_ages_for_lane(durable_lane_id);
-    if confirm_hard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_age_us {
+    let lane_level = state
+        .v3_durable_admission_level_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed))
+        .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
+    let mut confirm_soft_guard_age_us = confirm_soft_age_us;
+    let mut confirm_hard_guard_age_us = confirm_hard_age_us;
+    if lane_level == 0 {
+        confirm_soft_guard_age_us = apply_confirm_guard_slack(
+            confirm_soft_guard_age_us,
+            state.v3_durable_confirm_guard_soft_slack_pct,
+        );
+        confirm_hard_guard_age_us = apply_confirm_guard_slack(
+            confirm_hard_guard_age_us,
+            state.v3_durable_confirm_guard_hard_slack_pct,
+        );
+    }
+    if confirm_soft_guard_age_us > 0
+        && confirm_hard_guard_age_us > 0
+        && confirm_hard_guard_age_us <= confirm_soft_guard_age_us
+    {
+        confirm_hard_guard_age_us = confirm_soft_guard_age_us.saturating_add(1);
+    }
+    if confirm_hard_guard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_guard_age_us {
         state.increment_v3_rejected_hard_total(shard_id);
         state
             .v3_durable_confirm_age_hard_reject_total
@@ -602,7 +635,7 @@ pub(super) fn process_order_v3_hot_path(
             VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_HARD"),
         );
     }
-    if confirm_soft_age_us > 0 && confirm_oldest_age_us >= confirm_soft_age_us {
+    if confirm_soft_guard_age_us > 0 && confirm_oldest_age_us >= confirm_soft_guard_age_us {
         state.increment_v3_rejected_soft_total(shard_id);
         state
             .v3_durable_confirm_age_soft_reject_total
@@ -642,11 +675,7 @@ pub(super) fn process_order_v3_hot_path(
         );
     }
     if state.v3_durable_admission_controller_enabled {
-        let durable_level = state
-            .v3_durable_admission_level_per_lane
-            .get(durable_lane_id)
-            .map(|v| v.load(Ordering::Relaxed))
-            .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
+        let durable_level = lane_level;
         match durable_level {
             2 => {
                 state.increment_v3_rejected_hard_total(shard_id);
@@ -2016,6 +2045,8 @@ mod tests {
             v3_confirm_rebuild_elapsed_ms: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_soft_reject_age_us: 0,
             v3_durable_confirm_hard_reject_age_us: 0,
+            v3_durable_confirm_guard_soft_slack_pct: 0,
+            v3_durable_confirm_guard_hard_slack_pct: 0,
             v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_autotune_enabled: false,
