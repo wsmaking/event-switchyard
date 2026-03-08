@@ -580,7 +580,8 @@ pub(super) fn process_order_v3_hot_path(
         .unwrap_or(confirm_oldest_age_us_global);
     // Admission is lane-scoped: one degraded lane should not globally throttle healthy lanes.
     let confirm_oldest_age_us = confirm_oldest_age_us_lane;
-    let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+    let (confirm_soft_age_us, confirm_hard_age_us) =
+        state.v3_durable_confirm_reject_ages_for_lane(durable_lane_id);
     if confirm_hard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_age_us {
         state.increment_v3_rejected_hard_total(shard_id);
         state
@@ -601,7 +602,6 @@ pub(super) fn process_order_v3_hot_path(
             VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_HARD"),
         );
     }
-    let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
     if confirm_soft_age_us > 0 && confirm_oldest_age_us >= confirm_soft_age_us {
         state.increment_v3_rejected_soft_total(shard_id);
         state
@@ -2018,6 +2018,19 @@ mod tests {
             v3_durable_confirm_hard_reject_age_us: 0,
             v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_autotune_enabled: false,
+            v3_durable_confirm_age_autotune_alpha_pct: 20,
+            v3_durable_confirm_soft_reject_age_min_us: 0,
+            v3_durable_confirm_soft_reject_age_max_us: 0,
+            v3_durable_confirm_hard_reject_age_min_us: 0,
+            v3_durable_confirm_hard_reject_age_max_us: 0,
+            v3_durable_confirm_soft_reject_age_effective_us_per_lane: lane_u64(),
+            v3_durable_confirm_hard_reject_age_effective_us_per_lane: lane_u64(),
+            v3_durable_confirm_hourly_pressure_ewma_per_lane: Arc::new(
+                (0..24)
+                    .map(|_| Arc::new(AtomicU64::new(0)))
+                    .collect::<Vec<_>>(),
+            ),
             v3_risk_profile: super::super::V3RiskProfile::Light,
             v3_risk_margin_mode: super::super::V3RiskMarginMode::Legacy,
             v3_risk_loops: 16,

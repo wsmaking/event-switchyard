@@ -33,13 +33,13 @@ use axum::{
 };
 use gateway_core::SymbolLimits;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
-use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{
@@ -1313,6 +1313,15 @@ pub(super) struct AppState {
     pub(super) v3_durable_confirm_hard_reject_age_us: u64,
     pub(super) v3_durable_confirm_age_soft_reject_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_age_hard_reject_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_autotune_enabled: bool,
+    pub(super) v3_durable_confirm_age_autotune_alpha_pct: u64,
+    pub(super) v3_durable_confirm_soft_reject_age_min_us: u64,
+    pub(super) v3_durable_confirm_soft_reject_age_max_us: u64,
+    pub(super) v3_durable_confirm_hard_reject_age_min_us: u64,
+    pub(super) v3_durable_confirm_hard_reject_age_max_us: u64,
+    pub(super) v3_durable_confirm_soft_reject_age_effective_us_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_hard_reject_age_effective_us_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_hourly_pressure_ewma_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_risk_profile: V3RiskProfile,
     pub(super) v3_risk_margin_mode: V3RiskMarginMode,
     pub(super) v3_risk_loops: u32,
@@ -1427,6 +1436,36 @@ impl AppState {
             &self.v3_rejected_killed_total_per_shard,
             self.v3_rejected_killed_total.as_ref(),
         )
+    }
+
+    #[inline]
+    pub(super) fn v3_durable_confirm_reject_ages_for_lane(&self, lane_id: usize) -> (u64, u64) {
+        let mut soft_age_us = self.v3_durable_confirm_soft_reject_age_us;
+        let mut hard_age_us = self.v3_durable_confirm_hard_reject_age_us;
+        if self.v3_durable_confirm_age_autotune_enabled {
+            if let Some(value) = self
+                .v3_durable_confirm_soft_reject_age_effective_us_per_lane
+                .get(lane_id)
+            {
+                let tuned = value.load(Ordering::Relaxed);
+                if tuned > 0 {
+                    soft_age_us = tuned;
+                }
+            }
+            if let Some(value) = self
+                .v3_durable_confirm_hard_reject_age_effective_us_per_lane
+                .get(lane_id)
+            {
+                let tuned = value.load(Ordering::Relaxed);
+                if tuned > 0 {
+                    hard_age_us = tuned;
+                }
+            }
+        }
+        if soft_age_us > 0 && hard_age_us > 0 && hard_age_us <= soft_age_us {
+            hard_age_us = soft_age_us.saturating_add(1);
+        }
+        (soft_age_us, hard_age_us)
     }
 
     pub(super) fn register_v3_loss_suspect(
@@ -2003,6 +2042,72 @@ pub async fn run(
         v3_durable_confirm_hard_reject_age_us =
             v3_durable_confirm_soft_reject_age_us.saturating_add(1);
     }
+    let v3_durable_confirm_age_autotune_enabled =
+        parse_bool_env("V3_DURABLE_CONFIRM_AGE_AUTOTUNE").unwrap_or(true);
+    let v3_durable_confirm_age_autotune_alpha_pct =
+        std::env::var("V3_DURABLE_CONFIRM_AGE_AUTOTUNE_ALPHA_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20)
+            .clamp(1, 100);
+    let default_soft_min_us = if v3_durable_confirm_soft_reject_age_us > 0 {
+        (v3_durable_confirm_soft_reject_age_us.saturating_mul(7) / 10).max(10_000)
+    } else {
+        0
+    };
+    let default_soft_max_us = if v3_durable_confirm_soft_reject_age_us > 0 {
+        v3_durable_confirm_soft_reject_age_us
+    } else {
+        0
+    };
+    let mut v3_durable_confirm_soft_reject_age_min_us =
+        std::env::var("V3_DURABLE_CONFIRM_SOFT_REJECT_AGE_MIN_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_soft_min_us);
+    let mut v3_durable_confirm_soft_reject_age_max_us =
+        std::env::var("V3_DURABLE_CONFIRM_SOFT_REJECT_AGE_MAX_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_soft_max_us);
+    if v3_durable_confirm_soft_reject_age_us > 0 {
+        // tighten-only: autotune must not relax above base soft threshold.
+        v3_durable_confirm_soft_reject_age_min_us = v3_durable_confirm_soft_reject_age_min_us
+            .max(1)
+            .min(v3_durable_confirm_soft_reject_age_us);
+        v3_durable_confirm_soft_reject_age_max_us = v3_durable_confirm_soft_reject_age_max_us
+            .max(v3_durable_confirm_soft_reject_age_min_us)
+            .min(v3_durable_confirm_soft_reject_age_us);
+    }
+    let default_hard_min_us = if v3_durable_confirm_hard_reject_age_us > 0 {
+        (v3_durable_confirm_hard_reject_age_us.saturating_mul(75) / 100).max(10_000)
+    } else {
+        0
+    };
+    let default_hard_max_us = if v3_durable_confirm_hard_reject_age_us > 0 {
+        v3_durable_confirm_hard_reject_age_us
+    } else {
+        0
+    };
+    let mut v3_durable_confirm_hard_reject_age_min_us =
+        std::env::var("V3_DURABLE_CONFIRM_HARD_REJECT_AGE_MIN_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_hard_min_us);
+    let mut v3_durable_confirm_hard_reject_age_max_us =
+        std::env::var("V3_DURABLE_CONFIRM_HARD_REJECT_AGE_MAX_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_hard_max_us);
+    if v3_durable_confirm_hard_reject_age_us > 0 {
+        // tighten-only: autotune must not relax above base hard threshold.
+        v3_durable_confirm_hard_reject_age_min_us = v3_durable_confirm_hard_reject_age_min_us
+            .max(1)
+            .min(v3_durable_confirm_hard_reject_age_us);
+        v3_durable_confirm_hard_reject_age_max_us = v3_durable_confirm_hard_reject_age_max_us
+            .max(v3_durable_confirm_hard_reject_age_min_us)
+            .min(v3_durable_confirm_hard_reject_age_us);
+    }
     let v3_confirm_rebuild_on_start = parse_bool_env("V3_CONFIRM_REBUILD_ON_START").unwrap_or(true);
     let v3_confirm_rebuild_max_lines = std::env::var("V3_CONFIRM_REBUILD_MAX_LINES")
         .ok()
@@ -2111,6 +2216,21 @@ pub async fn run(
     let v3_durable_worker_loop_hist_per_lane = Arc::new(
         (0..v3_durable_lane_count)
             .map(|_| Arc::new(LatencyHistogram::new()))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_soft_reject_age_effective_us_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(v3_durable_confirm_soft_reject_age_us)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_hard_reject_age_effective_us_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(v3_durable_confirm_hard_reject_age_us)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_hourly_pressure_ewma_per_lane = Arc::new(
+        (0..v3_durable_lane_count.saturating_mul(24))
+            .map(|_| Arc::new(AtomicU64::new(0)))
             .collect::<Vec<_>>(),
     );
 
@@ -2281,6 +2401,15 @@ pub async fn run(
         v3_durable_confirm_hard_reject_age_us,
         v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_autotune_enabled,
+        v3_durable_confirm_age_autotune_alpha_pct,
+        v3_durable_confirm_soft_reject_age_min_us,
+        v3_durable_confirm_soft_reject_age_max_us,
+        v3_durable_confirm_hard_reject_age_min_us,
+        v3_durable_confirm_hard_reject_age_max_us,
+        v3_durable_confirm_soft_reject_age_effective_us_per_lane,
+        v3_durable_confirm_hard_reject_age_effective_us_per_lane,
+        v3_durable_confirm_hourly_pressure_ewma_per_lane,
         v3_risk_profile,
         v3_risk_margin_mode,
         v3_risk_loops,
@@ -2739,6 +2868,65 @@ fn v3_confirm_age_pressure_ratio(current_us: u64, soft_us: u64, hard_us: u64) ->
     }
 }
 
+#[inline]
+fn v3_pressure_ewma_u64(prev: u64, sample: u64, alpha_pct: u64) -> u64 {
+    let alpha = alpha_pct.clamp(1, 100);
+    if prev == 0 {
+        return sample.min(100);
+    }
+    let keep = 100u128.saturating_sub(alpha as u128);
+    (((prev as u128).saturating_mul(keep) + (sample as u128).saturating_mul(alpha as u128) + 50)
+        / 100) as u64
+}
+
+#[inline]
+fn v3_durable_confirm_age_target_us(min_us: u64, max_us: u64, pressure_pct: u64) -> u64 {
+    if min_us == 0 && max_us == 0 {
+        return 0;
+    }
+    let lower = min_us.min(max_us);
+    let upper = min_us.max(max_us);
+    if lower == upper {
+        return upper;
+    }
+    let pressure = pressure_pct.min(100) as u128;
+    let span = (upper - lower) as u128;
+    (upper as u128)
+        .saturating_sub((span.saturating_mul(pressure) + 50) / 100)
+        .clamp(lower as u128, upper as u128) as u64
+}
+
+#[inline]
+fn v3_slew_toward_us(
+    current_us: u64,
+    target_us: u64,
+    tighten_step_pct: u64,
+    relax_step_pct: u64,
+    min_step_us: u64,
+) -> u64 {
+    if current_us == 0 || target_us == 0 || current_us == target_us {
+        return target_us;
+    }
+    let min_step = min_step_us.max(1);
+    if target_us < current_us {
+        let step = (((current_us as u128).saturating_mul(tighten_step_pct.max(1) as u128) + 99)
+            / 100) as u64;
+        current_us.saturating_sub(step.max(min_step)).max(target_us)
+    } else {
+        let step = (((current_us as u128).saturating_mul(relax_step_pct.max(1) as u128) + 99) / 100)
+            as u64;
+        current_us.saturating_add(step.max(min_step)).min(target_us)
+    }
+}
+
+#[inline]
+fn current_utc_hour_slot() -> usize {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| ((d.as_secs() / 3_600) % 24) as usize)
+        .unwrap_or(0)
+}
+
 fn v3_durable_slo_age_targets(stage: u64, preset: V3DurableControlPreset) -> (u64, u64) {
     match preset {
         V3DurableControlPreset::Legacy => match stage {
@@ -2927,34 +3115,55 @@ async fn run_v3_durable_worker(
     let mut prev_dynamic_cap_pct = dynamic_inflight_max_cap_pct;
 
     #[inline]
-    fn build_v3_durable_accepted_event(task: &V3DurableTask, event_at_ms: u64) -> AuditEvent {
-        let mut order_id = String::with_capacity(4 + task.session_id.len() + 1 + 20);
-        order_id.push_str("v3/");
-        order_id.push_str(task.session_id.as_str());
-        order_id.push('/');
-        let _ = write!(&mut order_id, "{}", task.session_seq);
-
-        let mut attempt_id = String::with_capacity(4 + 20);
-        attempt_id.push_str("att_");
-        let _ = write!(&mut attempt_id, "{}", task.attempt_seq);
-
-        let mut data = serde_json::Map::with_capacity(2);
-        data.insert(
-            "sessionSeq".to_string(),
-            serde_json::Value::from(task.session_seq),
-        );
-        data.insert(
-            "attemptId".to_string(),
-            serde_json::Value::String(attempt_id),
-        );
-
-        AuditEvent {
-            event_type: "V3DurableAccepted".to_string(),
-            at: event_at_ms,
-            account_id: task.session_id.clone(),
-            order_id: Some(order_id),
-            data: serde_json::Value::Object(data),
+    fn push_json_escaped_fragment(out: &mut Vec<u8>, value: &str) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for &b in value.as_bytes() {
+            match b {
+                b'"' => out.extend_from_slice(br#"\""#),
+                b'\\' => out.extend_from_slice(br#"\\"#),
+                b'\n' => out.extend_from_slice(br#"\n"#),
+                b'\r' => out.extend_from_slice(br#"\r"#),
+                b'\t' => out.extend_from_slice(br#"\t"#),
+                b'\x08' => out.extend_from_slice(br#"\b"#),
+                b'\x0c' => out.extend_from_slice(br#"\f"#),
+                0x00..=0x1f => {
+                    out.extend_from_slice(br#"\u00"#);
+                    out.push(HEX[(b >> 4) as usize]);
+                    out.push(HEX[(b & 0x0f) as usize]);
+                }
+                _ => out.push(b),
+            }
         }
+    }
+
+    #[inline]
+    fn push_json_string(out: &mut Vec<u8>, value: &str) {
+        out.push(b'"');
+        push_json_escaped_fragment(out, value);
+        out.push(b'"');
+    }
+
+    #[inline]
+    fn build_v3_durable_accepted_line(task: &V3DurableTask, event_at_ms: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128 + task.session_id.len().saturating_mul(2));
+        out.extend_from_slice(b"{\"type\":\"V3DurableAccepted\",\"at\":");
+        let _ = write!(&mut out, "{}", event_at_ms);
+        out.extend_from_slice(b",\"accountId\":");
+        push_json_string(&mut out, task.session_id.as_str());
+        out.extend_from_slice(b",\"orderId\":");
+        out.push(b'"');
+        out.extend_from_slice(b"v3/");
+        push_json_escaped_fragment(&mut out, task.session_id.as_str());
+        out.push(b'/');
+        let _ = write!(&mut out, "{}", task.session_seq);
+        out.push(b'"');
+        out.extend_from_slice(b",\"data\":{\"sessionSeq\":");
+        let _ = write!(&mut out, "{}", task.session_seq);
+        out.extend_from_slice(b",\"attemptId\":\"att_");
+        let _ = write!(&mut out, "{}", task.attempt_seq);
+        out.extend_from_slice(b"\"}}");
+        out.push(b'\n');
+        out
     }
 
     let apply_outcome = |task: V3DurableTask, outcome: DurableResolution| {
@@ -3075,8 +3284,8 @@ async fn run_v3_durable_worker(
             .get(lane_id)
             .map(|v| v.load(Ordering::Relaxed))
             .unwrap_or_else(|| state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed));
-        let confirm_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
-        let confirm_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+        let (confirm_soft_age_us, confirm_hard_age_us) =
+            state.v3_durable_confirm_reject_ages_for_lane(lane_id);
         let soft_pressure_age_us = choose_tighter_age_target(
             early_soft_age_us,
             if confirm_soft_age_us > 0 {
@@ -3275,11 +3484,12 @@ async fn run_v3_durable_worker(
                 for task in batch {
                     state.v3_durable_ingress.on_processed_one(lane_id);
                     let append_t0 = gateway_core::now_nanos();
-                    let event = build_v3_durable_accepted_event(&task, crate::audit::now_millis());
+                    let event_line =
+                        build_v3_durable_accepted_line(&task, crate::audit::now_millis());
                     if !replica_enabled {
                         // Fast-path for default mode: primary WAL only, no replica branches/clones.
-                        let primary_append =
-                            lane_audit_log.append_with_durable_receipt(event, append_t0);
+                        let primary_append = lane_audit_log
+                            .append_json_line_with_durable_receipt(event_line, append_t0);
                         let append_elapsed_us =
                             if primary_append.timings.enqueue_done_ns >= append_t0 {
                                 (primary_append.timings.enqueue_done_ns - append_t0) / 1_000
@@ -3351,8 +3561,8 @@ async fn run_v3_durable_worker(
                         continue;
                     }
 
-                    let primary_append =
-                        lane_audit_log.append_with_durable_receipt(event.clone(), append_t0);
+                    let primary_append = lane_audit_log
+                        .append_json_line_with_durable_receipt(event_line.clone(), append_t0);
                     let append_elapsed_us = if primary_append.timings.enqueue_done_ns >= append_t0 {
                         (primary_append.timings.enqueue_done_ns - append_t0) / 1_000
                     } else {
@@ -3361,9 +3571,9 @@ async fn run_v3_durable_worker(
                     state.v3_durable_wal_append_hist.record(append_elapsed_us);
 
                     if replica_required {
-                        let replica_required_append = replica_audit_log
-                            .as_ref()
-                            .map(|replica| replica.append_with_durable_receipt(event, append_t0));
+                        let replica_required_append = replica_audit_log.as_ref().map(|replica| {
+                            replica.append_json_line_with_durable_receipt(event_line, append_t0)
+                        });
                         let state_for_receipt = state.clone();
                         inflight.push(
                             async move {
@@ -3431,9 +3641,9 @@ async fn run_v3_durable_worker(
                         continue;
                     }
 
-                    let replica_best_effort_timings = replica_audit_log
-                        .as_ref()
-                        .map(|replica| replica.append_with_timings(event, append_t0));
+                    let replica_best_effort_timings = replica_audit_log.as_ref().map(|replica| {
+                        replica.append_json_line_with_timings(event_line, append_t0)
+                    });
                     if let Some(replica_timings) = replica_best_effort_timings {
                         if replica_timings.enqueue_done_ns == 0
                             && replica_timings.durable_done_ns == 0
@@ -3618,6 +3828,165 @@ async fn run_v3_loss_monitor(state: AppState) {
             fsync_p99_per_lane.push(lane_fsync_p99_us);
             if let Some(cached) = state.v3_durable_fsync_p99_cached_us_per_lane.get(lane_id) {
                 cached.store(lane_fsync_p99_us, Ordering::Relaxed);
+            }
+        }
+        if state.v3_durable_confirm_age_autotune_enabled {
+            let hour_slot = current_utc_hour_slot().min(23);
+            let alpha_pct = state.v3_durable_confirm_age_autotune_alpha_pct;
+            const CONFIRM_AUTOTUNE_TIGHTEN_STEP_PCT: u64 = 20;
+            const CONFIRM_AUTOTUNE_RELAX_STEP_PCT: u64 = 2;
+            const CONFIRM_AUTOTUNE_MIN_STEP_US: u64 = 1_000;
+            for lane_id in 0..lane_count {
+                let lane_pressure_pct = state
+                    .v3_durable_pressure_pct_per_lane
+                    .get(lane_id)
+                    .map(|v| v.load(Ordering::Relaxed))
+                    .unwrap_or(0)
+                    .max(
+                        state
+                            .v3_durable_ingress
+                            .lane_utilization_pct(lane_id)
+                            .round() as u64,
+                    )
+                    .min(100);
+                let lane_confirm_age_us = confirm_oldest_age_us_per_lane
+                    .get(lane_id)
+                    .copied()
+                    .unwrap_or(confirm_oldest_age_us_max);
+                let base_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
+                let base_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+                let age_pressure_pct = (v3_confirm_age_pressure_ratio(
+                    lane_confirm_age_us,
+                    base_soft_age_us,
+                    base_hard_age_us,
+                ) * 100.0)
+                    .round() as u64;
+                let lane_fsync_p99_us = fsync_p99_per_lane
+                    .get(lane_id)
+                    .copied()
+                    .unwrap_or(fsync_p99_global);
+                let fsync_floor_pct =
+                    if lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us {
+                        90
+                    } else if lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us {
+                        70
+                    } else {
+                        0
+                    };
+                let raw_pressure_pct = lane_pressure_pct
+                    .max(age_pressure_pct)
+                    .max(fsync_floor_pct)
+                    .min(100);
+                let hourly_index = lane_id.saturating_mul(24).saturating_add(hour_slot);
+                let mut hourly_ewma_pct = raw_pressure_pct;
+                if let Some(hourly_slot) = state
+                    .v3_durable_confirm_hourly_pressure_ewma_per_lane
+                    .get(hourly_index)
+                {
+                    let prev = hourly_slot.load(Ordering::Relaxed);
+                    hourly_ewma_pct = v3_pressure_ewma_u64(prev, raw_pressure_pct, alpha_pct);
+                    hourly_slot.store(hourly_ewma_pct, Ordering::Relaxed);
+                }
+                let blended_pressure_pct = (((raw_pressure_pct as u128).saturating_mul(70)
+                    + (hourly_ewma_pct as u128).saturating_mul(30)
+                    + 50)
+                    / 100) as u64;
+
+                let mut tuned_soft_age_us = if state.v3_durable_confirm_soft_reject_age_us > 0 {
+                    v3_durable_confirm_age_target_us(
+                        state.v3_durable_confirm_soft_reject_age_min_us,
+                        state.v3_durable_confirm_soft_reject_age_max_us,
+                        blended_pressure_pct,
+                    )
+                } else {
+                    0
+                };
+                let mut tuned_hard_age_us = if state.v3_durable_confirm_hard_reject_age_us > 0 {
+                    v3_durable_confirm_age_target_us(
+                        state.v3_durable_confirm_hard_reject_age_min_us,
+                        state.v3_durable_confirm_hard_reject_age_max_us,
+                        blended_pressure_pct,
+                    )
+                } else {
+                    0
+                };
+                if base_soft_age_us > 0 {
+                    tuned_soft_age_us = tuned_soft_age_us.min(base_soft_age_us);
+                }
+                if base_hard_age_us > 0 {
+                    tuned_hard_age_us = tuned_hard_age_us.min(base_hard_age_us);
+                }
+                if tuned_soft_age_us > 0
+                    && tuned_hard_age_us > 0
+                    && tuned_hard_age_us <= tuned_soft_age_us
+                {
+                    tuned_hard_age_us = tuned_soft_age_us.saturating_add(1);
+                }
+                if tuned_soft_age_us == 0 {
+                    tuned_soft_age_us = state.v3_durable_confirm_soft_reject_age_us;
+                }
+                if tuned_hard_age_us == 0 {
+                    tuned_hard_age_us = state.v3_durable_confirm_hard_reject_age_us;
+                }
+                let current_soft_age_us = state
+                    .v3_durable_confirm_soft_reject_age_effective_us_per_lane
+                    .get(lane_id)
+                    .map(|v| {
+                        let current = v.load(Ordering::Relaxed);
+                        if current > 0 {
+                            current
+                        } else {
+                            tuned_soft_age_us
+                        }
+                    })
+                    .unwrap_or(tuned_soft_age_us);
+                let current_hard_age_us = state
+                    .v3_durable_confirm_hard_reject_age_effective_us_per_lane
+                    .get(lane_id)
+                    .map(|v| {
+                        let current = v.load(Ordering::Relaxed);
+                        if current > 0 {
+                            current
+                        } else {
+                            tuned_hard_age_us
+                        }
+                    })
+                    .unwrap_or(tuned_hard_age_us);
+                let slewed_soft_age_us = v3_slew_toward_us(
+                    current_soft_age_us,
+                    tuned_soft_age_us,
+                    CONFIRM_AUTOTUNE_TIGHTEN_STEP_PCT,
+                    CONFIRM_AUTOTUNE_RELAX_STEP_PCT,
+                    CONFIRM_AUTOTUNE_MIN_STEP_US,
+                );
+                let mut slewed_hard_age_us = v3_slew_toward_us(
+                    current_hard_age_us,
+                    tuned_hard_age_us,
+                    CONFIRM_AUTOTUNE_TIGHTEN_STEP_PCT,
+                    CONFIRM_AUTOTUNE_RELAX_STEP_PCT,
+                    CONFIRM_AUTOTUNE_MIN_STEP_US,
+                );
+                if slewed_soft_age_us > 0
+                    && slewed_hard_age_us > 0
+                    && slewed_hard_age_us <= slewed_soft_age_us
+                {
+                    slewed_hard_age_us = slewed_soft_age_us.saturating_add(1);
+                    if base_hard_age_us > 0 {
+                        slewed_hard_age_us = slewed_hard_age_us.min(base_hard_age_us);
+                    }
+                }
+                if let Some(target) = state
+                    .v3_durable_confirm_soft_reject_age_effective_us_per_lane
+                    .get(lane_id)
+                {
+                    target.store(slewed_soft_age_us, Ordering::Relaxed);
+                }
+                if let Some(target) = state
+                    .v3_durable_confirm_hard_reject_age_effective_us_per_lane
+                    .get(lane_id)
+                {
+                    target.store(slewed_hard_age_us, Ordering::Relaxed);
+                }
             }
         }
         if state.v3_durable_admission_controller_enabled {
@@ -4060,6 +4429,40 @@ mod tests {
             .snapshot("sess-c", 3)
             .expect("sess-c snapshot must exist");
         assert_eq!(sess_c.status, V3ConfirmStatus::DurableAccepted);
+    }
+
+    #[test]
+    fn v3_durable_confirm_age_target_tightens_as_pressure_rises() {
+        let min_us = 70_000;
+        let max_us = 140_000;
+        assert_eq!(v3_durable_confirm_age_target_us(min_us, max_us, 0), max_us);
+        assert_eq!(
+            v3_durable_confirm_age_target_us(min_us, max_us, 100),
+            min_us
+        );
+        let mid = v3_durable_confirm_age_target_us(min_us, max_us, 50);
+        assert!(mid < max_us);
+        assert!(mid > min_us);
+    }
+
+    #[test]
+    fn v3_pressure_ewma_u64_initializes_and_smooths() {
+        assert_eq!(v3_pressure_ewma_u64(0, 80, 20), 80);
+        let next = v3_pressure_ewma_u64(80, 20, 20);
+        assert!(next < 80);
+        assert!(next > 20);
+    }
+
+    #[test]
+    fn v3_slew_toward_us_tightens_faster_than_relaxes() {
+        let current = 200_000;
+        let tightened = v3_slew_toward_us(current, 120_000, 20, 2, 1_000);
+        let relaxed = v3_slew_toward_us(current, 260_000, 20, 2, 1_000);
+        assert_eq!(tightened, 160_000);
+        assert_eq!(relaxed, 204_000);
+        assert!(tightened < current);
+        assert!(relaxed > current);
+        assert!(current - tightened > relaxed - current);
     }
 
     #[test]

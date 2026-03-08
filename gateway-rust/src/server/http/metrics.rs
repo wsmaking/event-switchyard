@@ -5,6 +5,7 @@
 
 use axum::{extract::State, Json};
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::order::HealthResponse;
 
@@ -351,6 +352,31 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_confirm_age_hard_reject_total = state
         .v3_durable_confirm_age_hard_reject_total
         .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_autotune_enabled = if state.v3_durable_confirm_age_autotune_enabled {
+        1
+    } else {
+        0
+    };
+    let v3_durable_confirm_age_autotune_alpha_pct = state.v3_durable_confirm_age_autotune_alpha_pct;
+    let v3_durable_confirm_soft_reject_age_effective_us_per_lane = state
+        .v3_durable_confirm_soft_reject_age_effective_us_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hard_reject_age_effective_us_per_lane = state
+        .v3_durable_confirm_hard_reject_age_effective_us_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hourly_pressure_ewma_per_lane = state
+        .v3_durable_confirm_hourly_pressure_ewma_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hourly_pressure_ewma_current_hour = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| ((d.as_secs() / 3_600) % 24) as usize)
+        .unwrap_or(0);
     let inflight = state.inflight_controller.inflight();
     let durable_inflight = v3_durable_queue_depth;
     let wal_age_ms = state.audit_log.wal_age_ms();
@@ -977,6 +1003,61 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_confirm_age_soft_reject_total,
         v3_durable_confirm_age_hard_reject_total,
     ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_durable_confirm_age_autotune_enabled /v3 durable confirm oldest-age autotune enabled (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_age_autotune_enabled gauge\n\
+         gateway_v3_durable_confirm_age_autotune_enabled {}\n\
+         # HELP gateway_v3_durable_confirm_age_autotune_alpha_pct /v3 durable confirm oldest-age autotune EWMA alpha percentage\n\
+         # TYPE gateway_v3_durable_confirm_age_autotune_alpha_pct gauge\n\
+         gateway_v3_durable_confirm_age_autotune_alpha_pct {}\n\
+         # HELP gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour Current UTC hour index used for durable confirm pressure EWMA\n\
+         # TYPE gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour gauge\n\
+         gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour {}\n",
+        v3_durable_confirm_age_autotune_enabled,
+        v3_durable_confirm_age_autotune_alpha_pct,
+        v3_durable_confirm_hourly_pressure_ewma_current_hour,
+    ));
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane Effective /v3 durable confirm oldest-age soft reject threshold per lane (us)\n\
+         # TYPE gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane gauge\n",
+    );
+    for (lane, age_us) in v3_durable_confirm_soft_reject_age_effective_us_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, age_us
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane Effective /v3 durable confirm oldest-age hard reject threshold per lane (us)\n\
+         # TYPE gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane gauge\n",
+    );
+    for (lane, age_us) in v3_durable_confirm_hard_reject_age_effective_us_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, age_us
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane Hourly EWMA durable pressure used by confirm-age autotune per lane/hour (pct)\n\
+         # TYPE gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane gauge\n",
+    );
+    for (slot, pressure_pct) in v3_durable_confirm_hourly_pressure_ewma_per_lane
+        .iter()
+        .enumerate()
+    {
+        let lane = slot / 24;
+        let hour = slot % 24;
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane{{lane=\"{}\",hour=\"{}\"}} {}\n",
+            lane, hour, pressure_pct
+        ));
+    }
     snapshot.push_str(
         "# HELP gateway_v3_durable_queue_depth_per_lane /v3 durable queue depth per lane\n\
          # TYPE gateway_v3_durable_queue_depth_per_lane gauge\n",

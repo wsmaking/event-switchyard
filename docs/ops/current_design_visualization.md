@@ -1,6 +1,6 @@
 # Pure HFT v3 現行設計 可視化（個人開発・実務本番向け）
 
-最終更新: 2026-03-07
+最終更新: 2026-03-08
 
 ## 0. 正本の位置づけ
 - 本書は Pure HFT v3 現行構成の可視化正本とする。
@@ -1807,3 +1807,65 @@ A/B（120s, tcp, 10k）:
 運用上の注意:
 - `reflect_wait_defaults_smoke` は「設定反映確認」であり根因分析の母集団に混ぜない。
 - 根因判定の正本は `summary + metrics + 3run median` のセットで扱う。
+
+### 14.23 2026-03-08 confirm-age autotune 回帰と修正（300s再計測）
+背景:
+- 取り込み対象だった 2 点（confirm-age の lane/time autotune、durable JSON/String 生成排除）を実装した後、
+  `10k/300s` で `durable_confirm_p99` と `accepted_rate` が悪化する回帰を確認。
+
+回帰時の実測（strict gate, `RUNS=1 DURATION=300 BUILD_RELEASE=1`）:
+- `var/results/v3_local_strict_gate_20260308_104550.tsv`
+- `var/results/v3_local_strict_gate_20260308_104550_run1/v3_open_loop_20260308_104550.summary.txt`
+- 結果:
+  - `completed_rps=10000.000`
+  - `server_accepted_rate=0.986272`（gate fail）
+  - `server_live_ack_accepted_p99_us=20`
+  - `server_durable_confirm_p99_us=188927`
+  - `server_durable_confirm_p999_us=397311`
+
+根因（14.22 手順で特定）:
+1. autotune が soft/hard の実効閾値を base より緩和
+- `soft/hard=180000/260000us` に対し、実効閾値が `212940/329550us` まで上昇。
+2. self-masking
+- age pressure 算出に「実効閾値」を使っており、閾値を緩めるほど pressure が下がる構造だった。
+3. 圧力連鎖で queueing が増加
+- `durable_receipt_inflight_max: 1912 -> 2471`
+- `durable_pressure_pct_per_lane{lane=0}: 15 -> 30`
+- `durable_dynamic_cap_pct_per_lane{lane=0}: 69 -> 58`
+- `confirm_age_p99_per_lane` は `~120k` 台から `~260-280k` 台へ上昇。
+
+設計判断（今回固定）:
+1. tighten-only
+- autotune は base 閾値を超えて緩和しない。
+- `default_soft_max_us/default_hard_max_us` は base 値固定。
+2. pressure 算出を base 基準へ変更
+- age pressure は `effective` ではなく `base soft/hard` を参照。
+3. 非対称 slew 制御
+- tighten は速く、relax は遅く（`20%` vs `2%` / tick, min `1000us`）。
+4. fsync floor
+- lane の `fdatasync_p99` が soft/hard 閾値超過時に pressure 下限を `70/90` に引き上げ。
+
+修正後の実測（同条件）:
+- `var/results/v3_local_strict_gate_20260308_110453.tsv`
+- `var/results/v3_local_strict_gate_20260308_110453_run1/v3_open_loop_20260308_110453.summary.txt`
+- 結果:
+  - `completed_rps=10000.000`
+  - `server_accepted_rate=0.9924016666666666`（gate pass）
+  - `server_live_ack_accepted_p99_us=19`
+  - `server_durable_confirm_p99_us=49343`
+  - `server_durable_confirm_p999_us=225791`
+
+比較:
+1. 回帰run（10:45）比
+- `durable_confirm_p99: 188927 -> 49343`（`-73.9%`）
+- `durable_confirm_p999: 397311 -> 225791`（`-43.2%`）
+- `accepted_rate: 0.986272 -> 0.992402`（`+0.61pt`）
+2. 9時台安定run（`20260308_095659`）比
+- `durable_confirm_p99: 96703 -> 49343`（`-49.0%`）
+- `durable_confirm_p999: 303359 -> 225791`（`-25.6%`）
+- `ack_accepted_p99: 21 -> 19`（改善）
+- `accepted_rate: 0.9937317 -> 0.9924017`（`-0.13pt`）
+
+運用判断:
+- 現在の修正は「回帰打ち消し + durable tail 縮小」に有効。
+- 次の採否判定は `RUNS=3, DURATION=300` の median で確定する。
