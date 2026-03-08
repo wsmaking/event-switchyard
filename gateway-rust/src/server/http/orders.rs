@@ -597,6 +597,36 @@ pub(super) fn process_order_v3_hot_path(
         .get(durable_lane_id)
         .map(|v| v.load(Ordering::Relaxed))
         .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
+    let lane_inflight_now = state
+        .v3_durable_receipt_inflight_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed))
+        .unwrap_or_else(|| state.v3_durable_receipt_inflight.load(Ordering::Relaxed));
+    let lane_inflight_pct = if state.v3_durable_worker_max_inflight_receipts > 0 {
+        (lane_inflight_now as f64 * 100.0) / (state.v3_durable_worker_max_inflight_receipts as f64)
+    } else {
+        0.0
+    };
+    let guard_queue_signal = state.v3_durable_confirm_guard_min_queue_pct > 0.0
+        && durable_queue_pct >= state.v3_durable_confirm_guard_min_queue_pct;
+    let guard_inflight_signal = state.v3_durable_confirm_guard_min_inflight_pct > 0
+        && lane_inflight_pct >= state.v3_durable_confirm_guard_min_inflight_pct as f64;
+    let guard_backlog_signal = state.v3_durable_confirm_guard_min_backlog_per_sec > 0
+        && durable_backlog_growth_per_sec >= state.v3_durable_confirm_guard_min_backlog_per_sec;
+    let guard_secondary_signal =
+        lane_level > 0 || guard_queue_signal || guard_inflight_signal || guard_backlog_signal;
+    let guard_secondary_enabled =
+        !state.v3_durable_confirm_guard_secondary_required || guard_secondary_signal;
+    let hard_guard_armed = state
+        .v3_durable_confirm_guard_hard_armed_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed) > 0)
+        .unwrap_or(true);
+    let soft_guard_armed = state
+        .v3_durable_confirm_guard_soft_armed_per_lane
+        .get(durable_lane_id)
+        .map(|v| v.load(Ordering::Relaxed) > 0)
+        .unwrap_or(true);
     let mut confirm_soft_guard_age_us = confirm_soft_age_us;
     let mut confirm_hard_guard_age_us = confirm_hard_age_us;
     if lane_level == 0 {
@@ -615,45 +645,91 @@ pub(super) fn process_order_v3_hot_path(
     {
         confirm_hard_guard_age_us = confirm_soft_guard_age_us.saturating_add(1);
     }
+    let hard_guard_admission_enabled =
+        !(state.v3_durable_confirm_guard_hard_requires_admission && lane_level == 0);
+    let soft_guard_admission_enabled =
+        !(state.v3_durable_confirm_guard_soft_requires_admission && lane_level == 0);
+    let hard_guard_enabled = hard_guard_admission_enabled && guard_secondary_enabled && hard_guard_armed;
+    let soft_guard_enabled = soft_guard_admission_enabled && guard_secondary_enabled && soft_guard_armed;
     if confirm_hard_guard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_guard_age_us {
-        state.increment_v3_rejected_hard_total(shard_id);
-        state
-            .v3_durable_confirm_age_hard_reject_total
-            .fetch_add(1, Ordering::Relaxed);
-        state
-            .v3_durable_backpressure_hard_total
-            .fetch_add(1, Ordering::Relaxed);
-        if let Some(counter) = state
-            .v3_durable_backpressure_hard_total_per_lane
-            .get(durable_lane_id)
-        {
-            counter.fetch_add(1, Ordering::Relaxed);
+        if hard_guard_enabled {
+            state.increment_v3_rejected_hard_total(shard_id);
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .v3_durable_backpressure_hard_total
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = state
+                .v3_durable_backpressure_hard_total_per_lane
+                .get(durable_lane_id)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            record_v3_ack(&state, t0);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                VolatileOrderResponse::rejected(
+                    &session_id,
+                    "REJECTED",
+                    "V3_DURABLE_CONFIRM_AGE_HARD",
+                ),
+            );
+        } else {
+            if !hard_guard_admission_enabled {
+                state
+                    .v3_durable_confirm_age_hard_reject_skipped_total
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if !hard_guard_armed {
+                state
+                    .v3_durable_confirm_age_hard_reject_skipped_unarmed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if !guard_secondary_enabled {
+                state
+                    .v3_durable_confirm_age_hard_reject_skipped_low_load_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
-        record_v3_ack(&state, t0);
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_HARD"),
-        );
     }
     if confirm_soft_guard_age_us > 0 && confirm_oldest_age_us >= confirm_soft_guard_age_us {
-        state.increment_v3_rejected_soft_total(shard_id);
-        state
-            .v3_durable_confirm_age_soft_reject_total
-            .fetch_add(1, Ordering::Relaxed);
-        state
-            .v3_durable_backpressure_soft_total
-            .fetch_add(1, Ordering::Relaxed);
-        if let Some(counter) = state
-            .v3_durable_backpressure_soft_total_per_lane
-            .get(durable_lane_id)
-        {
-            counter.fetch_add(1, Ordering::Relaxed);
+        if soft_guard_enabled {
+            state.increment_v3_rejected_soft_total(shard_id);
+            state
+                .v3_durable_confirm_age_soft_reject_total
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .v3_durable_backpressure_soft_total
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = state
+                .v3_durable_backpressure_soft_total_per_lane
+                .get(durable_lane_id)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            record_v3_ack(&state, t0);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                VolatileOrderResponse::rejected(
+                    &session_id,
+                    "REJECTED",
+                    "V3_DURABLE_CONFIRM_AGE_SOFT",
+                ),
+            );
+        } else {
+            if !soft_guard_admission_enabled {
+                state
+                    .v3_durable_confirm_age_soft_reject_skipped_total
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if !soft_guard_armed {
+                state
+                    .v3_durable_confirm_age_soft_reject_skipped_unarmed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if !guard_secondary_enabled {
+                state
+                    .v3_durable_confirm_age_soft_reject_skipped_low_load_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
-        record_v3_ack(&state, t0);
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_DURABLE_CONFIRM_AGE_SOFT"),
-        );
     }
     // 監視ループより先に深刻な飽和を検知した場合のみ即時hard拒否する。
     let durable_failsafe_hard = durable_queue_pct >= 99.0
@@ -1898,6 +1974,7 @@ mod tests {
         let v3_confirm_rebuild_paths = Arc::new(vec![audit_log.path().to_path_buf()]);
         let shard_u64 = || Arc::new(vec![Arc::new(AtomicU64::new(0))]);
         let lane_u64 = || Arc::new(vec![Arc::new(AtomicU64::new(0))]);
+        let lane_u64_with = |value: u64| Arc::new(vec![Arc::new(AtomicU64::new(value))]);
         let lane_i64 = || Arc::new(vec![Arc::new(AtomicI64::new(0))]);
         let confirm_lane_hist = || Arc::new(vec![Arc::new(LatencyHistogram::new())]);
         let v3_durable_wal_fsync_hist_per_lane = Arc::new(vec![Arc::new(LatencyHistogram::new())]);
@@ -2047,8 +2124,40 @@ mod tests {
             v3_durable_confirm_hard_reject_age_us: 0,
             v3_durable_confirm_guard_soft_slack_pct: 0,
             v3_durable_confirm_guard_hard_slack_pct: 0,
+            v3_durable_confirm_guard_soft_requires_admission: false,
+            v3_durable_confirm_guard_hard_requires_admission: false,
+            v3_durable_confirm_guard_secondary_required: false,
+            v3_durable_confirm_guard_min_queue_pct: 0.0,
+            v3_durable_confirm_guard_min_inflight_pct: 0,
+            v3_durable_confirm_guard_min_backlog_per_sec: 0,
+            v3_durable_confirm_guard_soft_sustain_ticks: 2,
+            v3_durable_confirm_guard_hard_sustain_ticks: 2,
+            v3_durable_confirm_guard_recover_ticks: 3,
+            v3_durable_confirm_guard_recover_hysteresis_pct: 85,
+            v3_durable_confirm_guard_autotune_enabled: true,
+            v3_durable_confirm_guard_autotune_low_pressure_pct: 35,
+            v3_durable_confirm_guard_autotune_high_pressure_pct: 80,
+            v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane: lane_u64_with(2),
+            v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane: lane_u64_with(2),
+            v3_durable_confirm_guard_recover_ticks_effective_per_lane: lane_u64_with(3),
+            v3_durable_confirm_guard_soft_armed_per_lane: lane_u64_with(1),
+            v3_durable_confirm_guard_hard_armed_per_lane: lane_u64_with(1),
             v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_soft_reject_skipped_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_hard_reject_skipped_total: Arc::new(AtomicU64::new(0)),
+            v3_durable_confirm_age_soft_reject_skipped_unarmed_total: Arc::new(
+                AtomicU64::new(0),
+            ),
+            v3_durable_confirm_age_hard_reject_skipped_unarmed_total: Arc::new(
+                AtomicU64::new(0),
+            ),
+            v3_durable_confirm_age_soft_reject_skipped_low_load_total: Arc::new(
+                AtomicU64::new(0),
+            ),
+            v3_durable_confirm_age_hard_reject_skipped_low_load_total: Arc::new(
+                AtomicU64::new(0),
+            ),
             v3_durable_confirm_age_autotune_enabled: false,
             v3_durable_confirm_age_autotune_alpha_pct: 20,
             v3_durable_confirm_soft_reject_age_min_us: 0,
@@ -2601,6 +2710,181 @@ mod tests {
                 .v3_durable_confirm_age_hard_reject_total
                 .load(Ordering::Relaxed),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_skips_hard_confirm_guard_when_requires_admission_and_lane_is_normal() {
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state.v3_durable_confirm_guard_soft_requires_admission = true;
+        state.v3_durable_confirm_guard_hard_requires_admission = true;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(12_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(12_000, Ordering::Relaxed);
+        }
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(0, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-hard-skip-normal";
+        let req = request_with_client_id("cid_v3_confirm_age_hard_skip_normal");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_hard_skip_normal")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "VOLATILE_ACCEPT");
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_skipped_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_skips_hard_confirm_guard_when_low_load_gate_is_not_satisfied() {
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state.v3_durable_confirm_soft_reject_age_us = 0;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state.v3_durable_confirm_guard_secondary_required = true;
+        state.v3_durable_confirm_guard_min_queue_pct = 1.0;
+        state.v3_durable_confirm_guard_min_inflight_pct = 80;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(12_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(12_000, Ordering::Relaxed);
+        }
+        if let Some(gauge) = state.v3_durable_receipt_inflight_per_lane.get(0) {
+            gauge.store(32, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-hard-skip-low-load";
+        let req = request_with_client_id("cid_v3_confirm_age_hard_skip_low_load");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_hard_skip_low_load")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "VOLATILE_ACCEPT");
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_skipped_low_load_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_skips_hard_confirm_guard_when_not_armed() {
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state.v3_durable_confirm_soft_reject_age_us = 0;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state.v3_durable_confirm_guard_secondary_required = false;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(12_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(12_000, Ordering::Relaxed);
+        }
+        if let Some(gauge) = state.v3_durable_confirm_guard_hard_armed_per_lane.get(0) {
+            gauge.store(0, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-hard-skip-unarmed";
+        let req = request_with_client_id("cid_v3_confirm_age_hard_skip_unarmed");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_hard_skip_unarmed")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "VOLATILE_ACCEPT");
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_skipped_unarmed_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_applies_hard_confirm_guard_when_requires_admission_and_lane_escalated() {
+        let mut state = build_test_state();
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state.v3_durable_confirm_guard_hard_requires_admission = true;
+        state.v3_durable_confirm_guard_min_inflight_pct = 100;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(12_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(12_000, Ordering::Relaxed);
+        }
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(1, Ordering::Relaxed);
+        }
+
+        let account_id = "v3-confirm-age-hard-escalated";
+        let req = request_with_client_id("cid_v3_confirm_age_hard_escalated");
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_confirm_age_hard_escalated")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.reason.as_deref(), Some("V3_DURABLE_CONFIRM_AGE_HARD"));
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_total
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .v3_durable_confirm_age_hard_reject_skipped_total
+                .load(Ordering::Relaxed),
+            0
         );
     }
 

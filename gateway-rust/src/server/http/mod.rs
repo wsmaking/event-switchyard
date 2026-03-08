@@ -1313,8 +1313,35 @@ pub(super) struct AppState {
     pub(super) v3_durable_confirm_hard_reject_age_us: u64,
     pub(super) v3_durable_confirm_guard_soft_slack_pct: u64,
     pub(super) v3_durable_confirm_guard_hard_slack_pct: u64,
+    pub(super) v3_durable_confirm_guard_soft_requires_admission: bool,
+    pub(super) v3_durable_confirm_guard_hard_requires_admission: bool,
+    pub(super) v3_durable_confirm_guard_secondary_required: bool,
+    pub(super) v3_durable_confirm_guard_min_queue_pct: f64,
+    pub(super) v3_durable_confirm_guard_min_inflight_pct: u64,
+    pub(super) v3_durable_confirm_guard_min_backlog_per_sec: i64,
+    pub(super) v3_durable_confirm_guard_soft_sustain_ticks: u64,
+    pub(super) v3_durable_confirm_guard_hard_sustain_ticks: u64,
+    pub(super) v3_durable_confirm_guard_recover_ticks: u64,
+    pub(super) v3_durable_confirm_guard_recover_hysteresis_pct: u64,
+    pub(super) v3_durable_confirm_guard_autotune_enabled: bool,
+    pub(super) v3_durable_confirm_guard_autotune_low_pressure_pct: u64,
+    pub(super) v3_durable_confirm_guard_autotune_high_pressure_pct: u64,
+    pub(super) v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane:
+        Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane:
+        Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_guard_recover_ticks_effective_per_lane:
+        Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_guard_soft_armed_per_lane: Arc<Vec<Arc<AtomicU64>>>,
+    pub(super) v3_durable_confirm_guard_hard_armed_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_confirm_age_soft_reject_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_age_hard_reject_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_soft_reject_skipped_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_hard_reject_skipped_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_soft_reject_skipped_unarmed_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_hard_reject_skipped_unarmed_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_soft_reject_skipped_low_load_total: Arc<AtomicU64>,
+    pub(super) v3_durable_confirm_age_hard_reject_skipped_low_load_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_age_autotune_enabled: bool,
     pub(super) v3_durable_confirm_age_autotune_alpha_pct: u64,
     pub(super) v3_durable_confirm_soft_reject_age_min_us: u64,
@@ -2064,6 +2091,69 @@ pub async fn run(
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(40)
             .min(100);
+    let v3_durable_confirm_guard_soft_requires_admission =
+        parse_bool_env("V3_DURABLE_CONFIRM_GUARD_SOFT_REQUIRES_ADMISSION").unwrap_or(false);
+    let v3_durable_confirm_guard_hard_requires_admission =
+        parse_bool_env("V3_DURABLE_CONFIRM_GUARD_HARD_REQUIRES_ADMISSION").unwrap_or(false);
+    let v3_durable_confirm_guard_min_queue_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_MIN_QUEUE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0);
+    let v3_durable_confirm_guard_min_inflight_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_MIN_INFLIGHT_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(100);
+    let v3_durable_confirm_guard_secondary_required =
+        parse_bool_env("V3_DURABLE_CONFIRM_GUARD_SECONDARY_REQUIRED").unwrap_or(false);
+    let v3_durable_confirm_guard_min_backlog_per_sec =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_MIN_BACKLOG_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0);
+    let v3_durable_confirm_guard_soft_sustain_ticks =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_SOFT_SUSTAIN_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2)
+            .max(1);
+    let v3_durable_confirm_guard_hard_sustain_ticks =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_HARD_SUSTAIN_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2)
+            .max(1);
+    let v3_durable_confirm_guard_recover_ticks =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_RECOVER_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3)
+            .max(1);
+    let v3_durable_confirm_guard_recover_hysteresis_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_RECOVER_HYSTERESIS_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(85)
+            .clamp(50, 99);
+    let v3_durable_confirm_guard_autotune_enabled =
+        parse_bool_env("V3_DURABLE_CONFIRM_GUARD_AUTOTUNE").unwrap_or(true);
+    let v3_durable_confirm_guard_autotune_low_pressure_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(35)
+            .min(100);
+    let v3_durable_confirm_guard_autotune_high_pressure_pct =
+        std::env::var("V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(80)
+            .min(100)
+            .max(v3_durable_confirm_guard_autotune_low_pressure_pct);
     let default_soft_min_us = if v3_durable_confirm_soft_reject_age_us > 0 {
         (v3_durable_confirm_soft_reject_age_us.saturating_mul(7) / 10).max(10_000)
     } else {
@@ -2247,6 +2337,31 @@ pub async fn run(
             .map(|_| Arc::new(AtomicU64::new(0)))
             .collect::<Vec<_>>(),
     );
+    let v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(v3_durable_confirm_guard_soft_sustain_ticks)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(v3_durable_confirm_guard_hard_sustain_ticks)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_guard_recover_ticks_effective_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(v3_durable_confirm_guard_recover_ticks)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_guard_soft_armed_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(0)))
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_confirm_guard_hard_armed_per_lane = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|_| Arc::new(AtomicU64::new(0)))
+            .collect::<Vec<_>>(),
+    );
 
     let audit_read_path = {
         let configured = std::env::var("AUDIT_LOG_PATH").ok().map(PathBuf::from);
@@ -2415,8 +2530,32 @@ pub async fn run(
         v3_durable_confirm_hard_reject_age_us,
         v3_durable_confirm_guard_soft_slack_pct,
         v3_durable_confirm_guard_hard_slack_pct,
+        v3_durable_confirm_guard_soft_requires_admission,
+        v3_durable_confirm_guard_hard_requires_admission,
+        v3_durable_confirm_guard_secondary_required,
+        v3_durable_confirm_guard_min_queue_pct,
+        v3_durable_confirm_guard_min_inflight_pct,
+        v3_durable_confirm_guard_min_backlog_per_sec,
+        v3_durable_confirm_guard_soft_sustain_ticks,
+        v3_durable_confirm_guard_hard_sustain_ticks,
+        v3_durable_confirm_guard_recover_ticks,
+        v3_durable_confirm_guard_recover_hysteresis_pct,
+        v3_durable_confirm_guard_autotune_enabled,
+        v3_durable_confirm_guard_autotune_low_pressure_pct,
+        v3_durable_confirm_guard_autotune_high_pressure_pct,
+        v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane,
+        v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane,
+        v3_durable_confirm_guard_recover_ticks_effective_per_lane,
+        v3_durable_confirm_guard_soft_armed_per_lane,
+        v3_durable_confirm_guard_hard_armed_per_lane,
         v3_durable_confirm_age_soft_reject_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_age_hard_reject_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_soft_reject_skipped_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_hard_reject_skipped_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_soft_reject_skipped_unarmed_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_hard_reject_skipped_unarmed_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_soft_reject_skipped_low_load_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_confirm_age_hard_reject_skipped_low_load_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_age_autotune_enabled,
         v3_durable_confirm_age_autotune_alpha_pct,
         v3_durable_confirm_soft_reject_age_min_us,
@@ -2933,6 +3072,37 @@ fn v3_confirm_autotune_queue_pressure_pct(
         lane_pressure_pct.min(100)
     } else {
         0
+    }
+}
+
+#[inline]
+fn apply_confirm_guard_slack(age_us: u64, slack_pct: u64) -> u64 {
+    if age_us == 0 || slack_pct == 0 {
+        age_us
+    } else {
+        age_us.saturating_add(((age_us as u128).saturating_mul(slack_pct as u128) / 100) as u64)
+    }
+}
+
+#[inline]
+fn v3_confirm_guard_effective_ticks(
+    base_ticks: u64,
+    pressure_pct: u64,
+    low_pressure_pct: u64,
+    high_pressure_pct: u64,
+    tighten_delta: u64,
+    relax_delta: u64,
+) -> u64 {
+    let base = base_ticks.max(1);
+    if high_pressure_pct <= low_pressure_pct {
+        return base;
+    }
+    if pressure_pct >= high_pressure_pct {
+        base.saturating_sub(tighten_delta).max(1)
+    } else if pressure_pct <= low_pressure_pct {
+        base.saturating_add(relax_delta).max(1)
+    } else {
+        base
     }
 }
 
@@ -3780,6 +3950,10 @@ async fn run_v3_loss_monitor(state: AppState) {
     let mut soft_streak_per_lane = vec![0u64; lane_count];
     let mut hard_streak_per_lane = vec![0u64; lane_count];
     let mut clear_streak_per_lane = vec![0u64; lane_count];
+    let mut confirm_soft_over_streak_per_lane = vec![0u64; lane_count];
+    let mut confirm_hard_over_streak_per_lane = vec![0u64; lane_count];
+    let mut confirm_soft_clear_streak_per_lane = vec![0u64; lane_count];
+    let mut confirm_hard_clear_streak_per_lane = vec![0u64; lane_count];
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
@@ -3870,8 +4044,8 @@ async fn run_v3_loss_monitor(state: AppState) {
                 cached.store(lane_fsync_p99_us, Ordering::Relaxed);
             }
         }
+        let hour_slot = current_utc_hour_slot().min(23);
         if state.v3_durable_confirm_age_autotune_enabled {
-            let hour_slot = current_utc_hour_slot().min(23);
             let alpha_pct = state.v3_durable_confirm_age_autotune_alpha_pct;
             const CONFIRM_AUTOTUNE_TIGHTEN_STEP_PCT: u64 = 20;
             const CONFIRM_AUTOTUNE_RELAX_STEP_PCT: u64 = 2;
@@ -4027,6 +4201,196 @@ async fn run_v3_loss_monitor(state: AppState) {
                 {
                     target.store(slewed_hard_age_us, Ordering::Relaxed);
                 }
+            }
+        }
+        for lane_id in 0..lane_count {
+            let lane_confirm_age_us = confirm_oldest_age_us_per_lane
+                .get(lane_id)
+                .copied()
+                .unwrap_or(confirm_oldest_age_us_max);
+            let lane_level = state
+                .v3_durable_admission_level_per_lane
+                .get(lane_id)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let (mut soft_guard_age_us, mut hard_guard_age_us) =
+                state.v3_durable_confirm_reject_ages_for_lane(lane_id);
+            if lane_level == 0 {
+                soft_guard_age_us = apply_confirm_guard_slack(
+                    soft_guard_age_us,
+                    state.v3_durable_confirm_guard_soft_slack_pct,
+                );
+                hard_guard_age_us = apply_confirm_guard_slack(
+                    hard_guard_age_us,
+                    state.v3_durable_confirm_guard_hard_slack_pct,
+                );
+            }
+            if soft_guard_age_us > 0
+                && hard_guard_age_us > 0
+                && hard_guard_age_us <= soft_guard_age_us
+            {
+                hard_guard_age_us = soft_guard_age_us.saturating_add(1);
+            }
+            let hourly_index = lane_id.saturating_mul(24).saturating_add(hour_slot);
+            let pressure_pct = state
+                .v3_durable_confirm_hourly_pressure_ewma_per_lane
+                .get(hourly_index)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0)
+                .min(100);
+            let soft_sustain_ticks = if state.v3_durable_confirm_guard_autotune_enabled {
+                v3_confirm_guard_effective_ticks(
+                    state.v3_durable_confirm_guard_soft_sustain_ticks,
+                    pressure_pct,
+                    state.v3_durable_confirm_guard_autotune_low_pressure_pct,
+                    state.v3_durable_confirm_guard_autotune_high_pressure_pct,
+                    1,
+                    1,
+                )
+            } else {
+                state.v3_durable_confirm_guard_soft_sustain_ticks
+            };
+            let hard_sustain_ticks = if state.v3_durable_confirm_guard_autotune_enabled {
+                v3_confirm_guard_effective_ticks(
+                    state.v3_durable_confirm_guard_hard_sustain_ticks,
+                    pressure_pct,
+                    state.v3_durable_confirm_guard_autotune_low_pressure_pct,
+                    state.v3_durable_confirm_guard_autotune_high_pressure_pct,
+                    1,
+                    1,
+                )
+            } else {
+                state.v3_durable_confirm_guard_hard_sustain_ticks
+            };
+            let recover_ticks = if state.v3_durable_confirm_guard_autotune_enabled {
+                if pressure_pct >= state.v3_durable_confirm_guard_autotune_high_pressure_pct {
+                    state
+                        .v3_durable_confirm_guard_recover_ticks
+                        .saturating_add(1)
+                        .max(1)
+                } else if pressure_pct <= state.v3_durable_confirm_guard_autotune_low_pressure_pct {
+                    state
+                        .v3_durable_confirm_guard_recover_ticks
+                        .saturating_sub(1)
+                        .max(1)
+                } else {
+                    state.v3_durable_confirm_guard_recover_ticks
+                }
+            } else {
+                state.v3_durable_confirm_guard_recover_ticks
+            };
+            if let Some(gauge) = state
+                .v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane
+                .get(lane_id)
+            {
+                gauge.store(soft_sustain_ticks, Ordering::Relaxed);
+            }
+            if let Some(gauge) = state
+                .v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane
+                .get(lane_id)
+            {
+                gauge.store(hard_sustain_ticks, Ordering::Relaxed);
+            }
+            if let Some(gauge) = state
+                .v3_durable_confirm_guard_recover_ticks_effective_per_lane
+                .get(lane_id)
+            {
+                gauge.store(recover_ticks, Ordering::Relaxed);
+            }
+            if soft_guard_age_us == 0 {
+                confirm_soft_over_streak_per_lane[lane_id] = 0;
+                confirm_soft_clear_streak_per_lane[lane_id] = 0;
+                if let Some(gauge) = state.v3_durable_confirm_guard_soft_armed_per_lane.get(lane_id) {
+                    gauge.store(0, Ordering::Relaxed);
+                }
+            }
+            if hard_guard_age_us == 0 {
+                confirm_hard_over_streak_per_lane[lane_id] = 0;
+                confirm_hard_clear_streak_per_lane[lane_id] = 0;
+                if let Some(gauge) = state.v3_durable_confirm_guard_hard_armed_per_lane.get(lane_id) {
+                    gauge.store(0, Ordering::Relaxed);
+                }
+            }
+            if soft_guard_age_us == 0 && hard_guard_age_us == 0 {
+                continue;
+            }
+            let recover_pct = state.v3_durable_confirm_guard_recover_hysteresis_pct.min(99);
+            let soft_recover_age_us = if soft_guard_age_us > 0 {
+                ((soft_guard_age_us as u128)
+                    .saturating_mul(recover_pct as u128)
+                    .saturating_add(99)
+                    / 100) as u64
+            } else {
+                0
+            };
+            let hard_recover_age_us = if hard_guard_age_us > 0 {
+                ((hard_guard_age_us as u128)
+                    .saturating_mul(recover_pct as u128)
+                    .saturating_add(99)
+                    / 100) as u64
+            } else {
+                0
+            };
+            let over_soft = soft_guard_age_us > 0 && lane_confirm_age_us >= soft_guard_age_us;
+            let over_hard = hard_guard_age_us > 0 && lane_confirm_age_us >= hard_guard_age_us;
+            let clear_soft = soft_guard_age_us > 0 && lane_confirm_age_us <= soft_recover_age_us;
+            let clear_hard = hard_guard_age_us > 0 && lane_confirm_age_us <= hard_recover_age_us;
+            if over_soft {
+                confirm_soft_over_streak_per_lane[lane_id] =
+                    confirm_soft_over_streak_per_lane[lane_id].saturating_add(1);
+                confirm_soft_clear_streak_per_lane[lane_id] = 0;
+            } else if clear_soft {
+                confirm_soft_clear_streak_per_lane[lane_id] =
+                    confirm_soft_clear_streak_per_lane[lane_id].saturating_add(1);
+                confirm_soft_over_streak_per_lane[lane_id] = 0;
+            } else {
+                confirm_soft_over_streak_per_lane[lane_id] = 0;
+                confirm_soft_clear_streak_per_lane[lane_id] = 0;
+            }
+            if over_hard {
+                confirm_hard_over_streak_per_lane[lane_id] =
+                    confirm_hard_over_streak_per_lane[lane_id].saturating_add(1);
+                confirm_hard_clear_streak_per_lane[lane_id] = 0;
+            } else if clear_hard {
+                confirm_hard_clear_streak_per_lane[lane_id] =
+                    confirm_hard_clear_streak_per_lane[lane_id].saturating_add(1);
+                confirm_hard_over_streak_per_lane[lane_id] = 0;
+            } else {
+                confirm_hard_over_streak_per_lane[lane_id] = 0;
+                confirm_hard_clear_streak_per_lane[lane_id] = 0;
+            }
+            let prev_soft_armed = state
+                .v3_durable_confirm_guard_soft_armed_per_lane
+                .get(lane_id)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let prev_hard_armed = state
+                .v3_durable_confirm_guard_hard_armed_per_lane
+                .get(lane_id)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let mut next_soft_armed = prev_soft_armed;
+            let mut next_hard_armed = prev_hard_armed;
+            if over_soft && confirm_soft_over_streak_per_lane[lane_id] >= soft_sustain_ticks {
+                next_soft_armed = 1;
+            }
+            if over_hard && confirm_hard_over_streak_per_lane[lane_id] >= hard_sustain_ticks {
+                next_hard_armed = 1;
+            }
+            if clear_soft && confirm_soft_clear_streak_per_lane[lane_id] >= recover_ticks {
+                next_soft_armed = 0;
+            }
+            if clear_hard && confirm_hard_clear_streak_per_lane[lane_id] >= recover_ticks {
+                next_hard_armed = 0;
+            }
+            if next_hard_armed > 0 {
+                next_soft_armed = 1;
+            }
+            if let Some(gauge) = state.v3_durable_confirm_guard_soft_armed_per_lane.get(lane_id) {
+                gauge.store(next_soft_armed, Ordering::Relaxed);
+            }
+            if let Some(gauge) = state.v3_durable_confirm_guard_hard_armed_per_lane.get(lane_id) {
+                gauge.store(next_hard_armed, Ordering::Relaxed);
             }
         }
         if state.v3_durable_admission_controller_enabled {
