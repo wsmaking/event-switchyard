@@ -1,0 +1,49 @@
+name: business-contracts
+
+on:
+  pull_request:
+    paths:
+      - "contracts/fixtures/*_v1.json"
+      - "contracts/*_v1.schema.json"
+      - "gateway/src/test/kotlin/gateway/contract/BusinessLogicContractTest.kt"
+      - "gateway-rust/src/server/http/orders.rs"
+      - "gateway-rust/src/store/mod.rs"
+      - ".github/workflows/business_contracts.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "contracts/fixtures/*_v1.json"
+      - "contracts/*_v1.schema.json"
+      - "gateway/src/test/kotlin/gateway/contract/BusinessLogicContractTest.kt"
+      - "gateway-rust/src/server/http/orders.rs"
+      - "gateway-rust/src/store/mod.rs"
+      - ".github/workflows/business_contracts.yml"
+
+jobs:
+  contract-equivalence:
+    name: Contract Equivalence (Kotlin + Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Kotlin contract test
+        run: ./gradlew :gateway:test --tests gateway.contract.BusinessLogicContractTest --no-daemon
+
+      - name: Rust contract tests
+        run: cargo test --manifest-path gateway-rust/Cargo.toml fixture_matches
