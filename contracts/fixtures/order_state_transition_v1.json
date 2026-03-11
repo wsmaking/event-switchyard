@@ -1,0 +1,86 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "transitions": [
+    {
+      "id": "tr-cancel-requested",
+      "from": "ACCEPTED",
+      "event": "CANCEL_REQUESTED",
+      "filledQtyBefore": 0,
+      "filledQtyReported": 0,
+      "orderQty": 10,
+      "to": "CANCEL_REQUESTED",
+      "invariant": "cancel request moves active order to cancel requested"
+    },
+    {
+      "id": "tr-partial-fill",
+      "from": "ACCEPTED",
+      "event": "EXEC_REPORT_PARTIAL",
+      "filledQtyBefore": 0,
+      "filledQtyReported": 4,
+      "orderQty": 10,
+      "to": "PARTIALLY_FILLED",
+      "invariant": "partial report transitions accepted to partially filled"
+    },
+    {
+      "id": "tr-partial-does-not-decrease",
+      "from": "PARTIALLY_FILLED",
+      "event": "EXEC_REPORT_PARTIAL",
+      "filledQtyBefore": 5,
+      "filledQtyReported": 3,
+      "orderQty": 10,
+      "to": "PARTIALLY_FILLED",
+      "invariant": "filled quantity total is monotonic"
+    },
+    {
+      "id": "tr-reject-after-fill",
+      "from": "PARTIALLY_FILLED",
+      "event": "EXEC_REPORT_REJECTED",
+      "filledQtyBefore": 5,
+      "filledQtyReported": 5,
+      "orderQty": 10,
+      "to": "PARTIALLY_FILLED",
+      "invariant": "reject does not downgrade if any fill already observed"
+    },
+    {
+      "id": "tr-filled-terminal",
+      "from": "PARTIALLY_FILLED",
+      "event": "EXEC_REPORT_FILLED",
+      "filledQtyBefore": 9,
+      "filledQtyReported": 10,
+      "orderQty": 10,
+      "to": "FILLED",
+      "invariant": "filled report on remaining quantity reaches terminal filled"
+    },
+    {
+      "id": "tr-canceled-terminal",
+      "from": "CANCELED",
+      "event": "EXEC_REPORT_FILLED",
+      "filledQtyBefore": 2,
+      "filledQtyReported": 10,
+      "orderQty": 10,
+      "to": "CANCELED",
+      "invariant": "terminal canceled ignores late fill report"
+    },
+    {
+      "id": "tr-rejected-terminal",
+      "from": "REJECTED",
+      "event": "EXEC_REPORT_PARTIAL",
+      "filledQtyBefore": 0,
+      "filledQtyReported": 2,
+      "orderQty": 10,
+      "to": "REJECTED",
+      "invariant": "terminal rejected ignores late execution reports"
+    },
+    {
+      "id": "tr-filled-remains-terminal",
+      "from": "FILLED",
+      "event": "EXEC_REPORT_CANCELED",
+      "filledQtyBefore": 10,
+      "filledQtyReported": 10,
+      "orderQty": 10,
+      "to": "FILLED",
+      "invariant": "terminal filled ignores cancel report"
+    }
+  ]
+}

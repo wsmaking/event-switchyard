@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Reject Reason Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "owner",
+    "reasons"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": [
+        "v1"
+      ]
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reasons": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "category",
+          "httpStatus",
+          "tcpReasonCode",
+          "emittedBy",
+          "retryable",
+          "description"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "risk",
+              "admission",
+              "queue",
+              "kill",
+              "parse",
+              "auth"
+            ]
+          },
+          "httpStatus": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599
+          },
+          "tcpReasonCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "emittedBy": {
+            "type": "string",
+            "enum": [
+              "v3_http",
+              "v3_tcp_parse",
+              "v3_tcp_auth"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
