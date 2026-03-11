@@ -170,7 +170,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 fn to_bus_event(event: AuditEvent) -> Option<BusEvent> {
     match event.event_type.as_str() {
-        "OrderAccepted" | "CancelRequested" => Some(BusEvent {
+        "OrderAccepted" | "CancelRequested" | "ExecutionReport" | "OrderUpdated" => Some(BusEvent {
             event_type: event.event_type,
             at: crate::bus::format_event_time(event.at),
             account_id: event.account_id,
@@ -282,7 +282,7 @@ mod tests {
         };
 
         assert!(to_bus_event(accepted).is_some());
-        assert!(to_bus_event(report).is_none());
+        assert!(to_bus_event(report).is_some());
     }
 
     #[test]

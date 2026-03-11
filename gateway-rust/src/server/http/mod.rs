@@ -1827,14 +1827,25 @@ pub async fn run(
     audit_log: Arc<AuditLog>,
     bus_publisher: Arc<BusPublisher>,
     bus_mode_outbox: bool,
-    idempotency_ttl_sec: u64,
     durable_rx: Option<UnboundedReceiver<AuditDurableNotification>>,
+    sharded_store: Arc<ShardedOrderStore>,
+    order_id_map: Arc<OrderIdMap>,
 ) -> anyhow::Result<()> {
-    let shard_count = std::env::var("ORDER_STORE_SHARDS")
+    let configured_shard_count = std::env::var("ORDER_STORE_SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(64);
-    info!("ShardedOrderStore configured (shards={})", shard_count);
+        .unwrap_or(sharded_store.shard_count());
+    if configured_shard_count != sharded_store.shard_count() {
+        info!(
+            configured = configured_shard_count,
+            effective = sharded_store.shard_count(),
+            "ORDER_STORE_SHARDS differs from injected store shard count; using injected store"
+        );
+    }
+    info!(
+        "ShardedOrderStore configured (shards={})",
+        sharded_store.shard_count()
+    );
 
     let inflight_controller = crate::inflight::InflightController::spawn_from_env();
     let mut backpressure = BackpressureConfig::from_env();
@@ -2504,11 +2515,8 @@ pub async fn run(
         engine,
         jwt_auth: Arc::new(JwtAuth::from_env()),
         order_store,
-        sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_and_shards(
-            idempotency_ttl_sec * 1000,
-            shard_count,
-        )),
-        order_id_map: Arc::new(OrderIdMap::new()),
+        sharded_store,
+        order_id_map,
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,
