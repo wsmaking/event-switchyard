@@ -83,6 +83,39 @@ fn sync_data_with_mode(file: &File, serialize: bool) -> std::io::Result<()> {
     result
 }
 
+#[inline]
+fn parse_env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.parse::<u64>().ok())
+}
+
+#[inline]
+fn parse_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok().and_then(|v| v.parse::<usize>().ok())
+}
+
+#[inline]
+fn parse_lane_override_u64(base_key: &str, lane_id: Option<usize>) -> Option<u64> {
+    lane_id.and_then(|lane| parse_env_u64(&format!("{base_key}_LANE{lane}")))
+}
+
+#[inline]
+fn parse_lane_override_usize(base_key: &str, lane_id: Option<usize>) -> Option<usize> {
+    lane_id.and_then(|lane| parse_env_usize(&format!("{base_key}_LANE{lane}")))
+}
+
+fn parse_v3_lane_id_from_path(path: &Path) -> Option<usize> {
+    let raw = path.to_string_lossy();
+    let marker = ".v3.lane";
+    let start = raw.rfind(marker)?.saturating_add(marker.len());
+    let tail = &raw[start..];
+    let end = tail.find('.').unwrap_or(tail.len());
+    let digits = &tail[..end];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AuditAppendTimings {
     pub enqueue_done_ns: u64,
@@ -523,35 +556,49 @@ impl AuditLog {
         *guard = Some(tx);
         drop(guard);
 
+        let lane_id = parse_v3_lane_id_from_path(self.path.as_path());
         let fdatasync_enabled = self.fdatasync_enabled;
         let fdatasync_serialize = self.fdatasync_serialize;
-        let max_wait_us = self.fdatasync_max_wait_us.max(1);
-        let max_batch = self.fdatasync_max_batch.max(1);
-        let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
-        let fdatasync_max_defer_us = self.fdatasync_max_defer_us;
-        let fdatasync_max_inflight_age_us = std::env::var("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(
-                fdatasync_max_defer_us
-                    .max(max_wait_us.saturating_mul(8))
-                    .max(1_000),
-            );
-        let target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+        let max_wait_us = parse_lane_override_u64("AUDIT_FDATASYNC_MAX_WAIT_US", lane_id)
+            .unwrap_or(self.fdatasync_max_wait_us)
+            .max(1);
+        let max_batch = parse_lane_override_usize("AUDIT_FDATASYNC_MAX_BATCH", lane_id)
+            .unwrap_or(self.fdatasync_max_batch)
+            .max(1);
+        let fdatasync_coalesce_us = parse_lane_override_u64("AUDIT_FDATASYNC_COALESCE_US", lane_id)
+            .unwrap_or(self.fdatasync_coalesce_us);
+        let fdatasync_max_defer_us = parse_lane_override_u64("AUDIT_FDATASYNC_MAX_DEFER_US", lane_id)
+            .unwrap_or(self.fdatasync_max_defer_us);
+        let fdatasync_max_inflight_age_default = fdatasync_max_defer_us
+            .max(max_wait_us.saturating_mul(8))
+            .max(1_000);
+        let fdatasync_max_inflight_age_us =
+            parse_lane_override_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US", lane_id)
+                .or_else(|| parse_env_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US"))
+                .unwrap_or(fdatasync_max_inflight_age_default);
+        let target_batch_bytes = parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES", lane_id)
+            .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES"))
             .unwrap_or(64 * 1024)
             .max(1_024);
-        let min_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
-            .max(1_024);
-        let max_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
-            .max(min_target_batch_bytes);
+        let min_target_batch_bytes = parse_lane_override_usize(
+            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN",
+            lane_id,
+        )
+        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN"))
+        .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
+        .max(1_024);
+        let max_target_batch_bytes = parse_lane_override_usize(
+            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX",
+            lane_id,
+        )
+        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX"))
+        .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
+        .max(min_target_batch_bytes);
+        let fdatasync_max_pending_bytes =
+            parse_lane_override_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES", lane_id)
+                .or_else(|| parse_env_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES"))
+                .unwrap_or(target_batch_bytes.saturating_mul(2).max(8 * 1024))
+                .max(target_batch_bytes);
         let coalesce_min_us = std::env::var("AUDIT_FDATASYNC_COALESCE_MIN_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -598,6 +645,7 @@ impl AuditLog {
                 fdatasync_coalesce_us,
                 fdatasync_max_defer_us,
                 fdatasync_max_inflight_age_us,
+                fdatasync_max_pending_bytes,
                 coalesce_min_us,
                 coalesce_max_us,
                 target_batch_bytes,
@@ -1267,6 +1315,7 @@ fn run_async_writer(
     fdatasync_coalesce_us: u64,
     fdatasync_max_defer_us: u64,
     fdatasync_max_inflight_age_us: u64,
+    fdatasync_max_pending_bytes: usize,
     coalesce_min_us: u64,
     coalesce_max_us: u64,
     target_batch_bytes: usize,
@@ -1471,10 +1520,14 @@ fn run_async_writer(
         let over_inflight_age = fdatasync_enabled
             && fdatasync_max_inflight_age_us > 0
             && oldest_inflight_age_us >= fdatasync_max_inflight_age_us;
+        let over_max_pending_bytes = fdatasync_enabled
+            && fdatasync_max_pending_bytes > 0
+            && candidate_pending_bytes >= fdatasync_max_pending_bytes;
         let should_defer_sync = within_coalesce_window
             && candidate_pending_bytes < cur_target_batch_bytes
             && !over_max_defer_age
-            && !over_inflight_age;
+            && !over_inflight_age
+            && !over_max_pending_bytes;
         if fdatasync_enabled && !should_defer_sync {
             if let Ok(writer) = audit.writer.lock() {
                 let sync_start = now_nanos();

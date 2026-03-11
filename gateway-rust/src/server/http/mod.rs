@@ -35,7 +35,6 @@ use gateway_core::SymbolLimits;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::Write as _;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -2998,6 +2997,7 @@ struct V3DurableWorkerPressureConfig {
     dynamic_inflight_enabled: bool,
     dynamic_inflight_min_cap_pct: u64,
     dynamic_inflight_max_cap_pct: u64,
+    dynamic_inflight_strict_max_cap_pct: u64,
     early_soft_age_us: u64,
     early_hard_age_us: u64,
     age_soft_inflight_cap_pct: u64,
@@ -3023,6 +3023,7 @@ impl V3DurableWorkerPressureConfig {
             V3DurableControlPreset::Legacy => (
                 inflight_hard_cap_pct.max(1),
                 100,
+                100,
                 50,
                 20,
                 100,
@@ -3031,11 +3032,12 @@ impl V3DurableWorkerPressureConfig {
                 100,
             ),
             // HFT-stable baseline: avoid cap oscillation by smoothing pressure and limiting slew.
-            V3DurableControlPreset::HftStable => (5, 80, 35, 15, 30, 8, 70, 35),
+            V3DurableControlPreset::HftStable => (10, 40, 40, 35, 15, 30, 8, 70, 35),
         };
         let (
             default_dynamic_min,
             default_dynamic_max,
+            default_dynamic_strict_max,
             default_age_soft,
             default_age_hard,
             default_alpha,
@@ -3044,8 +3046,15 @@ impl V3DurableWorkerPressureConfig {
             default_fsync_hard_cap,
         ) = defaults;
 
-        let dynamic_inflight_enabled =
-            parse_bool_env("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT").unwrap_or(true);
+        let dynamic_inflight_default = matches!(control_preset, V3DurableControlPreset::Legacy);
+        let dynamic_inflight_enabled = parse_bool_env("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT")
+            .unwrap_or(dynamic_inflight_default);
+        let dynamic_inflight_strict_max_cap_pct =
+            std::env::var("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_STRICT_MAX_CAP_PCT")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(default_dynamic_strict_max)
+                .clamp(1, 100);
         let mut dynamic_inflight_min_cap_pct =
             std::env::var("V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT")
                 .ok()
@@ -3057,7 +3066,8 @@ impl V3DurableWorkerPressureConfig {
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(default_dynamic_max)
-                .clamp(1, 100);
+                .clamp(1, 100)
+                .min(dynamic_inflight_strict_max_cap_pct);
         if dynamic_inflight_min_cap_pct > dynamic_inflight_max_cap_pct {
             dynamic_inflight_min_cap_pct = dynamic_inflight_max_cap_pct;
         }
@@ -3146,6 +3156,7 @@ impl V3DurableWorkerPressureConfig {
             dynamic_inflight_enabled,
             dynamic_inflight_min_cap_pct,
             dynamic_inflight_max_cap_pct,
+            dynamic_inflight_strict_max_cap_pct,
             early_soft_age_us,
             early_hard_age_us,
             age_soft_inflight_cap_pct,
@@ -3508,6 +3519,7 @@ async fn run_v3_durable_worker(
             dynamic_inflight_enabled = dynamic_inflight_enabled,
             dynamic_min_cap_pct = dynamic_inflight_min_cap_pct,
             dynamic_max_cap_pct = dynamic_inflight_max_cap_pct,
+            dynamic_strict_max_cap_pct = pressure_cfg.dynamic_inflight_strict_max_cap_pct,
             early_soft_age_us = early_soft_age_us,
             early_hard_age_us = early_hard_age_us,
             age_soft_inflight_cap_pct = age_soft_inflight_cap_pct,
@@ -3560,10 +3572,26 @@ async fn run_v3_durable_worker(
     }
 
     #[inline]
+    fn push_u64_decimal(out: &mut Vec<u8>, mut value: u64) {
+        if value == 0 {
+            out.push(b'0');
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut pos = buf.len();
+        while value > 0 {
+            pos = pos.saturating_sub(1);
+            buf[pos] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+        out.extend_from_slice(&buf[pos..]);
+    }
+
+    #[inline]
     fn build_v3_durable_accepted_line(task: &V3DurableTask, event_at_ms: u64) -> Vec<u8> {
-        let mut out = Vec::with_capacity(128 + task.session_id.len().saturating_mul(2));
+        let mut out = Vec::with_capacity(96 + task.session_id.len().saturating_mul(2));
         out.extend_from_slice(b"{\"type\":\"V3DurableAccepted\",\"at\":");
-        let _ = write!(&mut out, "{}", event_at_ms);
+        push_u64_decimal(&mut out, event_at_ms);
         out.extend_from_slice(b",\"accountId\":");
         push_json_string(&mut out, task.session_id.as_str());
         out.extend_from_slice(b",\"orderId\":");
@@ -3571,12 +3599,12 @@ async fn run_v3_durable_worker(
         out.extend_from_slice(b"v3/");
         push_json_escaped_fragment(&mut out, task.session_id.as_str());
         out.push(b'/');
-        let _ = write!(&mut out, "{}", task.session_seq);
+        push_u64_decimal(&mut out, task.session_seq);
         out.push(b'"');
         out.extend_from_slice(b",\"data\":{\"sessionSeq\":");
-        let _ = write!(&mut out, "{}", task.session_seq);
+        push_u64_decimal(&mut out, task.session_seq);
         out.extend_from_slice(b",\"attemptId\":\"att_");
-        let _ = write!(&mut out, "{}", task.attempt_seq);
+        push_u64_decimal(&mut out, task.attempt_seq);
         out.extend_from_slice(b"\"}}");
         out.push(b'\n');
         out
@@ -4174,10 +4202,24 @@ async fn run_v3_loss_monitor(state: AppState) {
     let mut soft_streak_per_lane = vec![0u64; lane_count];
     let mut hard_streak_per_lane = vec![0u64; lane_count];
     let mut clear_streak_per_lane = vec![0u64; lane_count];
+    let mut fsync_soft_streak_per_lane = vec![0u64; lane_count];
+    let mut fsync_hard_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_soft_over_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_hard_over_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_soft_clear_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_hard_clear_streak_per_lane = vec![0u64; lane_count];
+    let fsync_only_soft_sustain_ticks =
+        std::env::var("V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(state.v3_durable_admission_sustain_ticks.saturating_mul(2).max(1));
+    let fsync_only_hard_sustain_ticks =
+        std::env::var("V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(state.v3_durable_admission_sustain_ticks.saturating_mul(2).max(1));
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
@@ -4721,6 +4763,22 @@ async fn run_v3_loss_monitor(state: AppState) {
                     && lane_growth >= state.v3_durable_backlog_hard_reject_per_sec;
                 let fsync_soft = lane_fsync_p99_us >= state.v3_durable_admission_soft_fsync_p99_us;
                 let fsync_hard = lane_fsync_p99_us >= state.v3_durable_admission_hard_fsync_p99_us;
+                if fsync_soft {
+                    fsync_soft_streak_per_lane[lane_id] =
+                        fsync_soft_streak_per_lane[lane_id].saturating_add(1);
+                } else {
+                    fsync_soft_streak_per_lane[lane_id] = 0;
+                }
+                if fsync_hard {
+                    fsync_hard_streak_per_lane[lane_id] =
+                        fsync_hard_streak_per_lane[lane_id].saturating_add(1);
+                } else {
+                    fsync_hard_streak_per_lane[lane_id] = 0;
+                }
+                let fsync_only_soft = fsync_soft
+                    && fsync_soft_streak_per_lane[lane_id] >= fsync_only_soft_sustain_ticks;
+                let fsync_only_hard = fsync_hard
+                    && fsync_hard_streak_per_lane[lane_id] >= fsync_only_hard_sustain_ticks;
                 let fsync_presignal_queue_pct = (state.v3_durable_soft_reject_pct as f64
                     * state.v3_durable_admission_fsync_presignal_pct)
                     .clamp(0.0, 100.0);
@@ -4731,12 +4789,14 @@ async fn run_v3_loss_monitor(state: AppState) {
                     .max(0.0) as i64;
                 let hard_signal = queue_pressure_hard
                     || backlog_pressure_hard
-                    || ((queue_pressure_soft || backlog_pressure_soft) && fsync_hard);
+                    || ((queue_pressure_soft || backlog_pressure_soft) && fsync_hard)
+                    || fsync_only_hard;
                 let soft_signal = queue_pressure_soft
                     || backlog_pressure_soft
                     || ((lane_queue_pct_now >= fsync_presignal_queue_pct
                         || (backlog_signal_enabled && lane_growth >= fsync_presignal_backlog))
-                        && fsync_soft);
+                        && fsync_soft)
+                    || fsync_only_soft;
 
                 if queue_pressure_soft {
                     if let Some(counter) = state
