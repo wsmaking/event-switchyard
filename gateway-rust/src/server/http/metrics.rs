@@ -5,6 +5,7 @@
 
 use axum::{Json, extract::State};
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::order::HealthResponse;
 
@@ -63,10 +64,10 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let backpressure_wal_bytes = state.backpressure_wal_bytes.load(Ordering::Relaxed);
     let backpressure_wal_age = state.backpressure_wal_age.load(Ordering::Relaxed);
     let backpressure_disk_free = state.backpressure_disk_free.load(Ordering::Relaxed);
-    let v3_accepted_total = state.v3_accepted_total.load(Ordering::Relaxed);
-    let v3_rejected_soft_total = state.v3_rejected_soft_total.load(Ordering::Relaxed);
-    let v3_rejected_hard_total = state.v3_rejected_hard_total.load(Ordering::Relaxed);
-    let v3_rejected_killed_total = state.v3_rejected_killed_total.load(Ordering::Relaxed);
+    let v3_accepted_total = state.v3_accepted_total_current();
+    let v3_rejected_soft_total = state.v3_rejected_soft_total_current();
+    let v3_rejected_hard_total = state.v3_rejected_hard_total_current();
+    let v3_rejected_killed_total = state.v3_rejected_killed_total_current();
     let v3_queue_depth = state.v3_ingress.total_depth();
     let v3_queue_capacity = state
         .v3_ingress
@@ -96,8 +97,8 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_session_killed_total = state.v3_session_killed_total.load(Ordering::Relaxed);
     let v3_shard_killed_total = state.v3_shard_killed_total.load(Ordering::Relaxed);
     let v3_global_killed_total = state.v3_global_killed_total.load(Ordering::Relaxed);
-    let v3_durable_accepted_total = state.v3_durable_accepted_total.load(Ordering::Relaxed);
-    let v3_durable_rejected_total = state.v3_durable_rejected_total.load(Ordering::Relaxed);
+    let v3_durable_accepted_total = state.v3_durable_accepted_total_current();
+    let v3_durable_rejected_total = state.v3_durable_rejected_total_current();
     let v3_durable_queue_depth = state.v3_durable_ingress.total_depth();
     let v3_durable_queue_capacity = state.v3_durable_ingress.total_capacity();
     let v3_durable_queue_utilization_pct = if v3_durable_queue_capacity == 0 {
@@ -227,9 +228,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_wal_append_p99 = state.v3_durable_wal_append_hist.snapshot().percentile(99.0);
     let v3_durable_fsync_p50 = state.v3_durable_wal_fsync_hist.snapshot().percentile(50.0);
     let v3_durable_fsync_p99 = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
-    let v3_durable_fsync_p99_cached = state
-        .v3_durable_fsync_p99_cached_us
-        .load(Ordering::Relaxed);
+    let v3_durable_fsync_p99_cached = state.v3_durable_fsync_p99_cached_us.load(Ordering::Relaxed);
     let v3_durable_worker_loop_p50 = state
         .v3_durable_worker_loop_hist
         .snapshot()
@@ -277,10 +276,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_live_ack_p99 = state.v3_live_ack_hist.snapshot().percentile(99.0);
     let v3_live_ack_p999 = state.v3_live_ack_hist.snapshot().percentile(99.9);
     let v3_live_ack_accepted_p99 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.0);
-    let v3_live_ack_accepted_p999 = state
-        .v3_live_ack_accepted_hist
-        .snapshot()
-        .percentile(99.9);
+    let v3_live_ack_accepted_p999 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.9);
     let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
     let v3_durable_confirm_p999 = state.v3_durable_confirm_hist.snapshot().percentile(99.9);
     let v3_total = v3_accepted_total
@@ -350,12 +346,121 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_confirm_rebuild_elapsed_ms = state.v3_confirm_rebuild_elapsed_ms.load(Ordering::Relaxed);
     let v3_durable_confirm_soft_reject_age_us = state.v3_durable_confirm_soft_reject_age_us;
     let v3_durable_confirm_hard_reject_age_us = state.v3_durable_confirm_hard_reject_age_us;
+    let v3_durable_confirm_guard_soft_slack_pct = state.v3_durable_confirm_guard_soft_slack_pct;
+    let v3_durable_confirm_guard_hard_slack_pct = state.v3_durable_confirm_guard_hard_slack_pct;
+    let v3_durable_confirm_guard_soft_requires_admission =
+        if state.v3_durable_confirm_guard_soft_requires_admission {
+            1
+        } else {
+            0
+        };
+    let v3_durable_confirm_guard_hard_requires_admission =
+        if state.v3_durable_confirm_guard_hard_requires_admission {
+            1
+        } else {
+            0
+        };
+    let v3_durable_confirm_guard_secondary_required =
+        if state.v3_durable_confirm_guard_secondary_required {
+            1
+        } else {
+            0
+        };
+    let v3_durable_confirm_guard_min_queue_pct = state.v3_durable_confirm_guard_min_queue_pct;
+    let v3_durable_confirm_guard_min_inflight_pct = state.v3_durable_confirm_guard_min_inflight_pct;
+    let v3_durable_confirm_guard_min_backlog_per_sec =
+        state.v3_durable_confirm_guard_min_backlog_per_sec;
+    let v3_durable_confirm_guard_soft_sustain_ticks =
+        state.v3_durable_confirm_guard_soft_sustain_ticks;
+    let v3_durable_confirm_guard_hard_sustain_ticks =
+        state.v3_durable_confirm_guard_hard_sustain_ticks;
+    let v3_durable_confirm_guard_recover_ticks = state.v3_durable_confirm_guard_recover_ticks;
+    let v3_durable_confirm_guard_recover_hysteresis_pct =
+        state.v3_durable_confirm_guard_recover_hysteresis_pct;
+    let v3_durable_confirm_guard_autotune_enabled =
+        if state.v3_durable_confirm_guard_autotune_enabled {
+            1
+        } else {
+            0
+        };
+    let v3_durable_confirm_guard_autotune_low_pressure_pct =
+        state.v3_durable_confirm_guard_autotune_low_pressure_pct;
+    let v3_durable_confirm_guard_autotune_high_pressure_pct =
+        state.v3_durable_confirm_guard_autotune_high_pressure_pct;
+    let v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane = state
+        .v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane = state
+        .v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_guard_recover_ticks_effective_per_lane = state
+        .v3_durable_confirm_guard_recover_ticks_effective_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_guard_soft_armed_per_lane = state
+        .v3_durable_confirm_guard_soft_armed_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_guard_hard_armed_per_lane = state
+        .v3_durable_confirm_guard_hard_armed_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
     let v3_durable_confirm_age_soft_reject_total = state
         .v3_durable_confirm_age_soft_reject_total
         .load(Ordering::Relaxed);
     let v3_durable_confirm_age_hard_reject_total = state
         .v3_durable_confirm_age_hard_reject_total
         .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_soft_reject_skipped_total = state
+        .v3_durable_confirm_age_soft_reject_skipped_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_hard_reject_skipped_total = state
+        .v3_durable_confirm_age_hard_reject_skipped_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_soft_reject_skipped_unarmed_total = state
+        .v3_durable_confirm_age_soft_reject_skipped_unarmed_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_hard_reject_skipped_unarmed_total = state
+        .v3_durable_confirm_age_hard_reject_skipped_unarmed_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_soft_reject_skipped_low_load_total = state
+        .v3_durable_confirm_age_soft_reject_skipped_low_load_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_hard_reject_skipped_low_load_total = state
+        .v3_durable_confirm_age_hard_reject_skipped_low_load_total
+        .load(Ordering::Relaxed);
+    let v3_durable_confirm_age_autotune_enabled = if state.v3_durable_confirm_age_autotune_enabled {
+        1
+    } else {
+        0
+    };
+    let v3_durable_confirm_age_autotune_alpha_pct = state.v3_durable_confirm_age_autotune_alpha_pct;
+    let v3_durable_confirm_soft_reject_age_effective_us_per_lane = state
+        .v3_durable_confirm_soft_reject_age_effective_us_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hard_reject_age_effective_us_per_lane = state
+        .v3_durable_confirm_hard_reject_age_effective_us_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hourly_pressure_ewma_per_lane = state
+        .v3_durable_confirm_hourly_pressure_ewma_per_lane
+        .iter()
+        .map(|v| v.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let v3_durable_confirm_hourly_pressure_ewma_current_hour = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| ((d.as_secs() / 3_600) % 24) as usize)
+        .unwrap_or(0);
     let inflight = state.inflight_controller.inflight();
     let durable_inflight = v3_durable_queue_depth;
     let wal_age_ms = state.audit_log.wal_age_ms();
@@ -946,12 +1051,75 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_durable_confirm_hard_reject_age_us /v3 durable confirm oldest-age hard reject threshold (us, 0=disabled)\n\
          # TYPE gateway_v3_durable_confirm_hard_reject_age_us gauge\n\
          gateway_v3_durable_confirm_hard_reject_age_us {}\n\
+         # HELP gateway_v3_durable_confirm_guard_soft_slack_pct Additional soft guard slack applied when lane admission level is normal (pct)\n\
+         # TYPE gateway_v3_durable_confirm_guard_soft_slack_pct gauge\n\
+         gateway_v3_durable_confirm_guard_soft_slack_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_hard_slack_pct Additional hard guard slack applied when lane admission level is normal (pct)\n\
+         # TYPE gateway_v3_durable_confirm_guard_hard_slack_pct gauge\n\
+         gateway_v3_durable_confirm_guard_hard_slack_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_soft_requires_admission /v3 soft confirm-age guard requires lane admission escalation (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_guard_soft_requires_admission gauge\n\
+         gateway_v3_durable_confirm_guard_soft_requires_admission {}\n\
+         # HELP gateway_v3_durable_confirm_guard_hard_requires_admission /v3 hard confirm-age guard requires lane admission escalation (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_guard_hard_requires_admission gauge\n\
+         gateway_v3_durable_confirm_guard_hard_requires_admission {}\n\
+         # HELP gateway_v3_durable_confirm_guard_secondary_required /v3 confirm-age guard requires secondary pressure signal in addition to age threshold (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_guard_secondary_required gauge\n\
+         gateway_v3_durable_confirm_guard_secondary_required {}\n\
+         # HELP gateway_v3_durable_confirm_guard_min_queue_pct /v3 confirm-age guard minimum queue utilization required for normal-lane activation\n\
+         # TYPE gateway_v3_durable_confirm_guard_min_queue_pct gauge\n\
+         gateway_v3_durable_confirm_guard_min_queue_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_min_inflight_pct /v3 confirm-age guard minimum lane inflight utilization required for normal-lane activation\n\
+         # TYPE gateway_v3_durable_confirm_guard_min_inflight_pct gauge\n\
+         gateway_v3_durable_confirm_guard_min_inflight_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_min_backlog_per_sec /v3 confirm-age guard minimum durable backlog growth per second required for normal-lane activation\n\
+         # TYPE gateway_v3_durable_confirm_guard_min_backlog_per_sec gauge\n\
+         gateway_v3_durable_confirm_guard_min_backlog_per_sec {}\n\
+         # HELP gateway_v3_durable_confirm_guard_soft_sustain_ticks /v3 confirm-age soft guard consecutive-overflow ticks required before arming\n\
+         # TYPE gateway_v3_durable_confirm_guard_soft_sustain_ticks gauge\n\
+         gateway_v3_durable_confirm_guard_soft_sustain_ticks {}\n\
+         # HELP gateway_v3_durable_confirm_guard_hard_sustain_ticks /v3 confirm-age hard guard consecutive-overflow ticks required before arming\n\
+         # TYPE gateway_v3_durable_confirm_guard_hard_sustain_ticks gauge\n\
+         gateway_v3_durable_confirm_guard_hard_sustain_ticks {}\n\
+         # HELP gateway_v3_durable_confirm_guard_recover_ticks /v3 confirm-age guard ticks under recovery threshold required before disarming\n\
+         # TYPE gateway_v3_durable_confirm_guard_recover_ticks gauge\n\
+         gateway_v3_durable_confirm_guard_recover_ticks {}\n\
+         # HELP gateway_v3_durable_confirm_guard_recover_hysteresis_pct /v3 confirm-age guard hysteresis percentage for disarm threshold\n\
+         # TYPE gateway_v3_durable_confirm_guard_recover_hysteresis_pct gauge\n\
+         gateway_v3_durable_confirm_guard_recover_hysteresis_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_autotune_enabled /v3 confirm-age guard lane/time autotune enabled (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_guard_autotune_enabled gauge\n\
+         gateway_v3_durable_confirm_guard_autotune_enabled {}\n\
+         # HELP gateway_v3_durable_confirm_guard_autotune_low_pressure_pct /v3 confirm-age guard autotune low pressure threshold percentage\n\
+         # TYPE gateway_v3_durable_confirm_guard_autotune_low_pressure_pct gauge\n\
+         gateway_v3_durable_confirm_guard_autotune_low_pressure_pct {}\n\
+         # HELP gateway_v3_durable_confirm_guard_autotune_high_pressure_pct /v3 confirm-age guard autotune high pressure threshold percentage\n\
+         # TYPE gateway_v3_durable_confirm_guard_autotune_high_pressure_pct gauge\n\
+         gateway_v3_durable_confirm_guard_autotune_high_pressure_pct {}\n\
          # HELP gateway_v3_durable_confirm_age_soft_reject_total Total /v3 soft rejects due to durable confirm oldest-age guard\n\
          # TYPE gateway_v3_durable_confirm_age_soft_reject_total counter\n\
          gateway_v3_durable_confirm_age_soft_reject_total {}\n\
          # HELP gateway_v3_durable_confirm_age_hard_reject_total Total /v3 hard rejects due to durable confirm oldest-age guard\n\
          # TYPE gateway_v3_durable_confirm_age_hard_reject_total counter\n\
-         gateway_v3_durable_confirm_age_hard_reject_total {}\n",
+         gateway_v3_durable_confirm_age_hard_reject_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_soft_reject_skipped_total Total times /v3 soft confirm-age guard was skipped due to admission requirement\n\
+         # TYPE gateway_v3_durable_confirm_age_soft_reject_skipped_total counter\n\
+         gateway_v3_durable_confirm_age_soft_reject_skipped_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_hard_reject_skipped_total Total times /v3 hard confirm-age guard was skipped due to admission requirement\n\
+         # TYPE gateway_v3_durable_confirm_age_hard_reject_skipped_total counter\n\
+         gateway_v3_durable_confirm_age_hard_reject_skipped_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_soft_reject_skipped_unarmed_total Total times /v3 soft confirm-age guard was skipped because it was not armed yet\n\
+         # TYPE gateway_v3_durable_confirm_age_soft_reject_skipped_unarmed_total counter\n\
+         gateway_v3_durable_confirm_age_soft_reject_skipped_unarmed_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_hard_reject_skipped_unarmed_total Total times /v3 hard confirm-age guard was skipped because it was not armed yet\n\
+         # TYPE gateway_v3_durable_confirm_age_hard_reject_skipped_unarmed_total counter\n\
+         gateway_v3_durable_confirm_age_hard_reject_skipped_unarmed_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_soft_reject_skipped_low_load_total Total times /v3 soft confirm-age guard was skipped because queue/inflight load gate was not satisfied\n\
+         # TYPE gateway_v3_durable_confirm_age_soft_reject_skipped_low_load_total counter\n\
+         gateway_v3_durable_confirm_age_soft_reject_skipped_low_load_total {}\n\
+         # HELP gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total Total times /v3 hard confirm-age guard was skipped because queue/inflight load gate was not satisfied\n\
+         # TYPE gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total counter\n\
+         gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total {}\n",
         v3_durable_write_error_total,
         v3_durable_receipt_timeout_total,
         v3_durable_worker_receipt_timeout_us,
@@ -979,9 +1147,85 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_admission_fsync_presignal_pct,
         v3_durable_confirm_soft_reject_age_us,
         v3_durable_confirm_hard_reject_age_us,
+        v3_durable_confirm_guard_soft_slack_pct,
+        v3_durable_confirm_guard_hard_slack_pct,
+        v3_durable_confirm_guard_soft_requires_admission,
+        v3_durable_confirm_guard_hard_requires_admission,
+        v3_durable_confirm_guard_secondary_required,
+        v3_durable_confirm_guard_min_queue_pct,
+        v3_durable_confirm_guard_min_inflight_pct,
+        v3_durable_confirm_guard_min_backlog_per_sec,
+        v3_durable_confirm_guard_soft_sustain_ticks,
+        v3_durable_confirm_guard_hard_sustain_ticks,
+        v3_durable_confirm_guard_recover_ticks,
+        v3_durable_confirm_guard_recover_hysteresis_pct,
+        v3_durable_confirm_guard_autotune_enabled,
+        v3_durable_confirm_guard_autotune_low_pressure_pct,
+        v3_durable_confirm_guard_autotune_high_pressure_pct,
         v3_durable_confirm_age_soft_reject_total,
         v3_durable_confirm_age_hard_reject_total,
+        v3_durable_confirm_age_soft_reject_skipped_total,
+        v3_durable_confirm_age_hard_reject_skipped_total,
+        v3_durable_confirm_age_soft_reject_skipped_unarmed_total,
+        v3_durable_confirm_age_hard_reject_skipped_unarmed_total,
+        v3_durable_confirm_age_soft_reject_skipped_low_load_total,
+        v3_durable_confirm_age_hard_reject_skipped_low_load_total,
     ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_durable_confirm_age_autotune_enabled /v3 durable confirm oldest-age autotune enabled (1/0)\n\
+         # TYPE gateway_v3_durable_confirm_age_autotune_enabled gauge\n\
+         gateway_v3_durable_confirm_age_autotune_enabled {}\n\
+         # HELP gateway_v3_durable_confirm_age_autotune_alpha_pct /v3 durable confirm oldest-age autotune EWMA alpha percentage\n\
+         # TYPE gateway_v3_durable_confirm_age_autotune_alpha_pct gauge\n\
+         gateway_v3_durable_confirm_age_autotune_alpha_pct {}\n\
+         # HELP gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour Current UTC hour index used for durable confirm pressure EWMA\n\
+         # TYPE gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour gauge\n\
+         gateway_v3_durable_confirm_hourly_pressure_ewma_current_hour {}\n",
+        v3_durable_confirm_age_autotune_enabled,
+        v3_durable_confirm_age_autotune_alpha_pct,
+        v3_durable_confirm_hourly_pressure_ewma_current_hour,
+    ));
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane Effective /v3 durable confirm oldest-age soft reject threshold per lane (us)\n\
+         # TYPE gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane gauge\n",
+    );
+    for (lane, age_us) in v3_durable_confirm_soft_reject_age_effective_us_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_soft_reject_age_effective_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, age_us
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane Effective /v3 durable confirm oldest-age hard reject threshold per lane (us)\n\
+         # TYPE gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane gauge\n",
+    );
+    for (lane, age_us) in v3_durable_confirm_hard_reject_age_effective_us_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_hard_reject_age_effective_us_per_lane{{lane=\"{}\"}} {}\n",
+            lane, age_us
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane Hourly EWMA durable pressure used by confirm-age autotune per lane/hour (pct)\n\
+         # TYPE gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane gauge\n",
+    );
+    for (slot, pressure_pct) in v3_durable_confirm_hourly_pressure_ewma_per_lane
+        .iter()
+        .enumerate()
+    {
+        let lane = slot / 24;
+        let hour = slot % 24;
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_hourly_pressure_ewma_pct_per_lane{{lane=\"{}\",hour=\"{}\"}} {}\n",
+            lane, hour, pressure_pct
+        ));
+    }
     snapshot.push_str(
         "# HELP gateway_v3_durable_queue_depth_per_lane /v3 durable queue depth per lane\n\
          # TYPE gateway_v3_durable_queue_depth_per_lane gauge\n",
@@ -1089,6 +1333,71 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         snapshot.push_str(&format!(
             "gateway_v3_durable_admission_level_per_lane{{lane=\"{}\"}} {}\n",
             lane, level
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane /v3 effective soft guard sustain ticks per lane\n\
+         # TYPE gateway_v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane gauge\n",
+    );
+    for (lane, ticks) in v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_guard_soft_sustain_ticks_effective_per_lane{{lane=\"{}\"}} {}\n",
+            lane, ticks
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane /v3 effective hard guard sustain ticks per lane\n\
+         # TYPE gateway_v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane gauge\n",
+    );
+    for (lane, ticks) in v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_guard_hard_sustain_ticks_effective_per_lane{{lane=\"{}\"}} {}\n",
+            lane, ticks
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_guard_recover_ticks_effective_per_lane /v3 effective guard recover ticks per lane\n\
+         # TYPE gateway_v3_durable_confirm_guard_recover_ticks_effective_per_lane gauge\n",
+    );
+    for (lane, ticks) in v3_durable_confirm_guard_recover_ticks_effective_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_guard_recover_ticks_effective_per_lane{{lane=\"{}\"}} {}\n",
+            lane, ticks
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_guard_soft_armed_per_lane /v3 soft confirm-age guard armed state per lane (1=armed,0=idle)\n\
+         # TYPE gateway_v3_durable_confirm_guard_soft_armed_per_lane gauge\n",
+    );
+    for (lane, armed) in v3_durable_confirm_guard_soft_armed_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_guard_soft_armed_per_lane{{lane=\"{}\"}} {}\n",
+            lane, armed
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_confirm_guard_hard_armed_per_lane /v3 hard confirm-age guard armed state per lane (1=armed,0=idle)\n\
+         # TYPE gateway_v3_durable_confirm_guard_hard_armed_per_lane gauge\n",
+    );
+    for (lane, armed) in v3_durable_confirm_guard_hard_armed_per_lane
+        .iter()
+        .enumerate()
+    {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_confirm_guard_hard_armed_per_lane{{lane=\"{}\"}} {}\n",
+            lane, armed
         ));
     }
     snapshot.push_str(

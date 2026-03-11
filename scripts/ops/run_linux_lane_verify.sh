@@ -24,8 +24,8 @@ RESULTS_TSV="$RUN_DIR/results.tsv"
 echo -e "case\trun\tcompleted_rps\taccepted_rate\tack_accepted_p99_us\tack_accepted_p999_us\tdurable_confirm_p99_us\tdurable_confirm_p999_us\tload_path\tmetrics_path" >"$RESULTS_TSV"
 
 case_specs=(
-  "linux_8lane_w30_15:8:30:15"
-  "linux_16lane_w30_15:16:30:15"
+  "linux_8lane_w20_20:8:20:20"
+  "linux_16lane_w20_20:16:20:20"
 )
 
 for spec in "${case_specs[@]}"; do
@@ -65,18 +65,23 @@ for spec in "${case_specs[@]}"; do
       -e V3_SHARD_LOSS_SUSPECT_THRESHOLD=32768 \
       -e V3_GLOBAL_LOSS_SUSPECT_THRESHOLD=131072 \
       -e V3_SHARD_COUNT="$shards" \
-      -e V3_DURABLE_WORKER_BATCH_MAX=24 \
+      -e V3_DURABLE_WORKER_BATCH_MAX=12 \
       -e V3_DURABLE_WORKER_BATCH_MIN=12 \
       -e V3_DURABLE_WORKER_BATCH_WAIT_US="$wait_us" \
       -e V3_DURABLE_WORKER_BATCH_WAIT_MIN_US="$wait_min_us" \
-      -e V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS=8192 \
+      -e V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS=4096 \
       -e V3_DURABLE_WORKER_INFLIGHT_SOFT_CAP_PCT=50 \
       -e V3_DURABLE_WORKER_INFLIGHT_HARD_CAP_PCT=25 \
       -e V3_DURABLE_WORKER_DYNAMIC_INFLIGHT=true \
       -e V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MIN_CAP_PCT=5 \
       -e V3_DURABLE_WORKER_DYNAMIC_INFLIGHT_MAX_CAP_PCT=80 \
-      -e V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT=100 \
-      -e V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT=100 \
+      -e V3_DURABLE_PRESSURE_EWMA_ALPHA_PCT=30 \
+      -e V3_DURABLE_DYNAMIC_CAP_SLEW_STEP_PCT=8 \
+      -e V3_DURABLE_WORKER_BATCH_ADAPTIVE=false \
+      -e AUDIT_FDATASYNC_MAX_WAIT_US=80 \
+      -e AUDIT_FDATASYNC_MAX_BATCH=32 \
+      -e AUDIT_FDATASYNC_MAX_DEFER_US=0 \
+      -e AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US=1200 \
       "$IMAGE" >/dev/null
 
     ready=0

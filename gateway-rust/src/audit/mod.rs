@@ -2,8 +2,8 @@
 //!
 //! Minimal implementation for order/account event history.
 
-use aws_sdk_kms::Client as KmsClient;
 use aws_sdk_kms::primitives::Blob;
+use aws_sdk_kms::Client as KmsClient;
 use base64::Engine;
 use gateway_core::now_nanos;
 use hmac::{Hmac, Mac};
@@ -83,6 +83,39 @@ fn sync_data_with_mode(file: &File, serialize: bool) -> std::io::Result<()> {
     result
 }
 
+#[inline]
+fn parse_env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.parse::<u64>().ok())
+}
+
+#[inline]
+fn parse_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok().and_then(|v| v.parse::<usize>().ok())
+}
+
+#[inline]
+fn parse_lane_override_u64(base_key: &str, lane_id: Option<usize>) -> Option<u64> {
+    lane_id.and_then(|lane| parse_env_u64(&format!("{base_key}_LANE{lane}")))
+}
+
+#[inline]
+fn parse_lane_override_usize(base_key: &str, lane_id: Option<usize>) -> Option<usize> {
+    lane_id.and_then(|lane| parse_env_usize(&format!("{base_key}_LANE{lane}")))
+}
+
+fn parse_v3_lane_id_from_path(path: &Path) -> Option<usize> {
+    let raw = path.to_string_lossy();
+    let marker = ".v3.lane";
+    let start = raw.rfind(marker)?.saturating_add(marker.len());
+    let tail = &raw[start..];
+    let end = tail.find('.').unwrap_or(tail.len());
+    let digits = &tail[..end];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AuditAppendTimings {
     pub enqueue_done_ns: u64,
@@ -113,8 +146,17 @@ pub struct AuditDurableNotification {
     pub fdatasync_ns: u64,
 }
 
+#[derive(Debug, Clone)]
+struct AuditDurableMeta {
+    event_type: String,
+    account_id: String,
+    order_id: Option<String>,
+    event_at: u64,
+}
+
 struct AuditAppendRequest {
-    event: AuditEvent,
+    line_bytes: Vec<u8>,
+    durable_meta: Option<AuditDurableMeta>,
     request_start_ns: u64,
     enqueue_done_ns: u64,
     durable_reply: Option<oneshot::Sender<AuditDurableReceipt>>,
@@ -270,31 +312,55 @@ impl AuditLog {
         event: AuditEvent,
         request_start_ns: u64,
     ) -> AuditAppendTimings {
+        let mut line_bytes = match serde_json::to_vec(&event) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return AuditAppendTimings {
+                    enqueue_done_ns: 0,
+                    durable_done_ns: 0,
+                    fdatasync_ns: 0,
+                };
+            }
+        };
+        line_bytes.push(b'\n');
+        let durable_meta = Some(AuditDurableMeta {
+            event_type: event.event_type,
+            account_id: event.account_id,
+            order_id: event.order_id,
+            event_at: event.at,
+        });
+        let mut fallback_line_bytes = Some(line_bytes);
         if self.async_enabled {
             if let Ok(guard) = self.append_tx.lock() {
                 if let Some(tx) = guard.as_ref() {
                     let send_start_ns = now_nanos();
                     let request = AuditAppendRequest {
-                        event: event.clone(),
+                        line_bytes: fallback_line_bytes.take().unwrap_or_default(),
+                        durable_meta,
                         request_start_ns,
                         enqueue_done_ns: send_start_ns,
                         durable_reply: None,
                     };
-                    if tx.send(request).is_ok() {
-                        let enqueue_done_ns = now_nanos();
-                        if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
-                            pending.push_back(now_millis());
+                    match tx.send(request) {
+                        Ok(()) => {
+                            let enqueue_done_ns = now_nanos();
+                            if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
+                                pending.push_back(now_millis());
+                            }
+                            return AuditAppendTimings {
+                                enqueue_done_ns,
+                                durable_done_ns: 0,
+                                fdatasync_ns: 0,
+                            };
                         }
-                        return AuditAppendTimings {
-                            enqueue_done_ns,
-                            durable_done_ns: 0,
-                            fdatasync_ns: 0,
-                        };
+                        Err(err) => {
+                            fallback_line_bytes = Some(err.0.line_bytes);
+                        }
                     }
                 }
             }
         }
-        self.append_sync_with_timings(event)
+        self.append_sync_line_with_timings(fallback_line_bytes.unwrap_or_default())
     }
 
     /// `/v2` 契約向け: PendingAccepted の durable 完了を待つための receipt を返す。
@@ -304,13 +370,34 @@ impl AuditLog {
         event: AuditEvent,
         request_start_ns: u64,
     ) -> AuditAppendWithReceipt {
+        let mut line_bytes = match serde_json::to_vec(&event) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return AuditAppendWithReceipt {
+                    timings: AuditAppendTimings {
+                        enqueue_done_ns: 0,
+                        durable_done_ns: 0,
+                        fdatasync_ns: 0,
+                    },
+                    durable_rx: None,
+                };
+            }
+        };
+        line_bytes.push(b'\n');
+        let durable_meta = Some(AuditDurableMeta {
+            event_type: event.event_type,
+            account_id: event.account_id,
+            order_id: event.order_id,
+            event_at: event.at,
+        });
         if self.async_enabled {
             if let Ok(guard) = self.append_tx.lock() {
                 if let Some(tx) = guard.as_ref() {
                     let send_start_ns = now_nanos();
                     let (reply_tx, reply_rx) = oneshot::channel();
                     let request = AuditAppendRequest {
-                        event,
+                        line_bytes,
+                        durable_meta,
                         request_start_ns,
                         enqueue_done_ns: send_start_ns,
                         durable_reply: Some(reply_tx),
@@ -342,7 +429,103 @@ impl AuditLog {
         }
 
         AuditAppendWithReceipt {
-            timings: self.append_sync_with_timings(event),
+            timings: self.append_sync_line_with_timings(line_bytes),
+            durable_rx: None,
+        }
+    }
+
+    /// 事前にJSONL化した1行を追記する。末尾改行がなければ自動で補う。
+    pub fn append_json_line_with_timings(
+        &self,
+        mut line_bytes: Vec<u8>,
+        request_start_ns: u64,
+    ) -> AuditAppendTimings {
+        if line_bytes.last() != Some(&b'\n') {
+            line_bytes.push(b'\n');
+        }
+        let mut fallback_line_bytes = Some(line_bytes);
+        if self.async_enabled {
+            if let Ok(guard) = self.append_tx.lock() {
+                if let Some(tx) = guard.as_ref() {
+                    let send_start_ns = now_nanos();
+                    let request = AuditAppendRequest {
+                        line_bytes: fallback_line_bytes.take().unwrap_or_default(),
+                        durable_meta: None,
+                        request_start_ns,
+                        enqueue_done_ns: send_start_ns,
+                        durable_reply: None,
+                    };
+                    match tx.send(request) {
+                        Ok(()) => {
+                            let enqueue_done_ns = now_nanos();
+                            if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
+                                pending.push_back(now_millis());
+                            }
+                            return AuditAppendTimings {
+                                enqueue_done_ns,
+                                durable_done_ns: 0,
+                                fdatasync_ns: 0,
+                            };
+                        }
+                        Err(err) => {
+                            fallback_line_bytes = Some(err.0.line_bytes);
+                        }
+                    }
+                }
+            }
+        }
+        self.append_sync_line_with_timings(fallback_line_bytes.unwrap_or_default())
+    }
+
+    /// 事前にJSONL化した1行を追記し、durable receiptを返す。末尾改行がなければ自動で補う。
+    pub fn append_json_line_with_durable_receipt(
+        &self,
+        mut line_bytes: Vec<u8>,
+        request_start_ns: u64,
+    ) -> AuditAppendWithReceipt {
+        if line_bytes.last() != Some(&b'\n') {
+            line_bytes.push(b'\n');
+        }
+        if self.async_enabled {
+            if let Ok(guard) = self.append_tx.lock() {
+                if let Some(tx) = guard.as_ref() {
+                    let send_start_ns = now_nanos();
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let request = AuditAppendRequest {
+                        line_bytes,
+                        durable_meta: None,
+                        request_start_ns,
+                        enqueue_done_ns: send_start_ns,
+                        durable_reply: Some(reply_tx),
+                    };
+                    if tx.send(request).is_ok() {
+                        let enqueue_done_ns = now_nanos();
+                        if let Ok(mut pending) = self.wal_pending_enqueue_ms.lock() {
+                            pending.push_back(now_millis());
+                        }
+                        return AuditAppendWithReceipt {
+                            timings: AuditAppendTimings {
+                                enqueue_done_ns,
+                                durable_done_ns: 0,
+                                fdatasync_ns: 0,
+                            },
+                            durable_rx: Some(reply_rx),
+                        };
+                    }
+                }
+            }
+            return AuditAppendWithReceipt {
+                timings: AuditAppendTimings {
+                    enqueue_done_ns: 0,
+                    durable_done_ns: 0,
+                    fdatasync_ns: 0,
+                },
+                durable_rx: None,
+            };
+        }
+
+        AuditAppendWithReceipt {
+            timings: self.append_sync_line_with_timings(line_bytes),
             durable_rx: None,
         }
     }
@@ -373,35 +556,49 @@ impl AuditLog {
         *guard = Some(tx);
         drop(guard);
 
+        let lane_id = parse_v3_lane_id_from_path(self.path.as_path());
         let fdatasync_enabled = self.fdatasync_enabled;
         let fdatasync_serialize = self.fdatasync_serialize;
-        let max_wait_us = self.fdatasync_max_wait_us.max(1);
-        let max_batch = self.fdatasync_max_batch.max(1);
-        let fdatasync_coalesce_us = self.fdatasync_coalesce_us;
-        let fdatasync_max_defer_us = self.fdatasync_max_defer_us;
-        let fdatasync_max_inflight_age_us = std::env::var("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(
-                fdatasync_max_defer_us
-                    .max(max_wait_us.saturating_mul(8))
-                    .max(1_000),
-            );
-        let target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+        let max_wait_us = parse_lane_override_u64("AUDIT_FDATASYNC_MAX_WAIT_US", lane_id)
+            .unwrap_or(self.fdatasync_max_wait_us)
+            .max(1);
+        let max_batch = parse_lane_override_usize("AUDIT_FDATASYNC_MAX_BATCH", lane_id)
+            .unwrap_or(self.fdatasync_max_batch)
+            .max(1);
+        let fdatasync_coalesce_us = parse_lane_override_u64("AUDIT_FDATASYNC_COALESCE_US", lane_id)
+            .unwrap_or(self.fdatasync_coalesce_us);
+        let fdatasync_max_defer_us = parse_lane_override_u64("AUDIT_FDATASYNC_MAX_DEFER_US", lane_id)
+            .unwrap_or(self.fdatasync_max_defer_us);
+        let fdatasync_max_inflight_age_default = fdatasync_max_defer_us
+            .max(max_wait_us.saturating_mul(8))
+            .max(1_000);
+        let fdatasync_max_inflight_age_us =
+            parse_lane_override_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US", lane_id)
+                .or_else(|| parse_env_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US"))
+                .unwrap_or(fdatasync_max_inflight_age_default);
+        let target_batch_bytes = parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES", lane_id)
+            .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES"))
             .unwrap_or(64 * 1024)
             .max(1_024);
-        let min_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
-            .max(1_024);
-        let max_target_batch_bytes = std::env::var("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
-            .max(min_target_batch_bytes);
+        let min_target_batch_bytes = parse_lane_override_usize(
+            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN",
+            lane_id,
+        )
+        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN"))
+        .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
+        .max(1_024);
+        let max_target_batch_bytes = parse_lane_override_usize(
+            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX",
+            lane_id,
+        )
+        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX"))
+        .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
+        .max(min_target_batch_bytes);
+        let fdatasync_max_pending_bytes =
+            parse_lane_override_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES", lane_id)
+                .or_else(|| parse_env_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES"))
+                .unwrap_or(target_batch_bytes.saturating_mul(2).max(8 * 1024))
+                .max(target_batch_bytes);
         let coalesce_min_us = std::env::var("AUDIT_FDATASYNC_COALESCE_MIN_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -448,6 +645,7 @@ impl AuditLog {
                 fdatasync_coalesce_us,
                 fdatasync_max_defer_us,
                 fdatasync_max_inflight_age_us,
+                fdatasync_max_pending_bytes,
                 coalesce_min_us,
                 coalesce_max_us,
                 target_batch_bytes,
@@ -458,50 +656,49 @@ impl AuditLog {
         });
     }
 
-    fn append_sync_with_timings(&self, event: AuditEvent) -> AuditAppendTimings {
+    fn append_sync_line_with_timings(&self, mut line_bytes: Vec<u8>) -> AuditAppendTimings {
+        if line_bytes.last() != Some(&b'\n') {
+            line_bytes.push(b'\n');
+        }
         let mut enqueue_done_ns = 0;
         let mut durable_done_ns = 0;
         let mut fdatasync_ns = 0;
         if let Ok(mut writer) = self.writer.lock() {
-            if let Ok(line) = serde_json::to_string(&event) {
-                let mut line_bytes = line.into_bytes();
-                line_bytes.push(b'\n');
-                self.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
-                if writer.write_all(&line_bytes).is_err() {
-                    return AuditAppendTimings {
-                        enqueue_done_ns: 0,
-                        durable_done_ns: 0,
-                        fdatasync_ns: 0,
-                    };
-                }
-                if writer.flush().is_err() {
-                    return AuditAppendTimings {
-                        enqueue_done_ns: 0,
-                        durable_done_ns: 0,
-                        fdatasync_ns: 0,
-                    };
-                }
-                self.append_hash_chain(&line_bytes);
-                enqueue_done_ns = now_nanos();
-
-                self.wal_bytes
-                    .fetch_add(line_bytes.len() as u64, Ordering::Relaxed);
-                self.wal_last_append_ms
-                    .store(now_millis(), Ordering::Relaxed);
-
-                if self.fdatasync_enabled {
-                    let sync_start = now_nanos();
-                    if sync_data_with_mode(writer.get_ref(), self.fdatasync_serialize).is_err() {
-                        return AuditAppendTimings {
-                            enqueue_done_ns,
-                            durable_done_ns: 0,
-                            fdatasync_ns: 0,
-                        };
-                    }
-                    fdatasync_ns = now_nanos() - sync_start;
-                }
-                durable_done_ns = now_nanos();
+            self.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
+            if writer.write_all(&line_bytes).is_err() {
+                return AuditAppendTimings {
+                    enqueue_done_ns: 0,
+                    durable_done_ns: 0,
+                    fdatasync_ns: 0,
+                };
             }
+            if writer.flush().is_err() {
+                return AuditAppendTimings {
+                    enqueue_done_ns: 0,
+                    durable_done_ns: 0,
+                    fdatasync_ns: 0,
+                };
+            }
+            self.append_hash_chain(&line_bytes);
+            enqueue_done_ns = now_nanos();
+
+            self.wal_bytes
+                .fetch_add(line_bytes.len() as u64, Ordering::Relaxed);
+            self.wal_last_append_ms
+                .store(now_millis(), Ordering::Relaxed);
+
+            if self.fdatasync_enabled {
+                let sync_start = now_nanos();
+                if sync_data_with_mode(writer.get_ref(), self.fdatasync_serialize).is_err() {
+                    return AuditAppendTimings {
+                        enqueue_done_ns,
+                        durable_done_ns: 0,
+                        fdatasync_ns: 0,
+                    };
+                }
+                fdatasync_ns = now_nanos() - sync_start;
+            }
+            durable_done_ns = now_nanos();
         }
         AuditAppendTimings {
             enqueue_done_ns,
@@ -1118,6 +1315,7 @@ fn run_async_writer(
     fdatasync_coalesce_us: u64,
     fdatasync_max_defer_us: u64,
     fdatasync_max_inflight_age_us: u64,
+    fdatasync_max_pending_bytes: usize,
     coalesce_min_us: u64,
     coalesce_max_us: u64,
     target_batch_bytes: usize,
@@ -1135,16 +1333,18 @@ fn run_async_writer(
         if success {
             if let Some(tx) = durable_tx.as_ref() {
                 for req in batch.iter() {
-                    let _ = tx.send(AuditDurableNotification {
-                        event_type: req.event.event_type.clone(),
-                        account_id: req.event.account_id.clone(),
-                        order_id: req.event.order_id.clone(),
-                        event_at: req.event.at,
-                        request_start_ns: req.request_start_ns,
-                        enqueue_done_ns: req.enqueue_done_ns,
-                        durable_done_ns,
-                        fdatasync_ns,
-                    });
+                    if let Some(meta) = req.durable_meta.as_ref() {
+                        let _ = tx.send(AuditDurableNotification {
+                            event_type: meta.event_type.clone(),
+                            account_id: meta.account_id.clone(),
+                            order_id: meta.order_id.clone(),
+                            event_at: meta.event_at,
+                            request_start_ns: req.request_start_ns,
+                            enqueue_done_ns: req.enqueue_done_ns,
+                            durable_done_ns,
+                            fdatasync_ns,
+                        });
+                    }
                 }
             }
         }
@@ -1251,23 +1451,18 @@ fn run_async_writer(
         let mut write_ok = true;
         if let Ok(mut writer) = audit.writer.lock() {
             for req in &batch {
-                match serde_json::to_string(&req.event) {
-                    Ok(line) => {
-                        let mut line_bytes = line.into_bytes();
-                        line_bytes.push(b'\n');
-                        audit.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
-                        if writer.write_all(&line_bytes).is_err() {
-                            write_ok = false;
-                            break;
-                        }
-                        audit.append_hash_chain(&line_bytes);
-                        total_bytes += line_bytes.len();
-                    }
-                    Err(_) => {
-                        write_ok = false;
-                        break;
-                    }
+                let line_bytes = &req.line_bytes;
+                if line_bytes.last() != Some(&b'\n') {
+                    write_ok = false;
+                    break;
                 }
+                audit.maybe_preallocate(writer.get_ref(), line_bytes.len() as u64);
+                if writer.write_all(line_bytes).is_err() {
+                    write_ok = false;
+                    break;
+                }
+                audit.append_hash_chain(line_bytes);
+                total_bytes += line_bytes.len();
             }
             if write_ok && writer.flush().is_err() {
                 write_ok = false;
@@ -1325,10 +1520,14 @@ fn run_async_writer(
         let over_inflight_age = fdatasync_enabled
             && fdatasync_max_inflight_age_us > 0
             && oldest_inflight_age_us >= fdatasync_max_inflight_age_us;
+        let over_max_pending_bytes = fdatasync_enabled
+            && fdatasync_max_pending_bytes > 0
+            && candidate_pending_bytes >= fdatasync_max_pending_bytes;
         let should_defer_sync = within_coalesce_window
             && candidate_pending_bytes < cur_target_batch_bytes
             && !over_max_defer_age
-            && !over_inflight_age;
+            && !over_inflight_age
+            && !over_max_pending_bytes;
         if fdatasync_enabled && !should_defer_sync {
             if let Ok(writer) = audit.writer.lock() {
                 let sync_start = now_nanos();
