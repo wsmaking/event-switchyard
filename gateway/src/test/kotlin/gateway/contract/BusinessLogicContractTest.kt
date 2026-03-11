@@ -7,11 +7,14 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.math.BigInteger
 import java.nio.file.Files
 import java.nio.file.Path
 
 class BusinessLogicContractTest {
     private val mapper: ObjectMapper = jacksonObjectMapper()
+    private val v3MaxOrderQty = 100_000_000L
+    private val v3MaxNotional = 1_000_000_000L
 
     private fun findPath(relative: String): Path {
         var dir = Path.of("").toAbsolutePath()
@@ -98,6 +101,127 @@ class BusinessLogicContractTest {
         return errors
     }
 
+    private data class RiskOracleDecision(
+        val allowed: Boolean,
+        val reason: String?,
+        val httpStatus: Int
+    )
+
+    private fun isValidV3Symbol(raw: String): Boolean {
+        val symbol = raw.trim()
+        if (symbol.isBlank() || symbol.length > 8) return false
+        for (ch in symbol) {
+            val up = ch.uppercaseChar()
+            val ok =
+                (up.code in 'A'.code..'Z'.code) ||
+                    (up.code in '0'.code..'9'.code) ||
+                    up == '_' ||
+                    up == '-' ||
+                    up == '.'
+            if (!ok) return false
+        }
+        return true
+    }
+
+    private fun kotlinHotRiskOracle(input: JsonNode): RiskOracleDecision {
+        val side = input.path("side").asText()
+        if (side != "BUY" && side != "SELL") {
+            return RiskOracleDecision(false, "INVALID_SIDE", 422)
+        }
+
+        val qty = input.path("qty").asLong()
+        if (qty == 0L || qty > v3MaxOrderQty) {
+            return RiskOracleDecision(false, "INVALID_QTY", 422)
+        }
+
+        val symbol = input.path("symbol").asText()
+        if (!isValidV3Symbol(symbol)) {
+            return RiskOracleDecision(false, "INVALID_SYMBOL", 422)
+        }
+        val strictSymbols = input.path("strictSymbols").asBoolean(false)
+        val symbolKnown = input.path("symbolKnown").asBoolean(true)
+        if (strictSymbols && !symbolKnown) {
+            return RiskOracleDecision(false, "INVALID_SYMBOL", 422)
+        }
+
+        val orderType = input.path("orderType").asText().uppercase()
+        val price = input.path("price").asLong()
+        if (orderType == "LIMIT" && price == 0L) {
+            return RiskOracleDecision(false, "INVALID_PRICE", 422)
+        }
+
+        val notional = BigInteger.valueOf(qty).multiply(BigInteger.valueOf(price))
+        if (notional > BigInteger.valueOf(v3MaxNotional)) {
+            return RiskOracleDecision(false, "RISK_REJECT", 422)
+        }
+
+        return RiskOracleDecision(true, null, 202)
+    }
+
+    private fun isTerminalStatus(status: String): Boolean {
+        return status == "FILLED" || status == "CANCELED" || status == "REJECTED"
+    }
+
+    private fun kotlinStateTransitionOracle(
+        from: String,
+        event: String,
+        filledQtyBefore: Long,
+        filledQtyReported: Long,
+        orderQty: Long
+    ): String {
+        val nextFilled = maxOf(filledQtyBefore, filledQtyReported)
+        if (isTerminalStatus(from)) return from
+
+        val reportStatus =
+            when (event) {
+                "CANCEL_REQUESTED" -> "CANCEL_REQUESTED"
+                "EXEC_REPORT_PARTIAL" -> "PARTIALLY_FILLED"
+                "EXEC_REPORT_FILLED" -> "FILLED"
+                "EXEC_REPORT_CANCELED" -> "CANCELED"
+                "EXEC_REPORT_REJECTED" -> "REJECTED"
+                else -> from
+            }
+
+        return when (reportStatus) {
+            "PARTIALLY_FILLED" -> if (nextFilled >= orderQty) "FILLED" else "PARTIALLY_FILLED"
+            "FILLED" -> "FILLED"
+            "CANCELED" -> "CANCELED"
+            "REJECTED" -> if (nextFilled > 0) from else "REJECTED"
+            else -> reportStatus
+        }
+    }
+
+    private fun v3TcpReasonCodeOracle(reason: String?): Int {
+        return when (reason) {
+            null -> 0
+            "INVALID_QTY" -> 1001
+            "INVALID_SIDE" -> 1002
+            "INVALID_PRICE" -> 1003
+            "INVALID_SYMBOL" -> 1004
+            "RISK_REJECT" -> 1100
+            "V3_DURABLE_BACKPRESSURE_SOFT" -> 2001
+            "V3_DURABLE_BACKPRESSURE_HARD" -> 2002
+            "V3_BACKPRESSURE_SOFT" -> 2101
+            "V3_BACKPRESSURE_HARD" -> 2102
+            "V3_QUEUE_KILLED" -> 2201
+            "V3_QUEUE_FULL" -> 2202
+            "V3_INGRESS_CLOSED" -> 2203
+            "V3_GLOBAL_KILLED" -> 2301
+            "V3_SESSION_KILLED" -> 2302
+            "V3_SHARD_KILLED" -> 2303
+            "BAD_TOKEN_LEN" -> 101
+            "BAD_SYMBOL" -> 102
+            "BAD_SIDE" -> 103
+            "BAD_TYPE" -> 104
+            "BAD_TOKEN_UTF8" -> 105
+            "AUTH_INVALID" -> 201
+            "AUTH_EXPIRED" -> 202
+            "AUTH_NOT_YET_VALID" -> 203
+            "AUTH_INTERNAL" -> 204
+            else -> 9999
+        }
+    }
+
     @Test
     fun `risk contract fixture validates and covers core reasons`() {
         val schema = mapper.readTree(Files.readString(findPath("contracts/risk_decision_v1.schema.json")))
@@ -153,6 +277,33 @@ class BusinessLogicContractTest {
     }
 
     @Test
+    fun `risk contract fixture matches kotlin hot risk oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/risk_decision_v1.json")))
+        val cases = payload.path("cases")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            val id = caseNode.path("id").asText("case-$i")
+            val actual = kotlinHotRiskOracle(caseNode.path("input"))
+            val expected = caseNode.path("expected")
+            val expectedReasonNode = expected.path("reason")
+            val expectedReason = if (expectedReasonNode.isNull) null else expectedReasonNode.asText()
+            val expectedAllowed = expected.path("allowed").asBoolean()
+            val expectedStatus = expected.path("httpStatus").asInt()
+            if (
+                actual.allowed != expectedAllowed ||
+                    actual.reason != expectedReason ||
+                    actual.httpStatus != expectedStatus
+            ) {
+                mismatches.add(
+                    "$id expected=($expectedAllowed,$expectedReason,$expectedStatus) actual=(${actual.allowed},${actual.reason},${actual.httpStatus})"
+                )
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
+    }
+
+    @Test
     fun `state transition contract fixture validates and keeps core invariants`() {
         val schema =
             mapper.readTree(Files.readString(findPath("contracts/order_state_transition_v1.schema.json")))
@@ -199,6 +350,31 @@ class BusinessLogicContractTest {
             "FILLED|EXEC_REPORT_CANCELED|FILLED"
         )
         assertTrue(transitionSet.containsAll(requiredTransitions), "transitions=$transitionSet")
+    }
+
+    @Test
+    fun `state transition fixture matches kotlin execution report oracle`() {
+        val payload =
+            mapper.readTree(Files.readString(findPath("contracts/fixtures/order_state_transition_v1.json")))
+        val transitions = payload.path("transitions")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until transitions.size()) {
+            val node = transitions.get(i)
+            val id = node.path("id").asText("tr-$i")
+            val actual =
+                kotlinStateTransitionOracle(
+                    from = node.path("from").asText(),
+                    event = node.path("event").asText(),
+                    filledQtyBefore = node.path("filledQtyBefore").asLong(),
+                    filledQtyReported = node.path("filledQtyReported").asLong(),
+                    orderQty = node.path("orderQty").asLong()
+                )
+            val expected = node.path("to").asText()
+            if (actual != expected) {
+                mismatches.add("$id expected=$expected actual=$actual")
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
     }
 
     @Test
@@ -257,5 +433,23 @@ class BusinessLogicContractTest {
         assertEquals(2301, reasonToCode["V3_GLOBAL_KILLED"])
         assertEquals(2302, reasonToCode["V3_SESSION_KILLED"])
         assertEquals(2303, reasonToCode["V3_SHARD_KILLED"])
+    }
+
+    @Test
+    fun `reject reason fixture matches kotlin tcp reason code oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/reject_reason_v1.json")))
+        val reasons = payload.path("reasons")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until reasons.size()) {
+            val node = reasons.get(i)
+            val reason = node.path("reason").asText()
+            val expectedCode = node.path("tcpReasonCode").asInt()
+            val actualCode = v3TcpReasonCodeOracle(reason)
+            if (actualCode != expectedCode) {
+                mismatches.add("$reason expected=$expectedCode actual=$actualCode")
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
+        assertEquals(9999, v3TcpReasonCodeOracle("UNKNOWN_REASON"))
     }
 }

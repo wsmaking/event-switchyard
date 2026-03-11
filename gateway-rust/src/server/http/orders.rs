@@ -1098,6 +1098,15 @@ fn v3_tcp_reason_code(resp: &VolatileOrderResponse) -> u32 {
         Some("INVALID_PRICE") => 1_003,
         Some("INVALID_SYMBOL") => 1_004,
         Some("RISK_REJECT") => 1_100,
+        Some("BAD_TOKEN_LEN") => V3_TCP_REASON_BAD_TOKEN_LEN,
+        Some("BAD_SYMBOL") => V3_TCP_REASON_BAD_SYMBOL,
+        Some("BAD_SIDE") => V3_TCP_REASON_BAD_SIDE,
+        Some("BAD_TYPE") => V3_TCP_REASON_BAD_TYPE,
+        Some("BAD_TOKEN_UTF8") => V3_TCP_REASON_BAD_TOKEN_UTF8,
+        Some("AUTH_INVALID") => V3_TCP_REASON_AUTH_INVALID,
+        Some("AUTH_EXPIRED") => V3_TCP_REASON_AUTH_EXPIRED,
+        Some("AUTH_NOT_YET_VALID") => V3_TCP_REASON_AUTH_NOT_YET_VALID,
+        Some("AUTH_INTERNAL") => V3_TCP_REASON_AUTH_INTERNAL,
         Some("V3_DURABLE_BACKPRESSURE_SOFT") => 2_001,
         Some("V3_DURABLE_BACKPRESSURE_HARD") => 2_002,
         Some("V3_BACKPRESSURE_SOFT") => 2_101,
@@ -1937,7 +1946,11 @@ mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use gateway_core::LatencyHistogram;
     use hmac::{Hmac, Mac};
+    use serde::Deserialize;
+    use serde::de::DeserializeOwned;
     use sha2::Sha256;
+    use std::fs;
+    use std::path::PathBuf;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, AtomicU64};
@@ -2352,6 +2365,175 @@ mod tests {
             state.order_id_seq.fetch_add(1, Ordering::Relaxed),
             order_id.to_string(),
             account_id.to_string(),
+        );
+    }
+
+    fn find_fixture(rel: &str) -> PathBuf {
+        let mut dir = std::env::current_dir().expect("cwd");
+        for _ in 0..6 {
+            let candidate = dir.join(rel);
+            if candidate.exists() {
+                return candidate;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        panic!("fixture not found: {rel}");
+    }
+
+    fn load_fixture<T: DeserializeOwned>(rel: &str) -> T {
+        let path = find_fixture(rel);
+        let raw = fs::read_to_string(path).expect("read fixture");
+        serde_json::from_str(&raw).expect("deserialize fixture")
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RiskDecisionFixture {
+        cases: Vec<RiskDecisionCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RiskDecisionCase {
+        id: String,
+        input: RiskDecisionInput,
+        expected: RiskDecisionExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RiskDecisionInput {
+        symbol: String,
+        side: String,
+        order_type: String,
+        qty: u64,
+        price: u64,
+        strict_symbols: bool,
+        symbol_known: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RiskDecisionExpected {
+        allowed: bool,
+        reason: Option<String>,
+        http_status: u16,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RejectReasonFixture {
+        reasons: Vec<RejectReasonCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RejectReasonCase {
+        reason: String,
+        tcp_reason_code: u32,
+    }
+
+    fn fixture_order_type(raw: &str) -> OrderType {
+        match raw {
+            "LIMIT" => OrderType::Limit,
+            "MARKET" => OrderType::Market,
+            other => panic!("unknown orderType in fixture: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn v3_hot_risk_fixture_matches_rust_implementation() {
+        let fixture: RiskDecisionFixture =
+            load_fixture("contracts/fixtures/risk_decision_v1.json");
+        let mut mismatches = Vec::new();
+
+        for case in fixture.cases {
+            let mut state = build_test_state();
+            state.v3_risk_strict_symbols = case.input.strict_symbols;
+            state.v3_risk_max_order_qty = 100_000_000;
+            state.v3_risk_max_notional = 1_000_000_000;
+
+            let mut symbol_limits = HashMap::new();
+            if case.input.symbol_known {
+                if let Some(symbol_key) = parse_v3_symbol_key(&case.input.symbol) {
+                    symbol_limits.insert(
+                        symbol_key,
+                        gateway_core::SymbolLimits {
+                            max_order_qty: state.v3_risk_max_order_qty.min(u32::MAX as u64) as u32,
+                            max_notional: state.v3_risk_max_notional,
+                            tick_size: 1,
+                        },
+                    );
+                }
+            }
+            state.v3_symbol_limits = Arc::new(symbol_limits);
+
+            let req = OrderRequest {
+                symbol: case.input.symbol.clone(),
+                side: case.input.side.clone(),
+                order_type: fixture_order_type(&case.input.order_type),
+                qty: case.input.qty,
+                price: Some(case.input.price),
+                time_in_force: TimeInForce::Gtc,
+                expire_at: None,
+                client_order_id: None,
+            };
+
+            let (allowed, reason, http_status) = match evaluate_v3_hot_risk(&state, &req) {
+                Ok(()) => (true, None, StatusCode::ACCEPTED.as_u16()),
+                Err(reason) => (
+                    false,
+                    Some(reason.to_string()),
+                    StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                ),
+            };
+
+            if allowed != case.expected.allowed
+                || reason.as_ref() != case.expected.reason.as_ref()
+                || http_status != case.expected.http_status
+            {
+                mismatches.push(format!(
+                    "{} expected=({}, {:?}, {}) actual=({}, {:?}, {})",
+                    case.id,
+                    case.expected.allowed,
+                    case.expected.reason,
+                    case.expected.http_status,
+                    allowed,
+                    reason,
+                    http_status
+                ));
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "risk fixture mismatches: {:?}",
+            mismatches
+        );
+    }
+
+    #[test]
+    fn v3_reject_reason_fixture_matches_rust_tcp_reason_mapping() {
+        let fixture: RejectReasonFixture =
+            load_fixture("contracts/fixtures/reject_reason_v1.json");
+        let mut mismatches = Vec::new();
+
+        for case in fixture.reasons {
+            let resp = VolatileOrderResponse::rejected("fixture", "REJECTED", &case.reason);
+            let actual = v3_tcp_reason_code(&resp);
+            if actual != case.tcp_reason_code {
+                mismatches.push(format!(
+                    "{} expected={} actual={}",
+                    case.reason, case.tcp_reason_code, actual
+                ));
+            }
+        }
+
+        let unknown = VolatileOrderResponse::rejected("fixture", "REJECTED", "UNKNOWN_REASON");
+        assert_eq!(v3_tcp_reason_code(&unknown), 9_999);
+        assert!(
+            mismatches.is_empty(),
+            "reject reason fixture mismatches: {:?}",
+            mismatches
         );
     }
 
