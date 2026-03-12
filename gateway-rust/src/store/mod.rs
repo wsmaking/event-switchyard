@@ -26,6 +26,7 @@ use crate::order::{OrderType, TimeInForce};
 pub enum OrderStatus {
     Accepted,
     Sent,
+    AmendRequested,
     CancelRequested,
     PartiallyFilled,
     Filled,
@@ -42,6 +43,7 @@ impl OrderStatus {
         match self {
             Self::Accepted => "ACCEPTED",
             Self::Sent => "SENT",
+            Self::AmendRequested => "AMEND_REQUESTED",
             Self::CancelRequested => "CANCEL_REQUESTED",
             Self::PartiallyFilled => "PARTIALLY_FILLED",
             Self::Filled => "FILLED",
@@ -247,6 +249,65 @@ impl Default for OrderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn find_fixture(rel: &str) -> PathBuf {
+        let mut dir = std::env::current_dir().expect("cwd");
+        for _ in 0..6 {
+            let candidate = dir.join(rel);
+            if candidate.exists() {
+                return candidate;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        panic!("fixture not found: {rel}");
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct StateTransitionFixture {
+        transitions: Vec<StateTransitionCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StateTransitionCase {
+        id: String,
+        from: String,
+        event: String,
+        filled_qty_before: u64,
+        filled_qty_reported: u64,
+        order_qty: u64,
+        to: String,
+    }
+
+    fn fixture_status(raw: &str) -> OrderStatus {
+        match raw {
+            "ACCEPTED" => OrderStatus::Accepted,
+            "SENT" => OrderStatus::Sent,
+            "AMEND_REQUESTED" => OrderStatus::AmendRequested,
+            "CANCEL_REQUESTED" => OrderStatus::CancelRequested,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "FILLED" => OrderStatus::Filled,
+            "CANCELED" => OrderStatus::Canceled,
+            "REJECTED" => OrderStatus::Rejected,
+            other => panic!("unknown status in fixture: {other}"),
+        }
+    }
+
+    fn event_to_report_status(raw: &str) -> OrderStatus {
+        match raw {
+            "CANCEL_REQUESTED" => OrderStatus::CancelRequested,
+            "EXEC_REPORT_PARTIAL" => OrderStatus::PartiallyFilled,
+            "EXEC_REPORT_FILLED" => OrderStatus::Filled,
+            "EXEC_REPORT_CANCELED" => OrderStatus::Canceled,
+            "EXEC_REPORT_REJECTED" => OrderStatus::Rejected,
+            other => panic!("unknown event in fixture: {other}"),
+        }
+    }
 
     #[test]
     fn test_put_and_find() {
@@ -340,5 +401,59 @@ mod tests {
         let updated2 = store.apply_execution_report(&report2).unwrap();
         assert_eq!(updated2.status, OrderStatus::Filled);
         assert_eq!(updated2.filled_qty, 100);
+    }
+
+    #[test]
+    fn state_transition_fixture_matches_execution_report_logic() {
+        let path = find_fixture("contracts/fixtures/order_state_transition_v1.json");
+        let raw = fs::read_to_string(path).expect("read fixture");
+        let fixture: StateTransitionFixture = serde_json::from_str(&raw).expect("deserialize");
+        let mut mismatches = Vec::new();
+
+        for case in fixture.transitions {
+            let store = OrderStore::new();
+            let mut order = OrderSnapshot::new(
+                "ord_fixture".into(),
+                "acc_fixture".into(),
+                "AAPL".into(),
+                "BUY".into(),
+                OrderType::Limit,
+                case.order_qty,
+                Some(100),
+                TimeInForce::Gtc,
+                None,
+                None,
+            );
+            order.status = fixture_status(&case.from);
+            order.filled_qty = case.filled_qty_before;
+            store.put(order, None);
+
+            let report = ExecReport {
+                order_id: "ord_fixture".into(),
+                status: event_to_report_status(&case.event),
+                filled_qty_delta: case
+                    .filled_qty_reported
+                    .saturating_sub(case.filled_qty_before),
+                filled_qty_total: case.filled_qty_reported,
+                at: 1234567890,
+            };
+
+            let updated = store
+                .apply_execution_report(&report)
+                .expect("apply execution report");
+            let actual = updated.status.as_str();
+            if actual != case.to {
+                mismatches.push(format!(
+                    "{} expected={} actual={}",
+                    case.id, case.to, actual
+                ));
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "state transition fixture mismatches: {:?}",
+            mismatches
+        );
     }
 }

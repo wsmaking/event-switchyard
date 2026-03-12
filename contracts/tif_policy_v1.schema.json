@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TimeInForce Policy Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "owner",
+    "cases"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": [
+        "v1"
+      ]
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope",
+          "input",
+          "expected"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "time_in_force_v1"
+            ]
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "orderType",
+              "timeInForce",
+              "price"
+            ],
+            "properties": {
+              "orderType": {
+                "type": "string",
+                "enum": [
+                  "LIMIT",
+                  "MARKET"
+                ]
+              },
+              "timeInForce": {
+                "type": "string",
+                "enum": [
+                  "GTC",
+                  "GTD",
+                  "IOC",
+                  "FOK"
+                ]
+              },
+              "price": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "allowed",
+              "reason",
+              "httpStatus",
+              "effectiveTimeInForce"
+            ],
+            "properties": {
+              "allowed": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "INVALID_PRICE",
+                  "UNSUPPORTED_TIF"
+                ]
+              },
+              "httpStatus": {
+                "type": "integer",
+                "enum": [
+                  202,
+                  422
+                ]
+              },
+              "effectiveTimeInForce": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "GTC",
+                  "GTD",
+                  "IOC",
+                  "FOK",
+                  null
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

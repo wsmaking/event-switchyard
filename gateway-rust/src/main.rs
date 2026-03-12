@@ -68,9 +68,31 @@ async fn main() -> anyhow::Result<()> {
         "FastPathEngine initialized (queue_capacity: {})",
         config.queue_capacity
     );
+    let order_store_shards = std::env::var("ORDER_STORE_SHARDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64);
+    let sharded_store = Arc::new(store::ShardedOrderStore::new_with_ttl_and_shards(
+        config.idempotency_ttl_sec * 1000,
+        order_store_shards,
+    ));
+    let order_id_map = Arc::new(store::OrderIdMap::new());
+    info!(
+        "Shared ShardedOrderStore initialized (shards={})",
+        sharded_store.shard_count()
+    );
 
     // 3) バックグラウンド worker 起動（Exchange or Drain）
-    start_exchange_or_drain_workers(&engine, &config);
+    start_exchange_or_drain_workers(
+        &engine,
+        &config,
+        Arc::clone(&sharded_store),
+        Arc::clone(&order_id_map),
+        Arc::clone(&sse_hub),
+        Arc::clone(&audit_log),
+        Arc::clone(&bus_publisher),
+        outbox_enabled,
+    );
 
     // 4) サーバー起動（HTTP/TCPを並列で待機）
     let http_engine = engine.clone();
@@ -82,7 +104,6 @@ async fn main() -> anyhow::Result<()> {
 
     let http_port = config.port;
     let tcp_port = config.tcp_port;
-    let idempotency_ttl_sec = config.idempotency_ttl_sec;
 
     if tcp_port == 0 {
         let result = server::http::run(
@@ -93,8 +114,9 @@ async fn main() -> anyhow::Result<()> {
             http_audit_log,
             http_bus,
             outbox_enabled,
-            idempotency_ttl_sec,
             Some(durable_rx),
+            Arc::clone(&sharded_store),
+            Arc::clone(&order_id_map),
         )
         .await;
         if let Err(e) = result {
@@ -103,7 +125,18 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         tokio::select! {
-            result = server::http::run(http_port, http_engine, http_order_store, http_sse_hub, http_audit_log, http_bus, outbox_enabled, idempotency_ttl_sec, Some(durable_rx)) => {
+            result = server::http::run(
+                http_port,
+                http_engine,
+                http_order_store,
+                http_sse_hub,
+                http_audit_log,
+                http_bus,
+                outbox_enabled,
+                Some(durable_rx),
+                Arc::clone(&sharded_store),
+                Arc::clone(&order_id_map)
+            ) => {
                 if let Err(e) = result {
                     tracing::error!(error = %e, "HTTP server exited with error");
                     return Err(e.into());
@@ -188,9 +221,26 @@ fn start_outbox_if_enabled(
 
 /// Exchange 接続がある場合は exchange worker を起動し、
 /// 無い場合は設定に応じて drain worker を起動する。
-fn start_exchange_or_drain_workers(engine: &engine::FastPathEngine, config: &config::Config) {
+fn start_exchange_or_drain_workers(
+    engine: &engine::FastPathEngine,
+    config: &config::Config,
+    sharded_store: Arc<store::ShardedOrderStore>,
+    order_id_map: Arc<store::OrderIdMap>,
+    sse_hub: Arc<sse::SseHub>,
+    audit_log: Arc<audit::AuditLog>,
+    bus_publisher: Arc<bus::BusPublisher>,
+    bus_mode_outbox: bool,
+) {
     if let Some(exchange_host) = config.exchange_host.clone() {
         let queue = engine.queue();
+        let report_ctx = engine::exchange_worker::ExecutionReportContext::new(
+            sharded_store,
+            order_id_map,
+            sse_hub,
+            audit_log,
+            bus_publisher,
+            bus_mode_outbox,
+        );
         let workers = std::env::var("EXCHANGE_WORKERS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -201,6 +251,7 @@ fn start_exchange_or_drain_workers(engine: &engine::FastPathEngine, config: &con
                 Arc::clone(&queue),
                 exchange_host.clone(),
                 config.exchange_port,
+                report_ctx.clone(),
             );
         }
         info!(

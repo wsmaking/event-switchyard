@@ -1,0 +1,81 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "cases": [
+    {
+      "id": "tif-limit-gtc-accept",
+      "scope": "time_in_force_v1",
+      "input": {
+        "orderType": "LIMIT",
+        "timeInForce": "GTC",
+        "price": 15000
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "effectiveTimeInForce": "GTC"
+      }
+    },
+    {
+      "id": "tif-limit-gtd-accept",
+      "scope": "time_in_force_v1",
+      "input": {
+        "orderType": "LIMIT",
+        "timeInForce": "GTD",
+        "price": 15000
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "effectiveTimeInForce": "GTD"
+      }
+    },
+    {
+      "id": "tif-limit-ioc-accept",
+      "scope": "time_in_force_v1",
+      "input": {
+        "orderType": "LIMIT",
+        "timeInForce": "IOC",
+        "price": 15000
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "effectiveTimeInForce": "IOC"
+      }
+    },
+    {
+      "id": "tif-limit-fok-accept",
+      "scope": "time_in_force_v1",
+      "input": {
+        "orderType": "LIMIT",
+        "timeInForce": "FOK",
+        "price": 15000
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "effectiveTimeInForce": "FOK"
+      }
+    },
+    {
+      "id": "tif-limit-missing-price-reject",
+      "scope": "time_in_force_v1",
+      "input": {
+        "orderType": "LIMIT",
+        "timeInForce": "IOC",
+        "price": 0
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_PRICE",
+        "httpStatus": 422,
+        "effectiveTimeInForce": null
+      }
+    }
+  ]
+}

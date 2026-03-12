@@ -1,0 +1,267 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "reasons": [
+    {
+      "reason": "INVALID_QTY",
+      "category": "risk",
+      "httpStatus": 422,
+      "tcpReasonCode": 1001,
+      "emittedBy": "v3_http",
+      "retryable": false,
+      "description": "quantity is zero or exceeds configured limit"
+    },
+    {
+      "reason": "INVALID_SIDE",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 1002,
+      "emittedBy": "v3_http",
+      "retryable": false,
+      "description": "side value cannot be mapped to buy or sell"
+    },
+    {
+      "reason": "INVALID_PRICE",
+      "category": "risk",
+      "httpStatus": 422,
+      "tcpReasonCode": 1003,
+      "emittedBy": "v3_http",
+      "retryable": false,
+      "description": "limit order requires positive price"
+    },
+    {
+      "reason": "INVALID_SYMBOL",
+      "category": "risk",
+      "httpStatus": 422,
+      "tcpReasonCode": 1004,
+      "emittedBy": "v3_http",
+      "retryable": false,
+      "description": "symbol format or symbol policy check failed"
+    },
+    {
+      "reason": "RISK_REJECT",
+      "category": "risk",
+      "httpStatus": 422,
+      "tcpReasonCode": 1100,
+      "emittedBy": "v3_http",
+      "retryable": false,
+      "description": "notional or risk rule violation"
+    },
+    {
+      "reason": "V3_DURABLE_CONFIRM_AGE_SOFT",
+      "category": "admission",
+      "httpStatus": 429,
+      "tcpReasonCode": 9999,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "soft guard triggered by durable confirm age"
+    },
+    {
+      "reason": "V3_DURABLE_CONFIRM_AGE_HARD",
+      "category": "admission",
+      "httpStatus": 503,
+      "tcpReasonCode": 9999,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "hard guard triggered by durable confirm age"
+    },
+    {
+      "reason": "V3_DURABLE_BACKPRESSURE_FAILSAFE",
+      "category": "admission",
+      "httpStatus": 503,
+      "tcpReasonCode": 9999,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "failsafe reject on severe durable saturation"
+    },
+    {
+      "reason": "V3_DURABLE_CONTROLLER_SOFT",
+      "category": "admission",
+      "httpStatus": 429,
+      "tcpReasonCode": 9999,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "controller-driven soft reject for lane-local pressure"
+    },
+    {
+      "reason": "V3_DURABLE_CONTROLLER_HARD",
+      "category": "admission",
+      "httpStatus": 503,
+      "tcpReasonCode": 9999,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "controller-driven hard reject for lane-local pressure"
+    },
+    {
+      "reason": "V3_DURABLE_BACKPRESSURE_SOFT",
+      "category": "admission",
+      "httpStatus": 429,
+      "tcpReasonCode": 2001,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "soft durable queue/backlog threshold exceeded"
+    },
+    {
+      "reason": "V3_DURABLE_BACKPRESSURE_HARD",
+      "category": "admission",
+      "httpStatus": 503,
+      "tcpReasonCode": 2002,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "hard durable queue/backlog threshold exceeded"
+    },
+    {
+      "reason": "V3_BACKPRESSURE_SOFT",
+      "category": "queue",
+      "httpStatus": 429,
+      "tcpReasonCode": 2101,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "soft ingress queue watermark exceeded"
+    },
+    {
+      "reason": "V3_BACKPRESSURE_HARD",
+      "category": "queue",
+      "httpStatus": 503,
+      "tcpReasonCode": 2102,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "hard ingress queue watermark exceeded"
+    },
+    {
+      "reason": "V3_QUEUE_KILLED",
+      "category": "kill",
+      "httpStatus": 503,
+      "tcpReasonCode": 2201,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "shard killed due to kill watermark"
+    },
+    {
+      "reason": "V3_QUEUE_FULL",
+      "category": "queue",
+      "httpStatus": 503,
+      "tcpReasonCode": 2202,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "ingress try_send failed due to full queue"
+    },
+    {
+      "reason": "V3_INGRESS_CLOSED",
+      "category": "queue",
+      "httpStatus": 503,
+      "tcpReasonCode": 2203,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "ingress queue closed while accepting order"
+    },
+    {
+      "reason": "V3_GLOBAL_KILLED",
+      "category": "kill",
+      "httpStatus": 503,
+      "tcpReasonCode": 2301,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "global kill switch active"
+    },
+    {
+      "reason": "V3_SESSION_KILLED",
+      "category": "kill",
+      "httpStatus": 503,
+      "tcpReasonCode": 2302,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "session marked killed"
+    },
+    {
+      "reason": "V3_SHARD_KILLED",
+      "category": "kill",
+      "httpStatus": 503,
+      "tcpReasonCode": 2303,
+      "emittedBy": "v3_http",
+      "retryable": true,
+      "description": "shard marked killed"
+    },
+    {
+      "reason": "BAD_TOKEN_LEN",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 101,
+      "emittedBy": "v3_tcp_parse",
+      "retryable": false,
+      "description": "binary frame token length is invalid"
+    },
+    {
+      "reason": "BAD_SYMBOL",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 102,
+      "emittedBy": "v3_tcp_parse",
+      "retryable": false,
+      "description": "binary frame symbol segment is invalid"
+    },
+    {
+      "reason": "BAD_SIDE",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 103,
+      "emittedBy": "v3_tcp_parse",
+      "retryable": false,
+      "description": "binary frame side byte is invalid"
+    },
+    {
+      "reason": "BAD_TYPE",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 104,
+      "emittedBy": "v3_tcp_parse",
+      "retryable": false,
+      "description": "binary frame type byte is invalid"
+    },
+    {
+      "reason": "BAD_TOKEN_UTF8",
+      "category": "parse",
+      "httpStatus": 422,
+      "tcpReasonCode": 105,
+      "emittedBy": "v3_tcp_parse",
+      "retryable": false,
+      "description": "binary frame token cannot be decoded as UTF-8"
+    },
+    {
+      "reason": "AUTH_INVALID",
+      "category": "auth",
+      "httpStatus": 401,
+      "tcpReasonCode": 201,
+      "emittedBy": "v3_tcp_auth",
+      "retryable": false,
+      "description": "jwt authentication failed"
+    },
+    {
+      "reason": "AUTH_EXPIRED",
+      "category": "auth",
+      "httpStatus": 401,
+      "tcpReasonCode": 202,
+      "emittedBy": "v3_tcp_auth",
+      "retryable": true,
+      "description": "jwt token is expired"
+    },
+    {
+      "reason": "AUTH_NOT_YET_VALID",
+      "category": "auth",
+      "httpStatus": 401,
+      "tcpReasonCode": 203,
+      "emittedBy": "v3_tcp_auth",
+      "retryable": true,
+      "description": "jwt token is not yet valid"
+    },
+    {
+      "reason": "AUTH_INTERNAL",
+      "category": "auth",
+      "httpStatus": 500,
+      "tcpReasonCode": 204,
+      "emittedBy": "v3_tcp_auth",
+      "retryable": true,
+      "description": "server-side auth secret/config problem"
+    }
+  ]
+}

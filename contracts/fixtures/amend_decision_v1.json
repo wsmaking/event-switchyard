@@ -1,0 +1,97 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "cases": [
+    {
+      "id": "amend-accepted-active-order",
+      "scope": "amend_v1",
+      "fromStatus": "ACCEPTED",
+      "input": {
+        "newQty": 120,
+        "newPrice": 15100,
+        "comment": "basic amend request on active order"
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "nextStatus": "AMEND_REQUESTED"
+      }
+    },
+    {
+      "id": "amend-accepted-partially-filled-order",
+      "scope": "amend_v1",
+      "fromStatus": "PARTIALLY_FILLED",
+      "input": {
+        "newQty": 150,
+        "newPrice": 15200
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "nextStatus": "AMEND_REQUESTED"
+      }
+    },
+    {
+      "id": "amend-reject-filled-terminal",
+      "scope": "amend_v1",
+      "fromStatus": "FILLED",
+      "input": {
+        "newQty": 120,
+        "newPrice": 15100
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "ORDER_FINAL",
+        "httpStatus": 409,
+        "nextStatus": "FILLED"
+      }
+    },
+    {
+      "id": "amend-reject-invalid-qty-zero",
+      "scope": "amend_v1",
+      "fromStatus": "ACCEPTED",
+      "input": {
+        "newQty": 0,
+        "newPrice": 15100
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_QTY",
+        "httpStatus": 422,
+        "nextStatus": "ACCEPTED"
+      }
+    },
+    {
+      "id": "amend-reject-invalid-price-zero",
+      "scope": "amend_v1",
+      "fromStatus": "SENT",
+      "input": {
+        "newQty": 120,
+        "newPrice": 0
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_PRICE",
+        "httpStatus": 422,
+        "nextStatus": "SENT"
+      }
+    },
+    {
+      "id": "amend-reject-cancel-requested",
+      "scope": "amend_v1",
+      "fromStatus": "CANCEL_REQUESTED",
+      "input": {
+        "newQty": 120,
+        "newPrice": 15100
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "ORDER_FINAL",
+        "httpStatus": 409,
+        "nextStatus": "CANCEL_REQUESTED"
+      }
+    }
+  ]
+}

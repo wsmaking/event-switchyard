@@ -1,0 +1,150 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "cases": [
+    {
+      "id": "risk-accept-limit",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 10,
+        "price": 100,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202
+      }
+    },
+    {
+      "id": "risk-invalid-qty-zero",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 0,
+        "price": 100,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_QTY",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-invalid-qty-too-large",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 1000000000,
+        "price": 100,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_QTY",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-invalid-side",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "HOLD",
+        "orderType": "LIMIT",
+        "qty": 10,
+        "price": 100,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_SIDE",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-invalid-price-for-limit",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 10,
+        "price": 0,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_PRICE",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-invalid-symbol-format",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 10,
+        "price": 100,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_SYMBOL",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-notional-limit",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 100000,
+        "price": 1000000,
+        "strictSymbols": false,
+        "symbolKnown": true
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "RISK_REJECT",
+        "httpStatus": 422
+      }
+    },
+    {
+      "id": "risk-strict-symbol-required",
+      "scope": "v3_hot_risk",
+      "input": {
+        "symbol": "MISSING",
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "qty": 10,
+        "price": 100,
+        "strictSymbols": true,
+        "symbolKnown": false
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_SYMBOL",
+        "httpStatus": 422
+      }
+    }
+  ]
+}

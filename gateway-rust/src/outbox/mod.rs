@@ -170,7 +170,8 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 fn to_bus_event(event: AuditEvent) -> Option<BusEvent> {
     match event.event_type.as_str() {
-        "OrderAccepted" | "CancelRequested" => Some(BusEvent {
+        "OrderAccepted" | "AmendRequested" | "CancelRequested" | "ExecutionReport"
+        | "OrderUpdated" => Some(BusEvent {
             event_type: event.event_type,
             at: crate::bus::format_event_time(event.at),
             account_id: event.account_id,
@@ -273,16 +274,24 @@ mod tests {
             order_id: Some("ord-1".to_string()),
             data: json!({"status":"ACCEPTED"}),
         };
+        let amend = AuditEvent {
+            event_type: "AmendRequested".to_string(),
+            at: 2,
+            account_id: "acct-1".to_string(),
+            order_id: Some("ord-1".to_string()),
+            data: json!({"status":"AMEND_REQUESTED"}),
+        };
         let report = AuditEvent {
             event_type: "ExecutionReport".to_string(),
-            at: 2,
+            at: 3,
             account_id: "acct-1".to_string(),
             order_id: Some("ord-1".to_string()),
             data: json!({"status":"FILLED"}),
         };
 
         assert!(to_bus_event(accepted).is_some());
-        assert!(to_bus_event(report).is_none());
+        assert!(to_bus_event(amend).is_some());
+        assert!(to_bus_event(report).is_some());
     }
 
     #[test]
