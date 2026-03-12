@@ -107,6 +107,13 @@ class BusinessLogicContractTest {
         val httpStatus: Int
     )
 
+    private data class TifPolicyDecision(
+        val allowed: Boolean,
+        val reason: String?,
+        val httpStatus: Int,
+        val effectiveTimeInForce: String?
+    )
+
     private fun isValidV3Symbol(raw: String): Boolean {
         val symbol = raw.trim()
         if (symbol.isBlank() || symbol.length > 8) return false
@@ -220,6 +227,24 @@ class BusinessLogicContractTest {
             "AUTH_INTERNAL" -> 204
             else -> 9999
         }
+    }
+
+    private fun kotlinTifPolicyOracle(input: JsonNode): TifPolicyDecision {
+        val orderType = input.path("orderType").asText().uppercase()
+        val tif = input.path("timeInForce").asText().uppercase()
+        val price = input.path("price").asLong()
+
+        if (orderType == "LIMIT" && price == 0L) {
+            return TifPolicyDecision(false, "INVALID_PRICE", 422, null)
+        }
+
+        val effective =
+            when (tif) {
+                "GTC", "GTD", "IOC", "FOK" -> tif
+                else -> return TifPolicyDecision(false, "INVALID_TIME_IN_FORCE", 422, null)
+            }
+
+        return TifPolicyDecision(true, null, 202, effective)
     }
 
     @Test
@@ -558,6 +583,36 @@ class BusinessLogicContractTest {
                 .toSet()
         assertTrue(tifs.contains("IOC"), "timeInForce should include IOC: $tifs")
         assertTrue(tifs.contains("FOK"), "timeInForce should include FOK: $tifs")
+    }
+
+    @Test
+    fun `tif policy fixture matches kotlin policy oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/tif_policy_v1.json")))
+        val cases = payload.path("cases")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            val id = caseNode.path("id").asText("tif-$i")
+            val actual = kotlinTifPolicyOracle(caseNode.path("input"))
+            val expected = caseNode.path("expected")
+            val expectedReasonNode = expected.path("reason")
+            val expectedReason = if (expectedReasonNode.isNull) null else expectedReasonNode.asText()
+            val expectedAllowed = expected.path("allowed").asBoolean()
+            val expectedStatus = expected.path("httpStatus").asInt()
+            val expectedEffectiveNode = expected.path("effectiveTimeInForce")
+            val expectedEffective = if (expectedEffectiveNode.isNull) null else expectedEffectiveNode.asText()
+            if (
+                actual.allowed != expectedAllowed ||
+                    actual.reason != expectedReason ||
+                    actual.httpStatus != expectedStatus ||
+                    actual.effectiveTimeInForce != expectedEffective
+            ) {
+                mismatches.add(
+                    "$id expected=($expectedAllowed,$expectedReason,$expectedStatus,$expectedEffective) actual=(${actual.allowed},${actual.reason},${actual.httpStatus},${actual.effectiveTimeInForce})"
+                )
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
     }
 
     @Test

@@ -421,6 +421,19 @@ fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
     Some(key)
 }
 
+fn validate_order_request(req: &OrderRequest) -> Option<&'static str> {
+    if req.symbol.trim().is_empty() {
+        return Some("INVALID_SYMBOL");
+    }
+    if req.qty == 0 {
+        return Some("INVALID_QTY");
+    }
+    if req.order_type == crate::order::OrderType::Limit && req.price.unwrap_or(0) == 0 {
+        return Some("INVALID_PRICE");
+    }
+    None
+}
+
 fn evaluate_v3_hot_risk(state: &AppState, req: &OrderRequest) -> Result<(), &'static str> {
     let position_t0 = now_nanos();
     let side = req.side_byte();
@@ -1199,6 +1212,26 @@ async fn handle_order_with_contract(
         ));
     }
 
+    if let Some(reason) = validate_order_request(&req) {
+        match reason {
+            "INVALID_QTY" => {
+                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+            }
+            "INVALID_SYMBOL" => {
+                state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
+            }
+            "INVALID_PRICE" => {
+                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        record_ack(&state, t0);
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(OrderResponse::rejected(reason)),
+        ));
+    }
+
     // account単位レート制限。超過時は業務処理に入る前に429で返す。
     if let Some(ref rate_limiter) = state.rate_limiter {
         if !rate_limiter.try_acquire(&principal.account_id) {
@@ -1301,6 +1334,8 @@ async fn handle_order_with_contract(
                 "timeInForce": match snapshot.time_in_force {
                     crate::order::TimeInForce::Gtc => "GTC",
                     crate::order::TimeInForce::Gtd => "GTD",
+                    crate::order::TimeInForce::Ioc => "IOC",
+                    crate::order::TimeInForce::Fok => "FOK",
                 },
                 "expireAt": snapshot.expire_at,
                 "clientOrderId": snapshot.client_order_id.clone(),
@@ -2105,6 +2140,8 @@ impl From<OrderSnapshot> for OrderSnapshotResponse {
             time_in_force: match o.time_in_force {
                 crate::order::TimeInForce::Gtc => "GTC".into(),
                 crate::order::TimeInForce::Gtd => "GTD".into(),
+                crate::order::TimeInForce::Ioc => "IOC".into(),
+                crate::order::TimeInForce::Fok => "FOK".into(),
             },
             expire_at: o.expire_at,
             status: o.status.as_str().into(),
@@ -2655,6 +2692,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct TifPolicyCase {
+        id: String,
         scope: String,
         input: TifPolicyInput,
         expected: TifPolicyExpected,
@@ -2663,7 +2701,9 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct TifPolicyInput {
+        order_type: String,
         time_in_force: String,
+        price: u64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2671,6 +2711,7 @@ mod tests {
     struct TifPolicyExpected {
         allowed: bool,
         reason: Option<String>,
+        http_status: u16,
         effective_time_in_force: Option<String>,
     }
 
@@ -2699,6 +2740,16 @@ mod tests {
             "LIMIT" => OrderType::Limit,
             "MARKET" => OrderType::Market,
             other => panic!("unknown orderType in fixture: {other}"),
+        }
+    }
+
+    fn fixture_time_in_force(raw: &str) -> TimeInForce {
+        match raw {
+            "GTC" => TimeInForce::Gtc,
+            "GTD" => TimeInForce::Gtd,
+            "IOC" => TimeInForce::Ioc,
+            "FOK" => TimeInForce::Fok,
+            other => panic!("unknown timeInForce in fixture: {other}"),
         }
     }
 
@@ -2910,6 +2961,68 @@ mod tests {
             reasons.contains("INVALID_PRICE"),
             "fixture must include INVALID_PRICE scenario"
         );
+    }
+
+    #[tokio::test]
+    async fn tif_fixture_matches_order_ingress_behavior() {
+        let fixture: TifPolicyFixture = load_fixture("contracts/fixtures/tif_policy_v1.json");
+        for case in fixture.cases {
+            let state = build_test_state();
+            let account_id = "4301";
+            let idempotency_key = format!("idem_tif_{}", case.id);
+            let req = OrderRequest {
+                symbol: "AAPL".into(),
+                side: "BUY".into(),
+                order_type: fixture_order_type(&case.input.order_type),
+                qty: 100,
+                price: Some(case.input.price),
+                time_in_force: fixture_time_in_force(&case.input.time_in_force),
+                expire_at: None,
+                client_order_id: Some(format!("cid_tif_{}", case.id)),
+            };
+            let (status, Json(resp)) = handle_order(
+                State(state.clone()),
+                headers(account_id, Some(idempotency_key.as_str())),
+                Json(req),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("tif fixture case failed: {}", case.id));
+
+            assert_eq!(
+                status.as_u16(),
+                case.expected.http_status,
+                "case {} http status mismatch",
+                case.id
+            );
+
+            if case.expected.allowed {
+                assert_eq!(resp.status, "ACCEPTED", "case {}", case.id);
+                assert!(resp.reason.is_none(), "case {}", case.id);
+                let stored = state
+                    .sharded_store
+                    .find_by_id_with_account(&resp.order_id, account_id)
+                    .expect("stored order for allowed tif");
+                let expected_tif = case
+                    .expected
+                    .effective_time_in_force
+                    .as_deref()
+                    .expect("allowed tif must have effective value");
+                assert_eq!(
+                    stored.time_in_force,
+                    fixture_time_in_force(expected_tif),
+                    "case {} effective tif mismatch",
+                    case.id
+                );
+            } else {
+                assert_eq!(resp.status, "REJECTED", "case {}", case.id);
+                assert_eq!(
+                    resp.reason.as_deref(),
+                    case.expected.reason.as_deref(),
+                    "case {} reason mismatch",
+                    case.id
+                );
+            }
+        }
     }
 
     #[test]
