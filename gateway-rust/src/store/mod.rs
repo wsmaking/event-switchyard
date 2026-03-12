@@ -26,6 +26,7 @@ use crate::order::{OrderType, TimeInForce};
 pub enum OrderStatus {
     Accepted,
     Sent,
+    AmendRequested,
     CancelRequested,
     PartiallyFilled,
     Filled,
@@ -42,6 +43,7 @@ impl OrderStatus {
         match self {
             Self::Accepted => "ACCEPTED",
             Self::Sent => "SENT",
+            Self::AmendRequested => "AMEND_REQUESTED",
             Self::CancelRequested => "CANCEL_REQUESTED",
             Self::PartiallyFilled => "PARTIALLY_FILLED",
             Self::Filled => "FILLED",
@@ -286,6 +288,7 @@ mod tests {
         match raw {
             "ACCEPTED" => OrderStatus::Accepted,
             "SENT" => OrderStatus::Sent,
+            "AMEND_REQUESTED" => OrderStatus::AmendRequested,
             "CANCEL_REQUESTED" => OrderStatus::CancelRequested,
             "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
             "FILLED" => OrderStatus::Filled,

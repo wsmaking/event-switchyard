@@ -7,7 +7,10 @@ on:
       - "contracts/*_v1.schema.json"
       - "gateway/src/test/kotlin/gateway/contract/BusinessLogicContractTest.kt"
       - "gateway-rust/src/server/http/orders.rs"
+      - "gateway-rust/src/server/http/mod.rs"
       - "gateway-rust/src/store/mod.rs"
+      - "gateway-rust/src/store/sharded.rs"
+      - "gateway-rust/src/outbox/mod.rs"
       - ".github/workflows/business_contracts.yml"
   push:
     branches:
@@ -17,7 +20,10 @@ on:
       - "contracts/*_v1.schema.json"
       - "gateway/src/test/kotlin/gateway/contract/BusinessLogicContractTest.kt"
       - "gateway-rust/src/server/http/orders.rs"
+      - "gateway-rust/src/server/http/mod.rs"
       - "gateway-rust/src/store/mod.rs"
+      - "gateway-rust/src/store/sharded.rs"
+      - "gateway-rust/src/outbox/mod.rs"
       - ".github/workflows/business_contracts.yml"
 
 jobs:

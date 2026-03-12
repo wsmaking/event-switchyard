@@ -1681,6 +1681,171 @@ pub(super) async fn handle_get_order_by_client_id(
     Ok(Json(response))
 }
 
+/// 注文訂正（POST /orders/{order_id}/amend）
+/// - 状態遷移: ACTIVE -> AMEND_REQUESTED
+/// - 監査/Bus に AmendRequested を記録
+pub(super) async fn handle_amend_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+    Json(req): Json<AmendRequest>,
+) -> Result<(StatusCode, Json<AmendResponse>), (StatusCode, Json<AuthErrorResponse>)> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+
+    let principal = match state.jwt_auth.authenticate(auth_header) {
+        AuthResult::Ok(p) => p,
+        AuthResult::Err(e) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(AuthErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
+    };
+
+    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
+    let order = if let Some(ref acc_id) = account_id_from_map {
+        state
+            .sharded_store
+            .find_by_id_with_account(&order_id, acc_id)
+    } else {
+        state.sharded_store.find_by_id(&order_id)
+    };
+
+    let order = match order {
+        Some(o) => o,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+    };
+
+    if order.account_id != principal.account_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    if order.status.is_terminal() || order.status == crate::store::OrderStatus::CancelRequested {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(AmendResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some("ORDER_FINAL".into()),
+            }),
+        ));
+    }
+
+    if req.new_qty == 0 {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(AmendResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some("INVALID_QTY".into()),
+            }),
+        ));
+    }
+
+    if req.new_price == 0 {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(AmendResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some("INVALID_PRICE".into()),
+            }),
+        ));
+    }
+
+    if order.status == crate::store::OrderStatus::AmendRequested {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(AmendResponse {
+                order_id,
+                status: "AMEND_REQUESTED".into(),
+                reason: None,
+            }),
+        ));
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let updated = state
+        .sharded_store
+        .update(&order.order_id, &order.account_id, |prev| {
+            let mut next = prev.clone();
+            next.qty = req.new_qty;
+            next.price = Some(req.new_price);
+            next.status = crate::store::OrderStatus::AmendRequested;
+            next.last_update_at = now_ms;
+            next
+        });
+
+    if updated.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(AuthErrorResponse {
+                error: "NOT_FOUND".into(),
+            }),
+        ));
+    }
+
+    let amend_data = serde_json::json!({
+        "newQty": req.new_qty,
+        "newPrice": req.new_price,
+        "comment": req.comment,
+    });
+    state.audit_log.append(AuditEvent {
+        event_type: "AmendRequested".into(),
+        at: audit::now_millis(),
+        account_id: order.account_id.clone(),
+        order_id: Some(order.order_id.clone()),
+        data: amend_data.clone(),
+    });
+    if !state.bus_mode_outbox {
+        state.bus_publisher.publish(BusEvent {
+            event_type: "AmendRequested".into(),
+            at: crate::bus::format_event_time(audit::now_millis()),
+            account_id: order.account_id.clone(),
+            order_id: Some(order.order_id.clone()),
+            data: amend_data,
+        });
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AmendResponse {
+            order_id,
+            status: "AMEND_REQUESTED".into(),
+            reason: None,
+        }),
+    ))
+}
+
+/// 注文置換（POST /orders/{order_id}/replace）
+/// - 現時点では amend と同じ契約で扱う
+pub(super) async fn handle_replace_order(
+    state: State<AppState>,
+    headers: HeaderMap,
+    order_id: Path<String>,
+    req: Json<AmendRequest>,
+) -> Result<(StatusCode, Json<AmendResponse>), (StatusCode, Json<AuthErrorResponse>)> {
+    handle_amend_order(state, headers, order_id, req).await
+}
+
 /// 注文キャンセル（POST /orders/{order_id}/cancel）
 /// - 状態遷移 → 監査/Bus に CancelRequested を記録
 pub(super) async fn handle_cancel_order(
@@ -1809,6 +1974,24 @@ pub(super) async fn handle_cancel_order(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CancelResponse {
+    order_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AmendRequest {
+    new_qty: u64,
+    new_price: u64,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AmendResponse {
     order_id: String,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1949,9 +2132,9 @@ mod tests {
     use serde::Deserialize;
     use serde::de::DeserializeOwned;
     use sha2::Sha256;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2432,6 +2615,85 @@ mod tests {
         tcp_reason_code: u32,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct AmendDecisionFixture {
+        cases: Vec<AmendDecisionCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AmendDecisionCase {
+        id: String,
+        scope: String,
+        from_status: String,
+        input: AmendDecisionInput,
+        expected: AmendDecisionExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AmendDecisionInput {
+        new_qty: u64,
+        new_price: u64,
+        comment: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AmendDecisionExpected {
+        allowed: bool,
+        reason: Option<String>,
+        http_status: u16,
+        next_status: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TifPolicyFixture {
+        cases: Vec<TifPolicyCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TifPolicyCase {
+        scope: String,
+        input: TifPolicyInput,
+        expected: TifPolicyExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TifPolicyInput {
+        time_in_force: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TifPolicyExpected {
+        allowed: bool,
+        reason: Option<String>,
+        effective_time_in_force: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PositionCapFixture {
+        cases: Vec<PositionCapCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PositionCapCase {
+        scope: String,
+        expected: PositionCapExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PositionCapExpected {
+        allowed: bool,
+        reason: Option<String>,
+        http_status: u16,
+    }
+
     fn fixture_order_type(raw: &str) -> OrderType {
         match raw {
             "LIMIT" => OrderType::Limit,
@@ -2440,10 +2702,23 @@ mod tests {
         }
     }
 
+    fn fixture_order_status(raw: &str) -> OrderStatus {
+        match raw {
+            "ACCEPTED" => OrderStatus::Accepted,
+            "SENT" => OrderStatus::Sent,
+            "AMEND_REQUESTED" => OrderStatus::AmendRequested,
+            "CANCEL_REQUESTED" => OrderStatus::CancelRequested,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "FILLED" => OrderStatus::Filled,
+            "CANCELED" => OrderStatus::Canceled,
+            "REJECTED" => OrderStatus::Rejected,
+            other => panic!("unknown fromStatus in fixture: {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn v3_hot_risk_fixture_matches_rust_implementation() {
-        let fixture: RiskDecisionFixture =
-            load_fixture("contracts/fixtures/risk_decision_v1.json");
+        let fixture: RiskDecisionFixture = load_fixture("contracts/fixtures/risk_decision_v1.json");
         let mut mismatches = Vec::new();
 
         for case in fixture.cases {
@@ -2513,8 +2788,7 @@ mod tests {
 
     #[test]
     fn v3_reject_reason_fixture_matches_rust_tcp_reason_mapping() {
-        let fixture: RejectReasonFixture =
-            load_fixture("contracts/fixtures/reject_reason_v1.json");
+        let fixture: RejectReasonFixture = load_fixture("contracts/fixtures/reject_reason_v1.json");
         let mut mismatches = Vec::new();
 
         for case in fixture.reasons {
@@ -2534,6 +2808,153 @@ mod tests {
             mismatches.is_empty(),
             "reject reason fixture mismatches: {:?}",
             mismatches
+        );
+    }
+
+    #[test]
+    fn amend_fixture_matches_phase05_contract_baseline() {
+        let fixture: AmendDecisionFixture =
+            load_fixture("contracts/fixtures/amend_decision_v1.json");
+        assert!(
+            !fixture.cases.is_empty(),
+            "amend fixture must contain at least one case"
+        );
+
+        let mut reasons = HashSet::new();
+        let mut has_amend_requested = false;
+
+        for case in fixture.cases {
+            assert_eq!(case.scope, "amend_v1");
+            assert!(
+                [202, 409, 422].contains(&case.expected.http_status),
+                "unexpected http status: {}",
+                case.expected.http_status
+            );
+
+            if case.expected.allowed {
+                assert!(
+                    case.expected.reason.is_none(),
+                    "allowed case should not have reason"
+                );
+            } else {
+                assert!(
+                    case.expected.reason.is_some(),
+                    "rejected case should have reason"
+                );
+            }
+
+            if let Some(reason) = case.expected.reason {
+                reasons.insert(reason);
+            }
+            if case.expected.next_status == "AMEND_REQUESTED" {
+                has_amend_requested = true;
+            }
+        }
+
+        assert!(
+            has_amend_requested,
+            "fixture must include AMEND_REQUESTED transition"
+        );
+        assert!(
+            reasons.contains("ORDER_FINAL"),
+            "fixture must include ORDER_FINAL"
+        );
+        assert!(
+            reasons.contains("INVALID_QTY"),
+            "fixture must include INVALID_QTY"
+        );
+        assert!(
+            reasons.contains("INVALID_PRICE"),
+            "fixture must include INVALID_PRICE"
+        );
+    }
+
+    #[test]
+    fn tif_fixture_matches_phase05_contract_baseline() {
+        let fixture: TifPolicyFixture = load_fixture("contracts/fixtures/tif_policy_v1.json");
+        assert!(
+            !fixture.cases.is_empty(),
+            "tif fixture must contain at least one case"
+        );
+
+        let mut tifs = HashSet::new();
+        let mut reasons = HashSet::new();
+        for case in fixture.cases {
+            assert_eq!(case.scope, "time_in_force_v1");
+            tifs.insert(case.input.time_in_force);
+
+            if case.expected.allowed {
+                assert!(
+                    case.expected.reason.is_none(),
+                    "allowed case should not have reason"
+                );
+                assert!(
+                    case.expected.effective_time_in_force.is_some(),
+                    "allowed case should have effectiveTimeInForce"
+                );
+            } else {
+                assert!(
+                    case.expected.reason.is_some(),
+                    "rejected case should have reason"
+                );
+            }
+
+            if let Some(reason) = case.expected.reason {
+                reasons.insert(reason);
+            }
+        }
+
+        assert!(tifs.contains("IOC"), "fixture must include IOC");
+        assert!(tifs.contains("FOK"), "fixture must include FOK");
+        assert!(
+            reasons.contains("INVALID_PRICE"),
+            "fixture must include INVALID_PRICE scenario"
+        );
+    }
+
+    #[test]
+    fn position_cap_fixture_matches_phase05_contract_baseline() {
+        let fixture: PositionCapFixture = load_fixture("contracts/fixtures/position_cap_v1.json");
+        assert!(
+            !fixture.cases.is_empty(),
+            "position cap fixture must contain at least one case"
+        );
+
+        let mut reasons = HashSet::new();
+        for case in fixture.cases {
+            assert_eq!(case.scope, "position_cap_v1");
+            assert!(
+                [202, 422].contains(&case.expected.http_status),
+                "unexpected http status: {}",
+                case.expected.http_status
+            );
+            if case.expected.allowed {
+                assert!(
+                    case.expected.reason.is_none(),
+                    "allowed case should not have reason"
+                );
+            } else {
+                assert!(
+                    case.expected.reason.is_some(),
+                    "rejected case should have reason"
+                );
+            }
+            if let Some(reason) = case.expected.reason {
+                reasons.insert(reason);
+            }
+        }
+
+        assert!(
+            reasons.contains("POSITION_LIMIT_EXCEEDED"),
+            "fixture must include POSITION_LIMIT_EXCEEDED"
+        );
+        assert!(
+            reasons.contains("INVALID_QTY"),
+            "fixture must include INVALID_QTY"
+        );
+        assert!(
+            reasons.contains("INVALID_SIDE"),
+            "fixture must include INVALID_SIDE"
         );
     }
 
@@ -2674,6 +3095,453 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("rejected client lookup failed"));
         assert_eq!(rejected.status, "REJECTED");
+    }
+
+    #[tokio::test]
+    async fn amend_updates_active_order_to_amend_requested() {
+        let state = build_test_state();
+        let account_id = "4001";
+        let order_id = "ord_amend_1";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_amend_1"),
+            Some("idem_amend_1"),
+        );
+
+        let request = AmendRequest {
+            new_qty: 123,
+            new_price: 15100,
+            comment: Some("replace qty/price".into()),
+        };
+        let (status, Json(resp)) = handle_amend_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(request),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("amend request failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "AMEND_REQUESTED");
+        assert!(resp.reason.is_none());
+
+        let updated = state
+            .sharded_store
+            .find_by_id_with_account(order_id, account_id)
+            .expect("updated order");
+        assert_eq!(updated.status, OrderStatus::AmendRequested);
+        assert_eq!(updated.qty, 123);
+        assert_eq!(updated.price, Some(15100));
+    }
+
+    #[tokio::test]
+    async fn amend_handler_matches_amend_fixture_cases() {
+        let fixture: AmendDecisionFixture =
+            load_fixture("contracts/fixtures/amend_decision_v1.json");
+
+        for case in fixture.cases {
+            let state = build_test_state();
+            let account_id = "4101";
+            let order_id = format!("ord_amend_fixture_{}", case.id);
+            put_order(
+                &state,
+                &order_id,
+                account_id,
+                Some(&format!("cid_amend_fixture_{}", case.id)),
+                Some(&format!("idem_amend_fixture_{}", case.id)),
+            );
+            let from_status = fixture_order_status(&case.from_status);
+            if from_status != OrderStatus::Accepted {
+                let _ = state.sharded_store.update(&order_id, account_id, |prev| {
+                    let mut next = prev.clone();
+                    next.status = from_status;
+                    next
+                });
+            }
+
+            let req = AmendRequest {
+                new_qty: case.input.new_qty,
+                new_price: case.input.new_price,
+                comment: case.input.comment.clone(),
+            };
+            let (status, Json(resp)) = handle_amend_order(
+                State(state.clone()),
+                headers(account_id, None),
+                Path(order_id.clone()),
+                Json(req),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("amend fixture case failed: {}", case.id));
+
+            assert_eq!(
+                status.as_u16(),
+                case.expected.http_status,
+                "case {} http status mismatch",
+                case.id
+            );
+            if case.expected.allowed {
+                assert_eq!(resp.status, "AMEND_REQUESTED", "case {}", case.id);
+                assert!(resp.reason.is_none(), "case {}", case.id);
+            } else {
+                assert_eq!(resp.status, "REJECTED", "case {}", case.id);
+                assert_eq!(
+                    resp.reason.as_deref(),
+                    case.expected.reason.as_deref(),
+                    "case {} reason mismatch",
+                    case.id
+                );
+            }
+
+            let updated = state
+                .sharded_store
+                .find_by_id_with_account(&order_id, account_id)
+                .expect("updated order");
+            assert_eq!(
+                updated.status.as_str(),
+                case.expected.next_status,
+                "case {} next status mismatch",
+                case.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_handler_matches_amend_fixture_cases() {
+        let fixture: AmendDecisionFixture =
+            load_fixture("contracts/fixtures/amend_decision_v1.json");
+
+        for case in fixture.cases {
+            let state = build_test_state();
+            let account_id = "4102";
+            let order_id = format!("ord_replace_fixture_{}", case.id);
+            put_order(
+                &state,
+                &order_id,
+                account_id,
+                Some(&format!("cid_replace_fixture_{}", case.id)),
+                Some(&format!("idem_replace_fixture_{}", case.id)),
+            );
+            let from_status = fixture_order_status(&case.from_status);
+            if from_status != OrderStatus::Accepted {
+                let _ = state.sharded_store.update(&order_id, account_id, |prev| {
+                    let mut next = prev.clone();
+                    next.status = from_status;
+                    next
+                });
+            }
+
+            let req = AmendRequest {
+                new_qty: case.input.new_qty,
+                new_price: case.input.new_price,
+                comment: case.input.comment.clone(),
+            };
+            let (status, Json(resp)) = handle_replace_order(
+                State(state.clone()),
+                headers(account_id, None),
+                Path(order_id.clone()),
+                Json(req),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("replace fixture case failed: {}", case.id));
+
+            assert_eq!(
+                status.as_u16(),
+                case.expected.http_status,
+                "case {} http status mismatch",
+                case.id
+            );
+            if case.expected.allowed {
+                assert_eq!(resp.status, "AMEND_REQUESTED", "case {}", case.id);
+                assert!(resp.reason.is_none(), "case {}", case.id);
+            } else {
+                assert_eq!(resp.status, "REJECTED", "case {}", case.id);
+                assert_eq!(
+                    resp.reason.as_deref(),
+                    case.expected.reason.as_deref(),
+                    "case {} reason mismatch",
+                    case.id
+                );
+            }
+
+            let updated = state
+                .sharded_store
+                .find_by_id_with_account(&order_id, account_id)
+                .expect("updated order");
+            assert_eq!(
+                updated.status.as_str(),
+                case.expected.next_status,
+                "case {} next status mismatch",
+                case.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_alias_updates_active_order_to_amend_requested() {
+        let state = build_test_state();
+        let account_id = "4001";
+        let order_id = "ord_replace_1";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_replace_1"),
+            Some("idem_replace_1"),
+        );
+
+        let request = AmendRequest {
+            new_qty: 77,
+            new_price: 14900,
+            comment: Some("replace alias".into()),
+        };
+        let (status, Json(resp)) = handle_replace_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(request),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("replace request failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "AMEND_REQUESTED");
+
+        let updated = state
+            .sharded_store
+            .find_by_id_with_account(order_id, account_id)
+            .expect("updated order");
+        assert_eq!(updated.status, OrderStatus::AmendRequested);
+        assert_eq!(updated.qty, 77);
+        assert_eq!(updated.price, Some(14900));
+    }
+
+    #[tokio::test]
+    async fn cancel_updates_active_order_to_cancel_requested() {
+        let state = build_test_state();
+        let account_id = "4201";
+        let order_id = "ord_cancel_1";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_cancel_1"),
+            Some("idem_cancel_1"),
+        );
+
+        let (status, Json(resp)) = handle_cancel_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("cancel request failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "CANCEL_REQUESTED");
+        assert!(resp.reason.is_none());
+
+        let updated = state
+            .sharded_store
+            .find_by_id_with_account(order_id, account_id)
+            .expect("updated order");
+        assert_eq!(updated.status, OrderStatus::CancelRequested);
+    }
+
+    #[tokio::test]
+    async fn cancel_is_idempotent_for_cancel_requested_order() {
+        let state = build_test_state();
+        let account_id = "4202";
+        let order_id = "ord_cancel_2";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_cancel_2"),
+            Some("idem_cancel_2"),
+        );
+        let _ = state.sharded_store.update(order_id, account_id, |prev| {
+            let mut next = prev.clone();
+            next.status = OrderStatus::CancelRequested;
+            next
+        });
+
+        let (status, Json(resp)) = handle_cancel_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("cancel request failed"));
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "CANCEL_REQUESTED");
+        assert!(resp.reason.is_none());
+
+        let updated = state
+            .sharded_store
+            .find_by_id_with_account(order_id, account_id)
+            .expect("updated order");
+        assert_eq!(updated.status, OrderStatus::CancelRequested);
+    }
+
+    #[tokio::test]
+    async fn cancel_rejects_terminal_order_with_conflict() {
+        let state = build_test_state();
+        let account_id = "4203";
+        let order_id = "ord_cancel_3";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_cancel_3"),
+            Some("idem_cancel_3"),
+        );
+        let _ = state.sharded_store.update(order_id, account_id, |prev| {
+            let mut next = prev.clone();
+            next.status = OrderStatus::Filled;
+            next
+        });
+
+        let (status, Json(resp)) = handle_cancel_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("cancel request failed"));
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("ORDER_FINAL"));
+
+        let updated = state
+            .sharded_store
+            .find_by_id_with_account(order_id, account_id)
+            .expect("updated order");
+        assert_eq!(updated.status, OrderStatus::Filled);
+    }
+
+    #[tokio::test]
+    async fn amend_rejects_terminal_order_with_conflict() {
+        let state = build_test_state();
+        let account_id = "4002";
+        let order_id = "ord_amend_2";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_amend_2"),
+            Some("idem_amend_2"),
+        );
+        let _ = state.sharded_store.update(order_id, account_id, |prev| {
+            let mut next = prev.clone();
+            next.status = OrderStatus::Filled;
+            next
+        });
+
+        let request = AmendRequest {
+            new_qty: 200,
+            new_price: 15200,
+            comment: None,
+        };
+        let (status, Json(resp)) = handle_amend_order(
+            State(state),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(request),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("amend request failed"));
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("ORDER_FINAL"));
+    }
+
+    #[tokio::test]
+    async fn amend_rejects_cancel_requested_order_with_conflict() {
+        let state = build_test_state();
+        let account_id = "4004";
+        let order_id = "ord_amend_4";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_amend_4"),
+            Some("idem_amend_4"),
+        );
+        let _ = state.sharded_store.update(order_id, account_id, |prev| {
+            let mut next = prev.clone();
+            next.status = OrderStatus::CancelRequested;
+            next
+        });
+
+        let request = AmendRequest {
+            new_qty: 200,
+            new_price: 15200,
+            comment: None,
+        };
+        let (status, Json(resp)) = handle_amend_order(
+            State(state),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(request),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("amend request failed"));
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("ORDER_FINAL"));
+    }
+
+    #[tokio::test]
+    async fn amend_rejects_invalid_qty_and_price() {
+        let state = build_test_state();
+        let account_id = "4003";
+        let order_id = "ord_amend_3";
+        put_order(
+            &state,
+            order_id,
+            account_id,
+            Some("cid_amend_3"),
+            Some("idem_amend_3"),
+        );
+
+        let bad_qty = AmendRequest {
+            new_qty: 0,
+            new_price: 15200,
+            comment: None,
+        };
+        let (status1, Json(resp1)) = handle_amend_order(
+            State(state.clone()),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(bad_qty),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("amend bad qty request failed"));
+        assert_eq!(status1, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp1.reason.as_deref(), Some("INVALID_QTY"));
+
+        let bad_price = AmendRequest {
+            new_qty: 100,
+            new_price: 0,
+            comment: None,
+        };
+        let (status2, Json(resp2)) = handle_amend_order(
+            State(state),
+            headers(account_id, None),
+            Path(order_id.to_string()),
+            Json(bad_price),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("amend bad price request failed"));
+        assert_eq!(status2, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp2.reason.as_deref(), Some("INVALID_PRICE"));
     }
 
     #[tokio::test]

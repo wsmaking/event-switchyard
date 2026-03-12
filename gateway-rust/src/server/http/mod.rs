@@ -10,6 +10,7 @@
 //! - ユーザ向け（注文/通知）:
 //!   - /orders/{id}: 受理後の現在状態を取得（UI確認）。
 //!   - /orders/{id}/cancel: キャンセル要求を非同期で流す。
+//!   - /orders/{id}/replace: 注文数量/価格の置換要求を非同期で流す。
 //!   - /orders/{id}/stream: 注文単位のリアルタイム通知。
 //!   - /stream: アカウント全体のリアルタイム通知。
 //! - 運用/監査向け:
@@ -65,9 +66,10 @@ use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, han
 use metrics::{handle_health, handle_metrics};
 use orders::{
     V3_TCP_REQUEST_SIZE, authenticate_v3_tcp_token, decode_v3_tcp_request,
-    encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_cancel_order, handle_get_order,
-    handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3, handle_order,
-    handle_order_v2, handle_order_v3, process_order_v3_hot_path,
+    encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_amend_order, handle_cancel_order,
+    handle_get_order, handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3,
+    handle_order, handle_order_v2, handle_order_v3, handle_replace_order,
+    process_order_v3_hot_path,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -2819,6 +2821,10 @@ pub async fn run(
         )
         .route("/orders/{order_id}/cancel", post(handle_cancel_order))
         .route("/v2/orders/{order_id}/cancel", post(handle_cancel_order))
+        .route("/orders/{order_id}/replace", post(handle_replace_order))
+        .route("/v2/orders/{order_id}/replace", post(handle_replace_order))
+        .route("/orders/{order_id}/amend", post(handle_amend_order))
+        .route("/v2/orders/{order_id}/amend", post(handle_amend_order))
         .route("/orders/{order_id}/events", get(handle_order_events))
         .route("/accounts/{account_id}/events", get(handle_account_events))
         .route("/orders/{order_id}/stream", get(handle_order_stream))
@@ -3106,12 +3112,11 @@ impl V3DurableWorkerPressureConfig {
         if age_hard_inflight_cap_pct > age_soft_inflight_cap_pct {
             age_hard_inflight_cap_pct = age_soft_inflight_cap_pct;
         }
-        let fsync_soft_inflight_cap_pct =
-            std::env::var("V3_DURABLE_FSYNC_SOFT_INFLIGHT_CAP_PCT")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(default_fsync_soft_cap)
-                .clamp(1, 100);
+        let fsync_soft_inflight_cap_pct = std::env::var("V3_DURABLE_FSYNC_SOFT_INFLIGHT_CAP_PCT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default_fsync_soft_cap)
+            .clamp(1, 100);
         let mut fsync_hard_inflight_cap_pct =
             std::env::var("V3_DURABLE_FSYNC_HARD_INFLIGHT_CAP_PCT")
                 .ok()
@@ -4221,13 +4226,23 @@ async fn run_v3_loss_monitor(state: AppState) {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(state.v3_durable_admission_sustain_ticks.saturating_mul(2).max(1));
+            .unwrap_or(
+                state
+                    .v3_durable_admission_sustain_ticks
+                    .saturating_mul(2)
+                    .max(1),
+            );
     let fsync_only_hard_sustain_ticks =
         std::env::var("V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(state.v3_durable_admission_sustain_ticks.saturating_mul(2).max(1));
+            .unwrap_or(
+                state
+                    .v3_durable_admission_sustain_ticks
+                    .saturating_mul(2)
+                    .max(1),
+            );
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
@@ -4287,8 +4302,11 @@ async fn run_v3_loss_monitor(state: AppState) {
         let fsync_ewma_alpha_pct = state.v3_durable_fsync_ewma_alpha_pct;
         let fsync_p99_global_sample = state.v3_durable_wal_fsync_hist.snapshot().percentile(99.0);
         let fsync_p99_global_prev = state.v3_durable_fsync_p99_cached_us.load(Ordering::Relaxed);
-        let fsync_p99_global =
-            v3_ewma_u64(fsync_p99_global_prev, fsync_p99_global_sample, fsync_ewma_alpha_pct);
+        let fsync_p99_global = v3_ewma_u64(
+            fsync_p99_global_prev,
+            fsync_p99_global_sample,
+            fsync_ewma_alpha_pct,
+        );
         state
             .v3_durable_fsync_p99_cached_us
             .store(fsync_p99_global, Ordering::Relaxed);

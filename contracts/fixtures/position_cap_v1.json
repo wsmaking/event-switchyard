@@ -1,0 +1,91 @@
+{
+  "version": "v1",
+  "owner": "kotlin-rust-business-logic",
+  "cases": [
+    {
+      "id": "pos-buy-within-cap",
+      "scope": "position_cap_v1",
+      "input": {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": 20,
+        "currentPositionQty": 80,
+        "maxAbsPositionQty": 200
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "projectedPositionQty": 100
+      }
+    },
+    {
+      "id": "pos-buy-exceeds-cap",
+      "scope": "position_cap_v1",
+      "input": {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": 80,
+        "currentPositionQty": 150,
+        "maxAbsPositionQty": 200
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "POSITION_LIMIT_EXCEEDED",
+        "httpStatus": 422,
+        "projectedPositionQty": 230
+      }
+    },
+    {
+      "id": "pos-sell-reduces-position",
+      "scope": "position_cap_v1",
+      "input": {
+        "symbol": "AAPL",
+        "side": "SELL",
+        "qty": 40,
+        "currentPositionQty": 150,
+        "maxAbsPositionQty": 200
+      },
+      "expected": {
+        "allowed": true,
+        "reason": null,
+        "httpStatus": 202,
+        "projectedPositionQty": 110
+      }
+    },
+    {
+      "id": "pos-invalid-qty-zero",
+      "scope": "position_cap_v1",
+      "input": {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "qty": 0,
+        "currentPositionQty": 10,
+        "maxAbsPositionQty": 200
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_QTY",
+        "httpStatus": 422,
+        "projectedPositionQty": 10
+      }
+    },
+    {
+      "id": "pos-invalid-side",
+      "scope": "position_cap_v1",
+      "input": {
+        "symbol": "AAPL",
+        "side": "HOLD",
+        "qty": 10,
+        "currentPositionQty": 10,
+        "maxAbsPositionQty": 200
+      },
+      "expected": {
+        "allowed": false,
+        "reason": "INVALID_SIDE",
+        "httpStatus": 422,
+        "projectedPositionQty": 10
+      }
+    }
+  ]
+}

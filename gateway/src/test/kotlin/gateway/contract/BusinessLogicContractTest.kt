@@ -452,4 +452,162 @@ class BusinessLogicContractTest {
         assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
         assertEquals(9999, v3TcpReasonCodeOracle("UNKNOWN_REASON"))
     }
+
+    @Test
+    fun `amend decision contract fixture validates and covers core outcomes`() {
+        val schema = mapper.readTree(Files.readString(findPath("contracts/amend_decision_v1.schema.json")))
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/amend_decision_v1.json"))) as ObjectNode
+        val caseSchema = schema.path("properties").path("cases").path("items")
+        val inputSchema = caseSchema.path("properties").path("input")
+        val expectedSchema = caseSchema.path("properties").path("expected")
+
+        val errors = mutableListOf<String>()
+        errors += validateObjectBySchema(payload, schema)
+
+        val cases = payload.path("cases")
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            if (!caseNode.isObject) {
+                errors.add("cases[$i]:not_object")
+                continue
+            }
+            val caseObj = caseNode as ObjectNode
+            errors += validateObjectBySchema(caseObj, caseSchema).map { "cases[$i].$it" }
+
+            val inputNode = caseObj.path("input")
+            if (!inputNode.isObject) {
+                errors.add("cases[$i].input:not_object")
+            } else {
+                errors += validateObjectBySchema(inputNode as ObjectNode, inputSchema).map { "cases[$i].input.$it" }
+            }
+
+            val expectedNode = caseObj.path("expected")
+            if (!expectedNode.isObject) {
+                errors.add("cases[$i].expected:not_object")
+            } else {
+                errors +=
+                    validateObjectBySchema(expectedNode as ObjectNode, expectedSchema).map { "cases[$i].expected.$it" }
+            }
+        }
+
+        assertTrue(errors.isEmpty(), "errors=$errors")
+
+        val reasons =
+            (0 until cases.size())
+                .mapNotNull { idx ->
+                    val reasonNode = cases.get(idx).path("expected").path("reason")
+                    if (reasonNode.isNull || reasonNode.asText().isBlank()) null else reasonNode.asText()
+                }
+                .toSet()
+        assertTrue(
+            reasons.containsAll(setOf("ORDER_FINAL", "INVALID_QTY", "INVALID_PRICE")),
+            "covered reasons=$reasons"
+        )
+
+        val nextStatuses =
+            (0 until cases.size())
+                .map { idx -> cases.get(idx).path("expected").path("nextStatus").asText() }
+                .toSet()
+        assertTrue(
+            nextStatuses.contains("AMEND_REQUESTED"),
+            "next statuses should include AMEND_REQUESTED: $nextStatuses"
+        )
+    }
+
+    @Test
+    fun `tif policy fixture validates and includes IOC FOK`() {
+        val schema = mapper.readTree(Files.readString(findPath("contracts/tif_policy_v1.schema.json")))
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/tif_policy_v1.json"))) as ObjectNode
+        val caseSchema = schema.path("properties").path("cases").path("items")
+        val inputSchema = caseSchema.path("properties").path("input")
+        val expectedSchema = caseSchema.path("properties").path("expected")
+
+        val errors = mutableListOf<String>()
+        errors += validateObjectBySchema(payload, schema)
+
+        val cases = payload.path("cases")
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            if (!caseNode.isObject) {
+                errors.add("cases[$i]:not_object")
+                continue
+            }
+            val caseObj = caseNode as ObjectNode
+            errors += validateObjectBySchema(caseObj, caseSchema).map { "cases[$i].$it" }
+            val inputNode = caseObj.path("input")
+            if (!inputNode.isObject) {
+                errors.add("cases[$i].input:not_object")
+            } else {
+                errors += validateObjectBySchema(inputNode as ObjectNode, inputSchema).map { "cases[$i].input.$it" }
+            }
+            val expectedNode = caseObj.path("expected")
+            if (!expectedNode.isObject) {
+                errors.add("cases[$i].expected:not_object")
+            } else {
+                errors += validateObjectBySchema(expectedNode as ObjectNode, expectedSchema).map {
+                    "cases[$i].expected.$it"
+                }
+            }
+        }
+
+        assertTrue(errors.isEmpty(), "errors=$errors")
+
+        val tifs =
+            (0 until cases.size())
+                .map { idx -> cases.get(idx).path("input").path("timeInForce").asText() }
+                .toSet()
+        assertTrue(tifs.contains("IOC"), "timeInForce should include IOC: $tifs")
+        assertTrue(tifs.contains("FOK"), "timeInForce should include FOK: $tifs")
+    }
+
+    @Test
+    fun `position cap fixture validates and covers reject reasons`() {
+        val schema = mapper.readTree(Files.readString(findPath("contracts/position_cap_v1.schema.json")))
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/position_cap_v1.json"))) as ObjectNode
+        val caseSchema = schema.path("properties").path("cases").path("items")
+        val inputSchema = caseSchema.path("properties").path("input")
+        val expectedSchema = caseSchema.path("properties").path("expected")
+
+        val errors = mutableListOf<String>()
+        errors += validateObjectBySchema(payload, schema)
+
+        val cases = payload.path("cases")
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            if (!caseNode.isObject) {
+                errors.add("cases[$i]:not_object")
+                continue
+            }
+            val caseObj = caseNode as ObjectNode
+            errors += validateObjectBySchema(caseObj, caseSchema).map { "cases[$i].$it" }
+            val inputNode = caseObj.path("input")
+            if (!inputNode.isObject) {
+                errors.add("cases[$i].input:not_object")
+            } else {
+                errors += validateObjectBySchema(inputNode as ObjectNode, inputSchema).map { "cases[$i].input.$it" }
+            }
+            val expectedNode = caseObj.path("expected")
+            if (!expectedNode.isObject) {
+                errors.add("cases[$i].expected:not_object")
+            } else {
+                errors += validateObjectBySchema(expectedNode as ObjectNode, expectedSchema).map {
+                    "cases[$i].expected.$it"
+                }
+            }
+        }
+
+        assertTrue(errors.isEmpty(), "errors=$errors")
+
+        val reasons =
+            (0 until cases.size())
+                .mapNotNull { idx ->
+                    val reasonNode = cases.get(idx).path("expected").path("reason")
+                    if (reasonNode.isNull || reasonNode.asText().isBlank()) null else reasonNode.asText()
+                }
+                .toSet()
+        assertTrue(
+            reasons.containsAll(setOf("POSITION_LIMIT_EXCEEDED", "INVALID_QTY", "INVALID_SIDE")),
+            "covered reasons=$reasons"
+        )
+    }
 }

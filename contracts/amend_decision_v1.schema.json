@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Amend Decision Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "owner",
+    "cases"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": [
+        "v1"
+      ]
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope",
+          "fromStatus",
+          "input",
+          "expected"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "amend_v1"
+            ]
+          },
+          "fromStatus": {
+            "type": "string",
+            "enum": [
+              "ACCEPTED",
+              "SENT",
+              "CANCEL_REQUESTED",
+              "PARTIALLY_FILLED",
+              "FILLED",
+              "CANCELED",
+              "REJECTED"
+            ]
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "newQty",
+              "newPrice"
+            ],
+            "properties": {
+              "newQty": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "newPrice": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "comment": {
+                "type": "string"
+              }
+            }
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "allowed",
+              "reason",
+              "httpStatus",
+              "nextStatus"
+            ],
+            "properties": {
+              "allowed": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "ORDER_FINAL",
+                  "INVALID_QTY",
+                  "INVALID_PRICE"
+                ]
+              },
+              "httpStatus": {
+                "type": "integer",
+                "enum": [
+                  202,
+                  409,
+                  422
+                ]
+              },
+              "nextStatus": {
+                "type": "string",
+                "enum": [
+                  "ACCEPTED",
+                  "SENT",
+                  "CANCEL_REQUESTED",
+                  "PARTIALLY_FILLED",
+                  "AMEND_REQUESTED",
+                  "FILLED",
+                  "CANCELED",
+                  "REJECTED"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
