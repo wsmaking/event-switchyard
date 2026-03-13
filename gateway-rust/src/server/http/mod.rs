@@ -2918,6 +2918,7 @@ async fn handle_v3_tcp_connection(
                     Ok(principal) => {
                         let (status, body) = process_order_v3_hot_path(
                             &state,
+                            principal.account_id,
                             principal.session_id,
                             decoded.order_req,
                             t0,

@@ -6,7 +6,7 @@ import java.time.Instant
 
 enum class OrderSide { BUY, SELL }
 enum class OrderType { LIMIT, MARKET }
-enum class TimeInForce { GTC, GTD }
+enum class TimeInForce { GTC, GTD, IOC, FOK }
 
 data class CreateOrderRequest @JsonCreator constructor(
     @JsonProperty("symbol") val symbol: String,

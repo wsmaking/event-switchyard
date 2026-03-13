@@ -421,7 +421,43 @@ fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
     Some(key)
 }
 
-fn evaluate_v3_hot_risk(state: &AppState, req: &OrderRequest) -> Result<(), &'static str> {
+fn validate_order_request(req: &OrderRequest) -> Option<&'static str> {
+    if req.symbol.trim().is_empty() {
+        return Some("INVALID_SYMBOL");
+    }
+    if req.qty == 0 {
+        return Some("INVALID_QTY");
+    }
+    if req.order_type == crate::order::OrderType::Limit && req.price.unwrap_or(0) == 0 {
+        return Some("INVALID_PRICE");
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+struct PositionCapProjection {
+    symbol_key: [u8; 8],
+    delta_qty: i64,
+}
+
+fn projected_position_qty(
+    current_position_qty: i64,
+    delta_qty: i64,
+    max_abs_position_qty: u64,
+) -> Result<i64, &'static str> {
+    let projected = (current_position_qty as i128) + (delta_qty as i128);
+    let max_abs = max_abs_position_qty as i128;
+    if projected.abs() > max_abs {
+        return Err("POSITION_LIMIT_EXCEEDED");
+    }
+    i64::try_from(projected).map_err(|_| "POSITION_LIMIT_EXCEEDED")
+}
+
+fn evaluate_v3_hot_risk(
+    state: &AppState,
+    account_id: &str,
+    req: &OrderRequest,
+) -> Result<PositionCapProjection, &'static str> {
     let position_t0 = now_nanos();
     let side = req.side_byte();
     if side != 1 && side != 2 {
@@ -449,6 +485,21 @@ fn evaluate_v3_hot_risk(state: &AppState, req: &OrderRequest) -> Result<(), &'st
     if req.qty > max_qty {
         return Err("INVALID_QTY");
     }
+    let delta_qty = if side == 1 {
+        req.qty as i64
+    } else {
+        -(req.qty as i64)
+    };
+    let current_position_qty = state
+        .v3_account_symbol_position
+        .get(&(account_id.to_string(), symbol_key))
+        .map(|v| *v)
+        .unwrap_or(0);
+    projected_position_qty(
+        current_position_qty,
+        delta_qty,
+        state.v3_risk_max_abs_position_qty,
+    )?;
     let position_elapsed = now_nanos().saturating_sub(position_t0) / 1_000;
     state.v3_stage_risk_position_hist.record(position_elapsed);
 
@@ -472,7 +523,10 @@ fn evaluate_v3_hot_risk(state: &AppState, req: &OrderRequest) -> Result<(), &'st
     let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
     state.v3_stage_risk_limits_hist.record(limits_elapsed);
 
-    Ok(())
+    Ok(PositionCapProjection {
+        symbol_key,
+        delta_qty,
+    })
 }
 
 /// v3 注文受付（POST /v3/orders）
@@ -484,11 +538,13 @@ pub(super) async fn handle_order_v3(
 ) -> VolatileOrderResponseResult {
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
-    let (status, body) = process_order_v3_hot_path(&state, principal.session_id, req, t0);
+    let (status, body) =
+        process_order_v3_hot_path(&state, principal.account_id, principal.session_id, req, t0);
     Ok((status, Json(body)))
 }
 pub(super) fn process_order_v3_hot_path(
     state: &AppState,
+    account_id: String,
     session_id: String,
     req: OrderRequest,
     t0: u64,
@@ -537,18 +593,18 @@ pub(super) fn process_order_v3_hot_path(
 
     // risk段階: 最小の stateless チェックのみ実行し、共有ロックを避ける。
     let risk_t0 = now_nanos();
-    let risk_result = evaluate_v3_hot_risk(&state, &req);
+    let risk_result = evaluate_v3_hot_risk(&state, &account_id, &req);
     let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
     state.v3_stage_risk_hist.record(risk_elapsed);
 
-    match risk_result {
-        Ok(()) => {}
+    let position_projection = match risk_result {
+        Ok(projection) => projection,
         Err(reason) => {
             match reason {
                 "INVALID_QTY" | "INVALID_SIDE" | "INVALID_PRICE" => {
                     state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
                 }
-                "RISK_REJECT" => {
+                "RISK_REJECT" | "POSITION_LIMIT_EXCEEDED" => {
                     state.reject_risk.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
@@ -561,7 +617,7 @@ pub(super) fn process_order_v3_hot_path(
                 VolatileOrderResponse::rejected(&session_id, "REJECTED", reason),
             );
         }
-    }
+    };
 
     // durable経路の詰まりも入口判定へ反映する。
     let durable_lane_id = state.v3_durable_ingress.lane_for_shard(shard_id);
@@ -896,6 +952,13 @@ pub(super) fn process_order_v3_hot_path(
         Ok(()) => {
             let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            state
+                .v3_account_symbol_position
+                .entry((account_id, position_projection.symbol_key))
+                .and_modify(|v| {
+                    *v = v.saturating_add(position_projection.delta_qty);
+                })
+                .or_insert(position_projection.delta_qty);
             state.increment_v3_accepted_total(shard_id);
             let serialize_t0 = now_nanos();
             let body = VolatileOrderResponse::accepted(session_id, session_seq, received_at_ns);
@@ -1199,6 +1262,26 @@ async fn handle_order_with_contract(
         ));
     }
 
+    if let Some(reason) = validate_order_request(&req) {
+        match reason {
+            "INVALID_QTY" => {
+                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+            }
+            "INVALID_SYMBOL" => {
+                state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
+            }
+            "INVALID_PRICE" => {
+                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        record_ack(&state, t0);
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(OrderResponse::rejected(reason)),
+        ));
+    }
+
     // account単位レート制限。超過時は業務処理に入る前に429で返す。
     if let Some(ref rate_limiter) = state.rate_limiter {
         if !rate_limiter.try_acquire(&principal.account_id) {
@@ -1301,6 +1384,8 @@ async fn handle_order_with_contract(
                 "timeInForce": match snapshot.time_in_force {
                     crate::order::TimeInForce::Gtc => "GTC",
                     crate::order::TimeInForce::Gtd => "GTD",
+                    crate::order::TimeInForce::Ioc => "IOC",
+                    crate::order::TimeInForce::Fok => "FOK",
                 },
                 "expireAt": snapshot.expire_at,
                 "clientOrderId": snapshot.client_order_id.clone(),
@@ -2105,6 +2190,8 @@ impl From<OrderSnapshot> for OrderSnapshotResponse {
             time_in_force: match o.time_in_force {
                 crate::order::TimeInForce::Gtc => "GTC".into(),
                 crate::order::TimeInForce::Gtd => "GTD".into(),
+                crate::order::TimeInForce::Ioc => "IOC".into(),
+                crate::order::TimeInForce::Fok => "FOK".into(),
             },
             expire_at: o.expire_at,
             status: o.status.as_str().into(),
@@ -2655,6 +2742,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct TifPolicyCase {
+        id: String,
         scope: String,
         input: TifPolicyInput,
         expected: TifPolicyExpected,
@@ -2663,7 +2751,9 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct TifPolicyInput {
+        order_type: String,
         time_in_force: String,
+        price: u64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2671,6 +2761,7 @@ mod tests {
     struct TifPolicyExpected {
         allowed: bool,
         reason: Option<String>,
+        http_status: u16,
         effective_time_in_force: Option<String>,
     }
 
@@ -2682,8 +2773,20 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct PositionCapCase {
+        id: String,
         scope: String,
+        input: PositionCapInput,
         expected: PositionCapExpected,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PositionCapInput {
+        symbol: String,
+        side: String,
+        qty: u64,
+        current_position_qty: i64,
+        max_abs_position_qty: u64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2692,6 +2795,7 @@ mod tests {
         allowed: bool,
         reason: Option<String>,
         http_status: u16,
+        projected_position_qty: i64,
     }
 
     fn fixture_order_type(raw: &str) -> OrderType {
@@ -2699,6 +2803,24 @@ mod tests {
             "LIMIT" => OrderType::Limit,
             "MARKET" => OrderType::Market,
             other => panic!("unknown orderType in fixture: {other}"),
+        }
+    }
+
+    fn fixture_time_in_force(raw: &str) -> TimeInForce {
+        match raw {
+            "GTC" => TimeInForce::Gtc,
+            "GTD" => TimeInForce::Gtd,
+            "IOC" => TimeInForce::Ioc,
+            "FOK" => TimeInForce::Fok,
+            other => panic!("unknown timeInForce in fixture: {other}"),
+        }
+    }
+
+    fn fixture_projected_position_qty(side: &str, current_position_qty: i64, qty: u64) -> i64 {
+        match side {
+            "BUY" => current_position_qty.saturating_add(qty as i64),
+            "SELL" => current_position_qty.saturating_sub(qty as i64),
+            _ => current_position_qty,
         }
     }
 
@@ -2753,14 +2875,15 @@ mod tests {
                 client_order_id: None,
             };
 
-            let (allowed, reason, http_status) = match evaluate_v3_hot_risk(&state, &req) {
-                Ok(()) => (true, None, StatusCode::ACCEPTED.as_u16()),
-                Err(reason) => (
-                    false,
-                    Some(reason.to_string()),
-                    StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-                ),
-            };
+            let (allowed, reason, http_status) =
+                match evaluate_v3_hot_risk(&state, "fixture-risk", &req) {
+                    Ok(_) => (true, None, StatusCode::ACCEPTED.as_u16()),
+                    Err(reason) => (
+                        false,
+                        Some(reason.to_string()),
+                        StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                    ),
+                };
 
             if allowed != case.expected.allowed
                 || reason.as_ref() != case.expected.reason.as_ref()
@@ -2912,6 +3035,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tif_fixture_matches_order_ingress_behavior() {
+        let fixture: TifPolicyFixture = load_fixture("contracts/fixtures/tif_policy_v1.json");
+        for case in fixture.cases {
+            let state = build_test_state();
+            let account_id = "4301";
+            let idempotency_key = format!("idem_tif_{}", case.id);
+            let req = OrderRequest {
+                symbol: "AAPL".into(),
+                side: "BUY".into(),
+                order_type: fixture_order_type(&case.input.order_type),
+                qty: 100,
+                price: Some(case.input.price),
+                time_in_force: fixture_time_in_force(&case.input.time_in_force),
+                expire_at: None,
+                client_order_id: Some(format!("cid_tif_{}", case.id)),
+            };
+            let (status, Json(resp)) = handle_order(
+                State(state.clone()),
+                headers(account_id, Some(idempotency_key.as_str())),
+                Json(req),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("tif fixture case failed: {}", case.id));
+
+            assert_eq!(
+                status.as_u16(),
+                case.expected.http_status,
+                "case {} http status mismatch",
+                case.id
+            );
+
+            if case.expected.allowed {
+                assert_eq!(resp.status, "ACCEPTED", "case {}", case.id);
+                assert!(resp.reason.is_none(), "case {}", case.id);
+                let stored = state
+                    .sharded_store
+                    .find_by_id_with_account(&resp.order_id, account_id)
+                    .expect("stored order for allowed tif");
+                let expected_tif = case
+                    .expected
+                    .effective_time_in_force
+                    .as_deref()
+                    .expect("allowed tif must have effective value");
+                assert_eq!(
+                    stored.time_in_force,
+                    fixture_time_in_force(expected_tif),
+                    "case {} effective tif mismatch",
+                    case.id
+                );
+            } else {
+                assert_eq!(resp.status, "REJECTED", "case {}", case.id);
+                assert_eq!(
+                    resp.reason.as_deref(),
+                    case.expected.reason.as_deref(),
+                    "case {} reason mismatch",
+                    case.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn position_cap_fixture_matches_phase05_contract_baseline() {
         let fixture: PositionCapFixture = load_fixture("contracts/fixtures/position_cap_v1.json");
@@ -2955,6 +3140,88 @@ mod tests {
         assert!(
             reasons.contains("INVALID_SIDE"),
             "fixture must include INVALID_SIDE"
+        );
+    }
+
+    #[tokio::test]
+    async fn position_cap_fixture_matches_v3_hot_risk_oracle() {
+        let fixture: PositionCapFixture = load_fixture("contracts/fixtures/position_cap_v1.json");
+        let mut mismatches = Vec::new();
+
+        for case in fixture.cases {
+            let mut state = build_test_state();
+            state.v3_risk_max_abs_position_qty = case.input.max_abs_position_qty;
+
+            let symbol_key = parse_v3_symbol_key(&case.input.symbol).expect("valid symbol key");
+            state.v3_account_symbol_position.insert(
+                ("fixture-position".to_string(), symbol_key),
+                case.input.current_position_qty,
+            );
+
+            let req = OrderRequest {
+                symbol: case.input.symbol.clone(),
+                side: case.input.side.clone(),
+                order_type: OrderType::Limit,
+                qty: case.input.qty,
+                price: Some(15_000),
+                time_in_force: TimeInForce::Gtc,
+                expire_at: None,
+                client_order_id: None,
+            };
+
+            let (allowed, reason, http_status, projected_position_qty) =
+                match evaluate_v3_hot_risk(&state, "fixture-position", &req) {
+                    Ok(projection) => (
+                        true,
+                        None,
+                        StatusCode::ACCEPTED.as_u16(),
+                        case.input
+                            .current_position_qty
+                            .saturating_add(projection.delta_qty),
+                    ),
+                    Err(reason) => {
+                        let projected = if reason == "POSITION_LIMIT_EXCEEDED" {
+                            fixture_projected_position_qty(
+                                &case.input.side,
+                                case.input.current_position_qty,
+                                case.input.qty,
+                            )
+                        } else {
+                            case.input.current_position_qty
+                        };
+                        (
+                            false,
+                            Some(reason.to_string()),
+                            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                            projected,
+                        )
+                    }
+                };
+
+            if allowed != case.expected.allowed
+                || reason.as_ref() != case.expected.reason.as_ref()
+                || http_status != case.expected.http_status
+                || projected_position_qty != case.expected.projected_position_qty
+            {
+                mismatches.push(format!(
+                    "{} expected=({}, {:?}, {}, {}) actual=({}, {:?}, {}, {})",
+                    case.id,
+                    case.expected.allowed,
+                    case.expected.reason,
+                    case.expected.http_status,
+                    case.expected.projected_position_qty,
+                    allowed,
+                    reason,
+                    http_status,
+                    projected_position_qty
+                ));
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "position fixture mismatches: {:?}",
+            mismatches
         );
     }
 

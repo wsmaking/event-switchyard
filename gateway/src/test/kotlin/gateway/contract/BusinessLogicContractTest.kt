@@ -107,6 +107,20 @@ class BusinessLogicContractTest {
         val httpStatus: Int
     )
 
+    private data class TifPolicyDecision(
+        val allowed: Boolean,
+        val reason: String?,
+        val httpStatus: Int,
+        val effectiveTimeInForce: String?
+    )
+
+    private data class PositionCapDecision(
+        val allowed: Boolean,
+        val reason: String?,
+        val httpStatus: Int,
+        val projectedPositionQty: Long
+    )
+
     private fun isValidV3Symbol(raw: String): Boolean {
         val symbol = raw.trim()
         if (symbol.isBlank() || symbol.length > 8) return false
@@ -220,6 +234,48 @@ class BusinessLogicContractTest {
             "AUTH_INTERNAL" -> 204
             else -> 9999
         }
+    }
+
+    private fun kotlinTifPolicyOracle(input: JsonNode): TifPolicyDecision {
+        val orderType = input.path("orderType").asText().uppercase()
+        val tif = input.path("timeInForce").asText().uppercase()
+        val price = input.path("price").asLong()
+
+        if (orderType == "LIMIT" && price == 0L) {
+            return TifPolicyDecision(false, "INVALID_PRICE", 422, null)
+        }
+
+        val effective =
+            when (tif) {
+                "GTC", "GTD", "IOC", "FOK" -> tif
+                else -> return TifPolicyDecision(false, "INVALID_TIME_IN_FORCE", 422, null)
+            }
+
+        return TifPolicyDecision(true, null, 202, effective)
+    }
+
+    private fun kotlinPositionCapOracle(input: JsonNode): PositionCapDecision {
+        val side = input.path("side").asText().uppercase()
+        val qty = input.path("qty").asLong()
+        val current = input.path("currentPositionQty").asLong()
+        val maxAbs = input.path("maxAbsPositionQty").asLong()
+
+        if (qty == 0L) {
+            return PositionCapDecision(false, "INVALID_QTY", 422, current)
+        }
+
+        val delta =
+            when (side) {
+                "BUY" -> qty
+                "SELL" -> -qty
+                else -> return PositionCapDecision(false, "INVALID_SIDE", 422, current)
+            }
+
+        val projected = current + delta
+        if (kotlin.math.abs(projected) > maxAbs) {
+            return PositionCapDecision(false, "POSITION_LIMIT_EXCEEDED", 422, projected)
+        }
+        return PositionCapDecision(true, null, 202, projected)
     }
 
     @Test
@@ -561,6 +617,36 @@ class BusinessLogicContractTest {
     }
 
     @Test
+    fun `tif policy fixture matches kotlin policy oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/tif_policy_v1.json")))
+        val cases = payload.path("cases")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            val id = caseNode.path("id").asText("tif-$i")
+            val actual = kotlinTifPolicyOracle(caseNode.path("input"))
+            val expected = caseNode.path("expected")
+            val expectedReasonNode = expected.path("reason")
+            val expectedReason = if (expectedReasonNode.isNull) null else expectedReasonNode.asText()
+            val expectedAllowed = expected.path("allowed").asBoolean()
+            val expectedStatus = expected.path("httpStatus").asInt()
+            val expectedEffectiveNode = expected.path("effectiveTimeInForce")
+            val expectedEffective = if (expectedEffectiveNode.isNull) null else expectedEffectiveNode.asText()
+            if (
+                actual.allowed != expectedAllowed ||
+                    actual.reason != expectedReason ||
+                    actual.httpStatus != expectedStatus ||
+                    actual.effectiveTimeInForce != expectedEffective
+            ) {
+                mismatches.add(
+                    "$id expected=($expectedAllowed,$expectedReason,$expectedStatus,$expectedEffective) actual=(${actual.allowed},${actual.reason},${actual.httpStatus},${actual.effectiveTimeInForce})"
+                )
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
+    }
+
+    @Test
     fun `position cap fixture validates and covers reject reasons`() {
         val schema = mapper.readTree(Files.readString(findPath("contracts/position_cap_v1.schema.json")))
         val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/position_cap_v1.json"))) as ObjectNode
@@ -609,5 +695,34 @@ class BusinessLogicContractTest {
             reasons.containsAll(setOf("POSITION_LIMIT_EXCEEDED", "INVALID_QTY", "INVALID_SIDE")),
             "covered reasons=$reasons"
         )
+    }
+
+    @Test
+    fun `position cap fixture matches kotlin position cap oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/position_cap_v1.json")))
+        val cases = payload.path("cases")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            val id = caseNode.path("id").asText("pos-$i")
+            val actual = kotlinPositionCapOracle(caseNode.path("input"))
+            val expected = caseNode.path("expected")
+            val expectedReasonNode = expected.path("reason")
+            val expectedReason = if (expectedReasonNode.isNull) null else expectedReasonNode.asText()
+            val expectedAllowed = expected.path("allowed").asBoolean()
+            val expectedStatus = expected.path("httpStatus").asInt()
+            val expectedProjected = expected.path("projectedPositionQty").asLong()
+            if (
+                actual.allowed != expectedAllowed ||
+                    actual.reason != expectedReason ||
+                    actual.httpStatus != expectedStatus ||
+                    actual.projectedPositionQty != expectedProjected
+            ) {
+                mismatches.add(
+                    "$id expected=($expectedAllowed,$expectedReason,$expectedStatus,$expectedProjected) actual=(${actual.allowed},${actual.reason},${actual.httpStatus},${actual.projectedPositionQty})"
+                )
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
     }
 }

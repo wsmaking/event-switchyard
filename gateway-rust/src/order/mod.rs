@@ -19,6 +19,8 @@ pub enum OrderType {
 pub enum TimeInForce {
     Gtc,
     Gtd,
+    Ioc,
+    Fok,
 }
 
 impl Default for TimeInForce {
@@ -178,6 +180,31 @@ mod tests {
         let parsed: OrderRequest = serde_json::from_str(&raw).expect("deserialize");
         assert_eq!(parsed.symbol, "BTC");
         assert_eq!(parsed.qty, 1);
+    }
+
+    #[test]
+    fn order_request_accepts_ioc_and_fok() {
+        let ioc_raw = r#"{
+            "symbol":"AAPL",
+            "side":"BUY",
+            "type":"LIMIT",
+            "qty":100,
+            "price":15000,
+            "timeInForce":"IOC"
+        }"#;
+        let ioc: OrderRequest = serde_json::from_str(ioc_raw).expect("ioc deserialize");
+        assert_eq!(ioc.time_in_force, super::TimeInForce::Ioc);
+
+        let fok_raw = r#"{
+            "symbol":"AAPL",
+            "side":"BUY",
+            "type":"LIMIT",
+            "qty":100,
+            "price":15000,
+            "timeInForce":"FOK"
+        }"#;
+        let fok: OrderRequest = serde_json::from_str(fok_raw).expect("fok deserialize");
+        assert_eq!(fok.time_in_force, super::TimeInForce::Fok);
     }
 }
 
