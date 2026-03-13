@@ -114,6 +114,13 @@ class BusinessLogicContractTest {
         val effectiveTimeInForce: String?
     )
 
+    private data class PositionCapDecision(
+        val allowed: Boolean,
+        val reason: String?,
+        val httpStatus: Int,
+        val projectedPositionQty: Long
+    )
+
     private fun isValidV3Symbol(raw: String): Boolean {
         val symbol = raw.trim()
         if (symbol.isBlank() || symbol.length > 8) return false
@@ -245,6 +252,30 @@ class BusinessLogicContractTest {
             }
 
         return TifPolicyDecision(true, null, 202, effective)
+    }
+
+    private fun kotlinPositionCapOracle(input: JsonNode): PositionCapDecision {
+        val side = input.path("side").asText().uppercase()
+        val qty = input.path("qty").asLong()
+        val current = input.path("currentPositionQty").asLong()
+        val maxAbs = input.path("maxAbsPositionQty").asLong()
+
+        if (qty == 0L) {
+            return PositionCapDecision(false, "INVALID_QTY", 422, current)
+        }
+
+        val delta =
+            when (side) {
+                "BUY" -> qty
+                "SELL" -> -qty
+                else -> return PositionCapDecision(false, "INVALID_SIDE", 422, current)
+            }
+
+        val projected = current + delta
+        if (kotlin.math.abs(projected) > maxAbs) {
+            return PositionCapDecision(false, "POSITION_LIMIT_EXCEEDED", 422, projected)
+        }
+        return PositionCapDecision(true, null, 202, projected)
     }
 
     @Test
@@ -664,5 +695,34 @@ class BusinessLogicContractTest {
             reasons.containsAll(setOf("POSITION_LIMIT_EXCEEDED", "INVALID_QTY", "INVALID_SIDE")),
             "covered reasons=$reasons"
         )
+    }
+
+    @Test
+    fun `position cap fixture matches kotlin position cap oracle`() {
+        val payload = mapper.readTree(Files.readString(findPath("contracts/fixtures/position_cap_v1.json")))
+        val cases = payload.path("cases")
+        val mismatches = mutableListOf<String>()
+        for (i in 0 until cases.size()) {
+            val caseNode = cases.get(i)
+            val id = caseNode.path("id").asText("pos-$i")
+            val actual = kotlinPositionCapOracle(caseNode.path("input"))
+            val expected = caseNode.path("expected")
+            val expectedReasonNode = expected.path("reason")
+            val expectedReason = if (expectedReasonNode.isNull) null else expectedReasonNode.asText()
+            val expectedAllowed = expected.path("allowed").asBoolean()
+            val expectedStatus = expected.path("httpStatus").asInt()
+            val expectedProjected = expected.path("projectedPositionQty").asLong()
+            if (
+                actual.allowed != expectedAllowed ||
+                    actual.reason != expectedReason ||
+                    actual.httpStatus != expectedStatus ||
+                    actual.projectedPositionQty != expectedProjected
+            ) {
+                mismatches.add(
+                    "$id expected=($expectedAllowed,$expectedReason,$expectedStatus,$expectedProjected) actual=(${actual.allowed},${actual.reason},${actual.httpStatus},${actual.projectedPositionQty})"
+                )
+            }
+        }
+        assertTrue(mismatches.isEmpty(), "mismatches=$mismatches")
     }
 }
