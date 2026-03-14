@@ -77,16 +77,35 @@ use sse::{handle_account_stream, handle_order_stream};
 /// /v3/orders の single-writer に流す最小タスク。
 #[derive(Debug)]
 pub(super) struct V3OrderTask {
-    pub(super) session_id: String,
+    pub(super) session_id: Arc<str>,
+    pub(super) account_id: Arc<str>,
+    pub(super) position_symbol_key: [u8; 8],
+    pub(super) position_delta_qty: i64,
     pub(super) session_seq: u64,
     pub(super) attempt_seq: u64,
     pub(super) received_at_ns: u64,
     pub(super) shard_id: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct V3AccountSymbolKey {
+    pub(super) account_id: Arc<str>,
+    pub(super) symbol_key: [u8; 8],
+}
+
+impl V3AccountSymbolKey {
+    #[inline]
+    pub(super) fn new(account_id: Arc<str>, symbol_key: [u8; 8]) -> Self {
+        Self {
+            account_id,
+            symbol_key,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct V3DurableTask {
-    pub(super) session_id: String,
+    pub(super) session_id: Arc<str>,
     pub(super) session_seq: u64,
     pub(super) attempt_seq: u64,
     pub(super) received_at_ns: u64,
@@ -515,14 +534,14 @@ impl V3ConfirmStore {
     }
 
     pub(super) fn record_volatile(&self, task: &V3OrderTask, now_ns: u64) {
-        let lane = self.lane_for_session(&task.session_id);
+        let lane = self.lane_for_session(task.session_id.as_ref());
         self.record_volatile_in_lane(lane, task, now_ns);
     }
 
     pub(super) fn record_volatile_in_lane(&self, lane_id: usize, task: &V3OrderTask, now_ns: u64) {
         let lane = self.clamp_lane(lane_id);
         self.records[lane].insert(
-            (task.session_id.clone(), task.session_seq),
+            (task.session_id.to_string(), task.session_seq),
             V3ConfirmRecord {
                 status: V3ConfirmStatus::VolatileAccept,
                 reason: None,
@@ -534,11 +553,11 @@ impl V3ConfirmStore {
         );
         self.schedule_timeout(
             lane,
-            &task.session_id,
+            task.session_id.as_ref(),
             task.session_seq,
             task.received_at_ns,
         );
-        self.schedule_gc(lane, &task.session_id, task.session_seq, now_ns);
+        self.schedule_gc(lane, task.session_id.as_ref(), task.session_seq, now_ns);
     }
 
     pub(super) fn mark_durable_accepted(&self, session_id: &str, session_seq: u64, now_ns: u64) {
@@ -1437,9 +1456,13 @@ pub(super) struct AppState {
     pub(super) v3_risk_daily_notional_limit: u64,
     pub(super) v3_risk_max_abs_position_qty: u64,
     pub(super) v3_symbol_limits: Arc<HashMap<[u8; 8], SymbolLimits>>,
+    pub(super) v3_session_id_intern: Arc<dashmap::DashMap<String, Arc<str>>>,
+    pub(super) v3_account_id_intern: Arc<dashmap::DashMap<String, Arc<str>>>,
     pub(super) v3_account_daily_notional:
         Arc<dashmap::DashMap<String, Arc<gateway_core::AccountPosition>>>,
-    pub(super) v3_account_symbol_position: Arc<dashmap::DashMap<(String, [u8; 8]), i64>>,
+    pub(super) v3_account_symbol_position: Arc<dashmap::DashMap<V3AccountSymbolKey, i64>>,
+    pub(super) v3_hotpath_histogram_sample_rate: u64,
+    pub(super) v3_hotpath_sample_cursor: Arc<AtomicU64>,
     pub(super) v3_stage_parse_hist: Arc<LatencyHistogram>,
     pub(super) v3_stage_risk_hist: Arc<LatencyHistogram>,
     pub(super) v3_stage_risk_position_hist: Arc<LatencyHistogram>,
@@ -1576,6 +1599,71 @@ impl AppState {
             &self.v3_durable_rejected_total_per_lane,
             self.v3_durable_rejected_total.as_ref(),
         )
+    }
+
+    #[inline]
+    pub(super) fn intern_v3_session_id(&self, session_id: &str) -> Arc<str> {
+        if let Some(found) = self.v3_session_id_intern.get(session_id) {
+            return Arc::clone(found.value());
+        }
+        let interned = Arc::<str>::from(session_id);
+        match self.v3_session_id_intern.entry(session_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(found) => Arc::clone(found.get()),
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(Arc::clone(&interned));
+                interned
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn intern_v3_account_id(&self, account_id: &str) -> Arc<str> {
+        if let Some(found) = self.v3_account_id_intern.get(account_id) {
+            return Arc::clone(found.value());
+        }
+        let interned = Arc::<str>::from(account_id);
+        match self.v3_account_id_intern.entry(account_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(found) => Arc::clone(found.get()),
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(Arc::clone(&interned));
+                interned
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn v3_position_qty(&self, account_id: &Arc<str>, symbol_key: [u8; 8]) -> i64 {
+        let key = V3AccountSymbolKey::new(Arc::clone(account_id), symbol_key);
+        self.v3_account_symbol_position
+            .get(&key)
+            .map(|value| *value)
+            .unwrap_or(0)
+    }
+
+    #[inline]
+    pub(super) fn apply_v3_position_delta(
+        &self,
+        account_id: Arc<str>,
+        symbol_key: [u8; 8],
+        delta_qty: i64,
+    ) {
+        let key = V3AccountSymbolKey::new(account_id, symbol_key);
+        self.v3_account_symbol_position
+            .entry(key)
+            .and_modify(|value| {
+                *value = value.saturating_add(delta_qty);
+            })
+            .or_insert(delta_qty);
+    }
+
+    #[inline]
+    pub(super) fn v3_hotpath_sampled(&self) -> bool {
+        let rate = self.v3_hotpath_histogram_sample_rate.max(1);
+        if rate <= 1 {
+            return true;
+        }
+        let seq = self.v3_hotpath_sample_cursor.fetch_add(1, Ordering::Relaxed);
+        seq % rate == 0
     }
 
     #[inline]
@@ -2154,6 +2242,13 @@ pub async fn run(
         .and_then(|v| v.parse::<u64>().ok())
         .map(|v| v.clamp(1, 500))
         .unwrap_or(20);
+    let v3_hotpath_histogram_sample_rate = std::env::var("V3_HOTPATH_HISTOGRAM_SAMPLE_RATE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
+    let v3_dedicated_worker_runtime =
+        parse_bool_env("V3_DEDICATED_WORKER_RUNTIME").unwrap_or(true);
     let v3_tsc_clock = if v3_tsc_timing_enable {
         match RdtscpClock::detect() {
             Some(clock) => Some(Arc::new(clock)),
@@ -2953,8 +3048,12 @@ pub async fn run(
         v3_risk_daily_notional_limit,
         v3_risk_max_abs_position_qty,
         v3_symbol_limits,
+        v3_session_id_intern: Arc::new(dashmap::DashMap::new()),
+        v3_account_id_intern: Arc::new(dashmap::DashMap::new()),
         v3_account_daily_notional: Arc::new(dashmap::DashMap::new()),
         v3_account_symbol_position: Arc::new(dashmap::DashMap::new()),
+        v3_hotpath_histogram_sample_rate,
+        v3_hotpath_sample_cursor: Arc::new(AtomicU64::new(0)),
         v3_stage_parse_hist: Arc::new(LatencyHistogram::new()),
         v3_stage_risk_hist: Arc::new(LatencyHistogram::new()),
         v3_stage_risk_position_hist: Arc::new(LatencyHistogram::new()),
@@ -2971,6 +3070,8 @@ pub async fn run(
         tsc_enabled = v3_tsc_runtime_enabled.load(Ordering::Relaxed),
         tsc_hz = state.v3_tsc_hz,
         tsc_invariant = state.v3_tsc_invariant,
+        hotpath_histogram_sample_rate = state.v3_hotpath_histogram_sample_rate,
+        dedicated_worker_runtime = v3_dedicated_worker_runtime,
         "v3 worker topology tuning"
     );
 
@@ -2995,15 +3096,21 @@ pub async fn run(
     for (shard_id, v3_rx) in v3_rxs.into_iter().enumerate() {
         let writer_state = state.clone();
         let affinity_cpu = affinity_cpu_for_worker(&v3_shard_affinity_cpus, shard_id);
-        spawn_v3_runtime_thread(
-            format!("v3-shard-{shard_id}"),
-            affinity_cpu,
-            Arc::clone(&state.v3_thread_affinity_apply_success_total),
-            Arc::clone(&state.v3_thread_affinity_apply_failure_total),
-            async move {
+        if v3_dedicated_worker_runtime {
+            spawn_v3_runtime_thread(
+                format!("v3-shard-{shard_id}"),
+                affinity_cpu,
+                Arc::clone(&state.v3_thread_affinity_apply_success_total),
+                Arc::clone(&state.v3_thread_affinity_apply_failure_total),
+                async move {
+                    run_v3_single_writer(shard_id, v3_rx, writer_state).await;
+                },
+            );
+        } else {
+            tokio::spawn(async move {
                 run_v3_single_writer(shard_id, v3_rx, writer_state).await;
-            },
-        );
+            });
+        }
     }
     for (lane_id, v3_durable_rx) in v3_durable_rxs.into_iter().enumerate() {
         let durable_state = state.clone();
@@ -3012,12 +3119,27 @@ pub async fn run(
         let durable_batch_adaptive_cfg = v3_durable_worker_batch_adaptive_cfg;
         let durable_pressure_cfg = v3_durable_worker_pressure_cfg;
         let affinity_cpu = affinity_cpu_for_worker(&v3_durable_affinity_cpus, lane_id);
-        spawn_v3_runtime_thread(
-            format!("v3-durable-{lane_id}"),
-            affinity_cpu,
-            Arc::clone(&state.v3_thread_affinity_apply_success_total),
-            Arc::clone(&state.v3_thread_affinity_apply_failure_total),
-            async move {
+        if v3_dedicated_worker_runtime {
+            spawn_v3_runtime_thread(
+                format!("v3-durable-{lane_id}"),
+                affinity_cpu,
+                Arc::clone(&state.v3_thread_affinity_apply_success_total),
+                Arc::clone(&state.v3_thread_affinity_apply_failure_total),
+                async move {
+                    run_v3_durable_worker(
+                        lane_id,
+                        v3_durable_rx,
+                        durable_state,
+                        durable_batch_max,
+                        durable_batch_wait_us,
+                        durable_batch_adaptive_cfg,
+                        durable_pressure_cfg,
+                    )
+                    .await;
+                },
+            );
+        } else {
+            tokio::spawn(async move {
                 run_v3_durable_worker(
                     lane_id,
                     v3_durable_rx,
@@ -3028,8 +3150,8 @@ pub async fn run(
                     durable_pressure_cfg,
                 )
                 .await;
-            },
-        );
+            });
+        }
     }
 
     let loss_state = state.clone();
@@ -3066,7 +3188,7 @@ pub async fn run(
     if v3_tcp_enable && v3_tcp_port > 0 {
         let v3_tcp_state = state.clone();
         let affinity_cpu = v3_tcp_server_affinity_cpus.first().copied();
-        if affinity_cpu.is_some() {
+        if v3_dedicated_worker_runtime && affinity_cpu.is_some() {
             spawn_v3_runtime_thread(
                 "v3-tcp-ingress".to_string(),
                 affinity_cpu,
@@ -3079,6 +3201,11 @@ pub async fn run(
                 },
             );
         } else {
+            if !v3_dedicated_worker_runtime && affinity_cpu.is_some() {
+                tracing::warn!(
+                    "V3_TCP_SERVER_AFFINITY_CPUS is ignored when V3_DEDICATED_WORKER_RUNTIME=false"
+                );
+            }
             tokio::spawn(async move {
                 if let Err(err) = run_v3_tcp_server(v3_tcp_port, v3_tcp_state).await {
                     tracing::error!(error = %err, "v3 tcp server exited");
@@ -3782,6 +3909,11 @@ async fn resolve_audit_append_receipt(
 async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, state: AppState) {
     while let Some(task) = rx.recv().await {
         state.v3_ingress.on_processed_one(shard_id);
+        state.apply_v3_position_delta(
+            Arc::clone(&task.account_id),
+            task.position_symbol_key,
+            task.position_delta_qty,
+        );
         let confirm_lane_id = state.v3_durable_ingress.lane_for_shard(task.shard_id);
         state.v3_confirm_store.record_volatile_in_lane(
             confirm_lane_id,
@@ -3795,7 +3927,7 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
             Ok(()) => {}
             Err(TrySendError::Full(task)) => {
                 state.register_v3_loss_suspect(
-                    &task.session_id,
+                    task.session_id.as_ref(),
                     task.session_seq,
                     shard_id,
                     "DURABILITY_QUEUE_FULL",
@@ -3804,7 +3936,7 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
             }
             Err(TrySendError::Closed(task)) => {
                 state.register_v3_loss_suspect(
-                    &task.session_id,
+                    task.session_id.as_ref(),
                     task.session_seq,
                     shard_id,
                     "DURABILITY_QUEUE_CLOSED",
@@ -3973,11 +4105,11 @@ async fn run_v3_durable_worker(
         out.extend_from_slice(b"{\"type\":\"V3DurableAccepted\",\"at\":");
         push_u64_decimal(&mut out, event_at_ms);
         out.extend_from_slice(b",\"accountId\":");
-        push_json_string(&mut out, task.session_id.as_str());
+        push_json_string(&mut out, task.session_id.as_ref());
         out.extend_from_slice(b",\"orderId\":");
         out.push(b'"');
         out.extend_from_slice(b"v3/");
-        push_json_escaped_fragment(&mut out, task.session_id.as_str());
+        push_json_escaped_fragment(&mut out, task.session_id.as_ref());
         out.push(b'/');
         push_u64_decimal(&mut out, task.session_seq);
         out.push(b'"');
@@ -4013,19 +4145,19 @@ async fn run_v3_durable_worker(
             ..
         } = task;
         if outcome.durable_done_ns > 0 {
-            state.v3_confirm_store.mark_durable_accepted_in_lane_owned(
+            state.v3_confirm_store.mark_durable_accepted_in_lane(
                 lane_id,
-                session_id,
+                session_id.as_ref(),
                 session_seq,
                 now_ns,
             );
             state.increment_v3_durable_accepted_total(lane_id);
         } else {
-            state.v3_confirm_store.mark_durable_rejected_in_lane_owned(
+            state.v3_confirm_store.mark_durable_rejected_in_lane(
                 lane_id,
-                session_id,
+                session_id.as_ref(),
                 session_seq,
-                outcome.reject_reason.to_string(),
+                outcome.reject_reason,
                 now_ns,
             );
             state.increment_v3_durable_rejected_total(lane_id);
@@ -5381,12 +5513,16 @@ mod tests {
 
     fn test_task(
         session_id: &str,
+        account_id: &str,
         session_seq: u64,
         received_at_ns: u64,
         shard_id: usize,
     ) -> V3OrderTask {
         V3OrderTask {
-            session_id: session_id.to_string(),
+            session_id: Arc::<str>::from(session_id),
+            account_id: Arc::<str>::from(account_id),
+            position_symbol_key: FastPathEngine::symbol_to_bytes("AAPL"),
+            position_delta_qty: 1,
             session_seq,
             attempt_seq: session_seq,
             received_at_ns,
@@ -5407,7 +5543,7 @@ mod tests {
 
         for shard_id in 0..8 {
             let task = V3DurableTask {
-                session_id: format!("sess-{}", shard_id),
+                session_id: Arc::<str>::from(format!("sess-{}", shard_id)),
                 session_seq: shard_id as u64,
                 attempt_seq: shard_id as u64,
                 received_at_ns: 1_000_000,
@@ -5429,7 +5565,7 @@ mod tests {
         assert_eq!(store.lane_count_metric(), 4);
 
         for seq in 0..8 {
-            let task = test_task("sess-a", seq, 1_000_000, 0);
+            let task = test_task("sess-a", "acc-a", seq, 1_000_000, 0);
             store.record_volatile(&task, 1_000_000);
         }
         assert_eq!(store.total_size(), 8);
@@ -5441,7 +5577,13 @@ mod tests {
         let store = V3ConfirmStore::new(4, 500, 60_000);
         let far_future_ns = 10_000_000_000u64;
         for seq in 0..128 {
-            let task = test_task(&format!("sess-{}", seq), seq, far_future_ns, 0);
+            let task = test_task(
+                &format!("sess-{}", seq),
+                "acc-wheel",
+                seq,
+                far_future_ns,
+                0,
+            );
             store.record_volatile(&task, far_future_ns);
         }
         let pre_scan = store.collect_timed_out(1_000_000, 256);
@@ -5449,7 +5591,7 @@ mod tests {
         assert_eq!(pre_scan.scan_cost, 0);
 
         let due_received_ns = 2_000_000u64;
-        let due = test_task("sess-due", 1, due_received_ns, 2);
+        let due = test_task("sess-due", "acc-due", 1, due_received_ns, 2);
         store.record_volatile(&due, due_received_ns);
         let at_deadline = due_received_ns.saturating_add(store.timeout_ns);
         let scan = store.collect_timed_out(at_deadline, 16);
@@ -5464,7 +5606,7 @@ mod tests {
     fn v3_confirm_store_ttl_gc_removes_expired_records() {
         let store = V3ConfirmStore::new(1, 500, 2);
         let received_ns = 10_000_000u64;
-        let task = test_task("sess-gc", 7, received_ns, 0);
+        let task = test_task("sess-gc", "acc-gc", 7, received_ns, 0);
         store.record_volatile(&task, received_ns);
         let durable_ns = received_ns.saturating_add(1_000_000);
         store.mark_durable_accepted("sess-gc", 7, durable_ns);

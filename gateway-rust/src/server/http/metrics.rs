@@ -315,6 +315,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_tsc_fallback_total = state.v3_tsc_fallback_total.load(Ordering::Relaxed);
     let v3_tsc_cross_core_total = state.v3_tsc_cross_core_total.load(Ordering::Relaxed);
     let v3_tsc_mismatch_total = state.v3_tsc_mismatch_total.load(Ordering::Relaxed);
+    let v3_hotpath_histogram_sample_rate = state.v3_hotpath_histogram_sample_rate;
     let v3_thread_affinity_apply_success_total = state
         .v3_thread_affinity_apply_success_total
         .load(Ordering::Relaxed);
@@ -1073,6 +1074,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_tsc_mismatch_threshold_pct Allowed divergence percentage between rdtscp and now_nanos samples\n\
          # TYPE gateway_v3_tsc_mismatch_threshold_pct gauge\n\
          gateway_v3_tsc_mismatch_threshold_pct {}\n\
+         # HELP gateway_v3_hotpath_histogram_sample_rate Sampling interval used by v3 hotpath histograms (1 means no sampling)\n\
+         # TYPE gateway_v3_hotpath_histogram_sample_rate gauge\n\
+         gateway_v3_hotpath_histogram_sample_rate {}\n\
          # HELP gateway_v3_tsc_fallback_total Total samples that fell back to now_nanos instead of rdtscp\n\
          # TYPE gateway_v3_tsc_fallback_total counter\n\
          gateway_v3_tsc_fallback_total {}\n\
@@ -1088,6 +1092,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_tsc_invariant,
         v3_tsc_hz,
         v3_tsc_mismatch_threshold_pct,
+        v3_hotpath_histogram_sample_rate,
         v3_tsc_fallback_total,
         v3_tsc_cross_core_total,
         v3_tsc_mismatch_total,

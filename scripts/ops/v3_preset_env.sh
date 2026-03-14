@@ -53,6 +53,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
       v3_preset_default V3_TSC_TIMING_ENABLE true
       v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 20
+      v3_preset_default V3_DEDICATED_WORKER_RUNTIME true
+      v3_preset_default V3_HOTPATH_HISTOGRAM_SAMPLE_RATE 1
       v3_preset_default LOAD_WORKERS 192
       v3_preset_default LOAD_ACCOUNTS 24
       v3_preset_default LOAD_QUEUE_CAPACITY 200000
@@ -85,6 +87,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
       v3_preset_default V3_TSC_TIMING_ENABLE false
       v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 20
+      v3_preset_default V3_DEDICATED_WORKER_RUNTIME true
+      v3_preset_default V3_HOTPATH_HISTOGRAM_SAMPLE_RATE 1
       v3_preset_default LOAD_WORKERS 512
       v3_preset_default LOAD_ACCOUNTS 64
       v3_preset_default LOAD_QUEUE_CAPACITY 1500000
@@ -110,6 +114,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
       v3_preset_default V3_TSC_TIMING_ENABLE true
       v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 30
+      v3_preset_default V3_DEDICATED_WORKER_RUNTIME true
+      v3_preset_default V3_HOTPATH_HISTOGRAM_SAMPLE_RATE 1
       v3_preset_default ENABLE_TIMESERIES 1
       v3_preset_default TIMESERIES_INTERVAL_MS 500
       v3_preset_default LOAD_WORKERS 192
@@ -126,6 +132,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_AUTH_STICKY_CONTEXT false
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER false
       v3_preset_default V3_TSC_TIMING_ENABLE false
+      v3_preset_default V3_DEDICATED_WORKER_RUNTIME true
+      v3_preset_default V3_HOTPATH_HISTOGRAM_SAMPLE_RATE 1
       ;;
     "" )
       return 0

@@ -17,7 +17,7 @@ use axum::{
     http::{StatusCode, header::AUTHORIZATION},
 };
 use gateway_core::{RdtscpStamp, now_nanos};
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{sync::{Arc, atomic::Ordering}, time::Duration};
 
 use super::{AppState, AuthErrorResponse, V3OrderTask};
 
@@ -98,7 +98,10 @@ fn record_ack(state: &AppState, start_ns: u64) {
     state.ack_hist.record(elapsed_us);
 }
 
-fn record_v3_ack(state: &AppState, start_ns: u64) {
+fn record_v3_ack(state: &AppState, start_ns: u64, sampled: bool) {
+    if !sampled {
+        return;
+    }
     let elapsed_ns = now_nanos().saturating_sub(start_ns);
     let elapsed_us = elapsed_ns / 1_000;
     state.ack_hist.record(elapsed_us);
@@ -106,7 +109,15 @@ fn record_v3_ack(state: &AppState, start_ns: u64) {
     state.v3_live_ack_hist_ns.record(elapsed_ns);
 }
 
-fn record_v3_ack_accepted(state: &AppState, start_ns: u64, start_tsc: Option<RdtscpStamp>) {
+fn record_v3_ack_accepted(
+    state: &AppState,
+    start_ns: u64,
+    start_tsc: Option<RdtscpStamp>,
+    sampled: bool,
+) {
+    if !sampled {
+        return;
+    }
     let elapsed_ns = now_nanos().saturating_sub(start_ns);
     let elapsed_us = elapsed_ns / 1_000;
     state.v3_live_ack_accepted_hist.record(elapsed_us);
@@ -466,8 +477,9 @@ fn projected_position_qty(
 
 fn evaluate_v3_hot_risk(
     state: &AppState,
-    account_id: &str,
+    account_id: &Arc<str>,
     req: &OrderRequest,
+    sampled: bool,
 ) -> Result<PositionCapProjection, &'static str> {
     let position_t0 = now_nanos();
     let side = req.side_byte();
@@ -501,18 +513,16 @@ fn evaluate_v3_hot_risk(
     } else {
         -(req.qty as i64)
     };
-    let current_position_qty = state
-        .v3_account_symbol_position
-        .get(&(account_id.to_string(), symbol_key))
-        .map(|v| *v)
-        .unwrap_or(0);
+    let current_position_qty = state.v3_position_qty(account_id, symbol_key);
     projected_position_qty(
         current_position_qty,
         delta_qty,
         state.v3_risk_max_abs_position_qty,
     )?;
-    let position_elapsed = now_nanos().saturating_sub(position_t0) / 1_000;
-    state.v3_stage_risk_position_hist.record(position_elapsed);
+    if sampled {
+        let position_elapsed = now_nanos().saturating_sub(position_t0) / 1_000;
+        state.v3_stage_risk_position_hist.record(position_elapsed);
+    }
 
     let price = req.price.unwrap_or(0);
     if req.order_type == crate::order::OrderType::Limit && price == 0 {
@@ -522,17 +532,23 @@ fn evaluate_v3_hot_risk(
     let margin_t0 = now_nanos();
     let notional = (req.qty as u128).saturating_mul(price as u128);
     let max_notional = state.v3_risk_max_notional.min(symbol_limits.max_notional);
-    let margin_elapsed = now_nanos().saturating_sub(margin_t0) / 1_000;
-    state.v3_stage_risk_margin_hist.record(margin_elapsed);
+    if sampled {
+        let margin_elapsed = now_nanos().saturating_sub(margin_t0) / 1_000;
+        state.v3_stage_risk_margin_hist.record(margin_elapsed);
+    }
 
     let limits_t0 = now_nanos();
     if notional > max_notional as u128 {
-        let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
-        state.v3_stage_risk_limits_hist.record(limits_elapsed);
+        if sampled {
+            let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
+            state.v3_stage_risk_limits_hist.record(limits_elapsed);
+        }
         return Err("RISK_REJECT");
     }
-    let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
-    state.v3_stage_risk_limits_hist.record(limits_elapsed);
+    if sampled {
+        let limits_elapsed = now_nanos().saturating_sub(limits_t0) / 1_000;
+        state.v3_stage_risk_limits_hist.record(limits_elapsed);
+    }
 
     Ok(PositionCapProjection {
         symbol_key,
@@ -561,6 +577,7 @@ pub(super) fn process_order_v3_hot_path(
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
     let t0_tsc = state.capture_v3_tsc_stamp();
+    let hotpath_sampled = state.v3_hotpath_sampled();
     let ingress = &state.v3_ingress;
     let shard_id = ingress.shard_for_session(session_id);
     if ingress.maybe_recover_shard(shard_id, t0) {
@@ -575,12 +592,14 @@ pub(super) fn process_order_v3_hot_path(
     let qty = req.qty;
     let price = req.price.unwrap_or(0);
     let _ = (symbol, qty, price);
-    let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
-    state.v3_stage_parse_hist.record(parse_elapsed);
+    if hotpath_sampled {
+        let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
+        state.v3_stage_parse_hist.record(parse_elapsed);
+    }
 
     if ingress.is_global_killed() {
         state.increment_v3_rejected_killed_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             VolatileOrderResponse::rejected(session_id, "KILLED", "V3_GLOBAL_KILLED"),
@@ -588,7 +607,7 @@ pub(super) fn process_order_v3_hot_path(
     }
     if ingress.is_session_killed(session_id) {
         state.increment_v3_rejected_killed_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SESSION_KILLED"),
@@ -596,18 +615,23 @@ pub(super) fn process_order_v3_hot_path(
     }
     if ingress.is_shard_killed(shard_id) {
         state.increment_v3_rejected_killed_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SHARD_KILLED"),
         );
     }
 
+    let session_id_ref = state.intern_v3_session_id(session_id);
+    let account_id_ref = state.intern_v3_account_id(account_id);
+
     // risk段階: 最小の stateless チェックのみ実行し、共有ロックを避ける。
     let risk_t0 = now_nanos();
-    let risk_result = evaluate_v3_hot_risk(&state, &account_id, &req);
-    let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
-    state.v3_stage_risk_hist.record(risk_elapsed);
+    let risk_result = evaluate_v3_hot_risk(&state, &account_id_ref, &req, hotpath_sampled);
+    if hotpath_sampled {
+        let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
+        state.v3_stage_risk_hist.record(risk_elapsed);
+    }
 
     let position_projection = match risk_result {
         Ok(projection) => projection,
@@ -623,7 +647,7 @@ pub(super) fn process_order_v3_hot_path(
                     state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            record_v3_ack(&state, t0);
+            record_v3_ack(&state, t0, hotpath_sampled);
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 VolatileOrderResponse::rejected(session_id, "REJECTED", reason),
@@ -739,7 +763,7 @@ pub(super) fn process_order_v3_hot_path(
                 {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
-                record_v3_ack(&state, t0);
+                record_v3_ack(&state, t0, hotpath_sampled);
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     VolatileOrderResponse::rejected(
@@ -777,7 +801,7 @@ pub(super) fn process_order_v3_hot_path(
                 {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
-                record_v3_ack(&state, t0);
+                record_v3_ack(&state, t0, hotpath_sampled);
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     VolatileOrderResponse::rejected(
@@ -809,7 +833,7 @@ pub(super) fn process_order_v3_hot_path(
             state
                 .v3_durable_backpressure_hard_total
                 .fetch_add(1, Ordering::Relaxed);
-            record_v3_ack(&state, t0);
+            record_v3_ack(&state, t0, hotpath_sampled);
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 VolatileOrderResponse::rejected(
@@ -833,7 +857,7 @@ pub(super) fn process_order_v3_hot_path(
                     {
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
-                    record_v3_ack(&state, t0);
+                    record_v3_ack(&state, t0, hotpath_sampled);
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,
                         VolatileOrderResponse::rejected(
@@ -854,7 +878,7 @@ pub(super) fn process_order_v3_hot_path(
                     {
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
-                    record_v3_ack(&state, t0);
+                    record_v3_ack(&state, t0, hotpath_sampled);
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
                         VolatileOrderResponse::rejected(
@@ -882,7 +906,7 @@ pub(super) fn process_order_v3_hot_path(
                 {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
-                record_v3_ack(&state, t0);
+                record_v3_ack(&state, t0, hotpath_sampled);
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     VolatileOrderResponse::rejected(
@@ -907,7 +931,7 @@ pub(super) fn process_order_v3_hot_path(
                 {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
-                record_v3_ack(&state, t0);
+                record_v3_ack(&state, t0, hotpath_sampled);
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     VolatileOrderResponse::rejected(
@@ -927,7 +951,7 @@ pub(super) fn process_order_v3_hot_path(
             state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
         }
         state.increment_v3_rejected_killed_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_KILLED"),
@@ -935,7 +959,7 @@ pub(super) fn process_order_v3_hot_path(
     }
     if queue_pct >= state.v3_hard_reject_pct {
         state.increment_v3_rejected_hard_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_HARD"),
@@ -944,7 +968,7 @@ pub(super) fn process_order_v3_hot_path(
 
     if queue_pct >= state.v3_soft_reject_pct {
         state.increment_v3_rejected_soft_total(shard_id);
-        record_v3_ack(&state, t0);
+        record_v3_ack(&state, t0, hotpath_sampled);
         return (
             StatusCode::TOO_MANY_REQUESTS,
             VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_SOFT"),
@@ -954,7 +978,10 @@ pub(super) fn process_order_v3_hot_path(
     let session_seq = ingress.next_seq(session_id);
     let received_at_ns = now_nanos();
     let task = V3OrderTask {
-        session_id: session_id.to_string(),
+        session_id: Arc::clone(&session_id_ref),
+        account_id: Arc::clone(&account_id_ref),
+        position_symbol_key: position_projection.symbol_key,
+        position_delta_qty: position_projection.delta_qty,
         session_seq,
         attempt_seq: session_seq,
         received_at_ns,
@@ -964,60 +991,64 @@ pub(super) fn process_order_v3_hot_path(
     let enqueue_t0 = now_nanos();
     match ingress.try_enqueue(shard_id, task) {
         Ok(()) => {
-            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
-            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
-            state
-                .v3_account_symbol_position
-                .entry((account_id.to_string(), position_projection.symbol_key))
-                .and_modify(|v| {
-                    *v = v.saturating_add(position_projection.delta_qty);
-                })
-                .or_insert(position_projection.delta_qty);
+            if hotpath_sampled {
+                let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+                state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            }
             state.increment_v3_accepted_total(shard_id);
             let serialize_t0 = now_nanos();
-            let body =
-                VolatileOrderResponse::accepted(session_id.to_string(), session_seq, received_at_ns);
-            let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
-            state.v3_stage_serialize_hist.record(serialize_elapsed);
-            record_v3_ack(&state, t0);
-            record_v3_ack_accepted(&state, t0, t0_tsc);
+            let body = VolatileOrderResponse::accepted(
+                session_id_ref.to_string(),
+                session_seq,
+                received_at_ns,
+            );
+            if hotpath_sampled {
+                let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
+                state.v3_stage_serialize_hist.record(serialize_elapsed);
+            }
+            record_v3_ack(&state, t0, hotpath_sampled);
+            record_v3_ack_accepted(&state, t0, t0_tsc, hotpath_sampled);
             (StatusCode::ACCEPTED, body)
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(task)) => {
-            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
-            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            if hotpath_sampled {
+                let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+                state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            }
             if ingress.kill_shard_due_to_watermark(shard_id, now_nanos()) {
                 state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
             }
             state.register_v3_loss_suspect(
-                &task.session_id,
+                task.session_id.as_ref(),
                 task.session_seq,
                 task.shard_id,
                 "V3_INGRESS_QUEUE_FULL",
                 now_nanos(),
             );
             state.increment_v3_rejected_killed_total(shard_id);
-            record_v3_ack(&state, t0);
+            record_v3_ack(&state, t0, hotpath_sampled);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_FULL"),
             )
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
-            let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
-            state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            if hotpath_sampled {
+                let enqueue_elapsed = now_nanos().saturating_sub(enqueue_t0) / 1_000;
+                state.v3_stage_enqueue_hist.record(enqueue_elapsed);
+            }
             if ingress.kill_shard_due_to_watermark(shard_id, now_nanos()) {
                 state.v3_shard_killed_total.fetch_add(1, Ordering::Relaxed);
             }
             state.register_v3_loss_suspect(
-                &task.session_id,
+                task.session_id.as_ref(),
                 task.session_seq,
                 task.shard_id,
                 "V3_INGRESS_CLOSED",
                 now_nanos(),
             );
             state.increment_v3_rejected_killed_total(shard_id);
-            record_v3_ack(&state, t0);
+            record_v3_ack(&state, t0, hotpath_sampled);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 VolatileOrderResponse::rejected(session_id, "KILLED", "V3_INGRESS_CLOSED"),
@@ -2496,8 +2527,12 @@ mod tests {
             v3_risk_daily_notional_limit: 1_000_000_000_000,
             v3_risk_max_abs_position_qty: 100_000_000,
             v3_symbol_limits: Arc::new(HashMap::new()),
+            v3_session_id_intern: Arc::new(dashmap::DashMap::new()),
+            v3_account_id_intern: Arc::new(dashmap::DashMap::new()),
             v3_account_daily_notional: Arc::new(dashmap::DashMap::new()),
             v3_account_symbol_position: Arc::new(dashmap::DashMap::new()),
+            v3_hotpath_histogram_sample_rate: 1,
+            v3_hotpath_sample_cursor: Arc::new(AtomicU64::new(0)),
             v3_stage_parse_hist: Arc::new(LatencyHistogram::new()),
             v3_stage_risk_hist: Arc::new(LatencyHistogram::new()),
             v3_stage_risk_position_hist: Arc::new(LatencyHistogram::new()),
@@ -2906,9 +2941,10 @@ mod tests {
                 expire_at: None,
                 client_order_id: None,
             };
+            let account_ref = state.intern_v3_account_id("fixture-risk");
 
             let (allowed, reason, http_status) =
-                match evaluate_v3_hot_risk(&state, "fixture-risk", &req) {
+                match evaluate_v3_hot_risk(&state, &account_ref, &req, true) {
                     Ok(_) => (true, None, StatusCode::ACCEPTED.as_u16()),
                     Err(reason) => (
                         false,
@@ -3185,8 +3221,9 @@ mod tests {
             state.v3_risk_max_abs_position_qty = case.input.max_abs_position_qty;
 
             let symbol_key = parse_v3_symbol_key(&case.input.symbol).expect("valid symbol key");
+            let account_ref = state.intern_v3_account_id("fixture-position");
             state.v3_account_symbol_position.insert(
-                ("fixture-position".to_string(), symbol_key),
+                super::super::V3AccountSymbolKey::new(Arc::clone(&account_ref), symbol_key),
                 case.input.current_position_qty,
             );
 
@@ -3202,7 +3239,7 @@ mod tests {
             };
 
             let (allowed, reason, http_status, projected_position_qty) =
-                match evaluate_v3_hot_risk(&state, "fixture-position", &req) {
+                match evaluate_v3_hot_risk(&state, &account_ref, &req, true) {
                     Ok(projection) => (
                         true,
                         None,
