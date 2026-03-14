@@ -44,6 +44,9 @@ README.md
 !docs/ops/ai_rag_agent_triage_design.md
 !docs/ops/ai_impl_structure_map.md
 
+# --- Secrets
+.env
+
 # --- Docker
 *.local.yaml
 

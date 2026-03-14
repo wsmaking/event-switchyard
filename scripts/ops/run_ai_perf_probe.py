@@ -48,11 +48,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--perf-events", default=DEFAULT_PERF_EVENTS)
     parser.add_argument("--powermetrics-sample-ms", type=int, default=1000)
-    parser.add_argument("--provider", default="mock", choices=("mock", "openai"))
+    parser.add_argument(
+        "--provider",
+        default="mock",
+        choices=("mock", "openai", "anthropic", "claude"),
+    )
     parser.add_argument(
         "--model",
         default=None,
-        help="Default: mock-triage-v1 (mock) / gpt-5-nano (openai)",
+        help="Default: mock-triage-v1 (mock) / gpt-5-nano (openai) / claude-sonnet-4-20250514 (claude)",
     )
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
     parser.add_argument("--top-k", type=int, default=5)
@@ -364,6 +368,8 @@ def build_command(raw_command: list[str]) -> list[str]:
 def default_model(provider: str) -> str:
     if provider == "openai":
         return "gpt-5-nano"
+    if provider in ("anthropic", "claude"):
+        return "claude-sonnet-4-20250514"
     return "mock-triage-v1"
 
 

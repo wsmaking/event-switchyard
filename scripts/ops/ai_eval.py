@@ -154,7 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-dir", default="var/ai_eval")
     parser.add_argument("--results-dir", default="var/results")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
-    parser.add_argument("--provider", default="mock", choices=("mock", "openai"))
+    parser.add_argument("--provider", default="mock", choices=("mock", "openai", "anthropic", "claude"))
     parser.add_argument("--model", default=None)
     parser.add_argument("--out", default="var/ai_eval/results.json")
     return parser.parse_args()
@@ -165,7 +165,14 @@ def main() -> int:
     eval_dir = Path(args.eval_dir)
     results_dir = Path(args.results_dir)
     db_path = Path(args.db_path)
-    model = args.model or ("gpt-5-nano" if args.provider == "openai" else "mock-triage-v1")
+    if args.model:
+        model = args.model
+    elif args.provider == "openai":
+        model = "gpt-5-nano"
+    elif args.provider in ("anthropic", "claude"):
+        model = "claude-sonnet-4-20250514"
+    else:
+        model = "mock-triage-v1"
 
     cases = load_cases(eval_dir)
     if not cases:

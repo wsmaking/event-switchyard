@@ -16,11 +16,13 @@ from ai_model_adapter import (
     create_model_adapter,
 )
 from ai_tools import (
+    build_causal_signals,
     compare_recent_runs,
     dedupe_evidence,
     detect_violations,
     load_perf_profile,
     load_run_inputs,
+    load_timeseries_samples,
     build_retrieval_queries,
     retrieve_evidence,
 )
@@ -52,9 +54,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--results-dir", default="var/results")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
-    parser.add_argument("--provider", default="mock", choices=("mock", "openai"))
+    parser.add_argument("--provider", default="mock", choices=("mock", "openai", "anthropic", "claude"))
     parser.add_argument("--model", default=None,
-                        help="Model name (default: mock-triage-v1 or gpt-5-nano)")
+                        help="Model name (default: mock-triage-v1 / gpt-5-nano / claude-sonnet-4-20250514)")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--recent-window", type=int, default=5)
     parser.add_argument("--out", default=None)
@@ -65,6 +67,8 @@ def parse_args() -> argparse.Namespace:
 def _default_model(provider: str) -> str:
     if provider == "openai":
         return "gpt-5-nano"
+    if provider in ("anthropic", "claude"):
+        return "claude-sonnet-4-20250514"
     return "mock-triage-v1"
 
 
@@ -83,6 +87,8 @@ def run_agent_with_llm(
     # --- Detect ---
     summary, metrics = load_run_inputs(results_dir, run_name)
     perf_profile = load_perf_profile(results_dir, run_name)
+    timeseries_samples = load_timeseries_samples(results_dir, run_name, summary_data=summary)
+    causal_signals = build_causal_signals(summary, metrics, perf_profile, timeseries_samples)
     violations = detect_violations(summary)
     recent = compare_recent_runs(results_dir, TREND_METRICS, limit=recent_window)
 
@@ -122,6 +128,7 @@ def run_agent_with_llm(
             "summary": summary,
             "metrics": metrics,
             "perf_profile": perf_profile,
+            "causal_signals": causal_signals,
             "evidence": [c.to_dict() for c in evidence],
             "queries": all_queries,
             "recent_runs": recent,
@@ -171,6 +178,7 @@ def run_agent_with_llm(
             "evidence": [c.to_dict() for c in dedupe_evidence(all_evidence, limit=12)],
         },
         "perf_profile": perf_profile,
+        "causal_signals": causal_signals,
         "recent_runs": recent,
         "analysis": analysis.to_dict(),
     }
@@ -181,8 +189,10 @@ def run_deterministic(
     results_dir: Path,
 ) -> dict[str, Any]:
     """Deterministic fallback: SLO violation list + fixed metric recommendations."""
-    summary, _ = load_run_inputs(results_dir, run_name)
+    summary, metrics = load_run_inputs(results_dir, run_name)
     perf_profile = load_perf_profile(results_dir, run_name)
+    timeseries_samples = load_timeseries_samples(results_dir, run_name, summary_data=summary)
+    causal_signals = build_causal_signals(summary, metrics, perf_profile, timeseries_samples)
     violations = detect_violations(summary)
     return {
         "run_name": run_name,
@@ -192,6 +202,7 @@ def run_deterministic(
         "mode": "deterministic-fallback",
         "violations": [v.to_dict() for v in violations],
         "perf_profile": perf_profile,
+        "causal_signals": causal_signals,
         "analysis": {
             "analysis_text": "LLM unavailable. Deterministic SLO violation report only.",
             "recommended_metrics": [

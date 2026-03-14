@@ -35,6 +35,11 @@ def _unique(items: list[str]) -> list[str]:
     return list(dict.fromkeys([x for x in items if x]))
 
 
+def _paid_llm_enabled() -> bool:
+    raw = os.environ.get("AI_LLM_NETWORK_ENABLED", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 class MockModelAdapter(ModelAdapter):
     def __init__(self, model: str = "mock-triage-v1") -> None:
         self.model = model
@@ -43,6 +48,12 @@ class MockModelAdapter(ModelAdapter):
         violations = context.get("violations", [])
         evidence = context.get("evidence", [])
         perf_profile = context.get("perf_profile") or {}
+        causal_signals = context.get("causal_signals") or {}
+        durable_hint = (
+            (causal_signals.get("durable_backpressure_hypothesis") or {}).get("verdict_hint")
+            if isinstance(causal_signals, dict)
+            else None
+        )
 
         recommended: list[str] = []
         hypotheses: list[dict[str, Any]] = []
@@ -75,20 +86,54 @@ class MockModelAdapter(ModelAdapter):
                     ]
                 next_actions.append("stage別p99を直近5runで比較する")
             elif name == "accepted_rate":
-                hypotheses.append(
-                    {
-                        "text": "受理率低下。durable/backpressure起因のsoft/hard reject増加の可能性。",
-                        "confidence": 0.72,
-                    }
-                )
-                recommended += [
-                    "gateway_v3_accepted_rate",
-                    "gateway_v3_rejected_soft_total",
-                    "gateway_v3_rejected_hard_total",
-                    "gateway_v3_durable_queue_utilization_pct_max",
-                    "gateway_v3_durable_backlog_growth_per_sec",
-                ]
-                next_actions.append("rejected種別とdurable queue指標を突き合わせる")
+                if durable_hint == "likely":
+                    hypotheses.append(
+                        {
+                            "text": "受理率低下。durable backpressureが主因で、soft/hard rejectを増やした可能性が高い。",
+                            "confidence": 0.80,
+                        }
+                    )
+                    recommended += [
+                        "gateway_v3_accepted_rate",
+                        "gateway_v3_rejected_soft_total",
+                        "gateway_v3_rejected_hard_total",
+                        "gateway_v3_durable_queue_utilization_pct_max",
+                        "gateway_v3_durable_backlog_growth_per_sec",
+                        "gateway_v3_durable_backpressure_soft_total",
+                        "gateway_v3_durable_backpressure_hard_total",
+                    ]
+                    next_actions.append("queue圧力→backpressure→受理率低下の順序をrun内ログで検証する")
+                elif durable_hint == "unlikely":
+                    hypotheses.append(
+                        {
+                            "text": "受理率低下は観測されるが、durable backpressure主因の根拠は弱い。供給不足または別要因を優先確認すべき。",
+                            "confidence": 0.60,
+                        }
+                    )
+                    recommended += [
+                        "gateway_v3_accepted_rate",
+                        "gateway_v3_rejected_soft_total",
+                        "gateway_v3_rejected_hard_total",
+                        "offered_rps_ratio",
+                        "client_dropped_offer_ratio",
+                        "client_unsent_total",
+                    ]
+                    next_actions.append("供給不足（offered/drop/unsent）と他reject要因を先に切り分ける")
+                else:
+                    hypotheses.append(
+                        {
+                            "text": "受理率低下。durable/backpressure起因のsoft/hard reject増加の可能性。",
+                            "confidence": 0.72,
+                        }
+                    )
+                    recommended += [
+                        "gateway_v3_accepted_rate",
+                        "gateway_v3_rejected_soft_total",
+                        "gateway_v3_rejected_hard_total",
+                        "gateway_v3_durable_queue_utilization_pct_max",
+                        "gateway_v3_durable_backlog_growth_per_sec",
+                    ]
+                    next_actions.append("rejected種別とdurable queue指標を突き合わせる")
             elif name == "completed_rps":
                 hypotheses.append(
                     {
@@ -189,7 +234,9 @@ def _build_user_prompt(context: dict[str, Any]) -> str:
     evidence = context.get("evidence", [])
     recent = context.get("recent_runs", [])
     summary = context.get("summary", {})
+    metrics = context.get("metrics", {})
     perf_profile = context.get("perf_profile") or {}
+    causal_signals = context.get("causal_signals") or {}
 
     def counter_value(counters: dict[str, Any], key: str) -> Any:
         if key in counters:
@@ -221,6 +268,55 @@ def _build_user_prompt(context: dict[str, Any]) -> str:
         val = summary.get(key)
         if val is not None:
             parts.append(f"- {key}={val}")
+
+    if isinstance(metrics, dict) and metrics:
+        parts.append("\n## Current Metrics Snapshot (root-cause signals)")
+        for key in (
+            "gateway_v3_durable_queue_depth",
+            "gateway_v3_durable_queue_capacity",
+            "gateway_v3_durable_queue_utilization_pct",
+            "gateway_v3_durable_queue_utilization_pct_max",
+            "gateway_v3_durable_backlog_growth_per_sec",
+            "gateway_v3_durable_queue_full_total",
+            "gateway_v3_durable_queue_closed_total",
+            "gateway_v3_durable_backpressure_soft_total",
+            "gateway_v3_durable_backpressure_hard_total",
+            "gateway_v3_rejected_soft_total",
+            "gateway_v3_rejected_hard_total",
+            "gateway_v3_rejected_killed_total",
+            "gateway_v3_loss_suspect_total",
+            "gateway_v3_accepted_rate",
+        ):
+            val = metrics.get(key)
+            if val is not None:
+                parts.append(f"- {key}={val}")
+
+    if isinstance(causal_signals, dict) and causal_signals:
+        parts.append("\n## Root-Cause Determination Signals")
+        for key in ("accepted_rate_target", "duration_sec"):
+            val = causal_signals.get(key)
+            if val is not None:
+                parts.append(f"- {key}={val}")
+        for block_key in (
+            "supply",
+            "outcome",
+            "durable_pressure",
+            "rates_estimated",
+            "durable_backpressure_hypothesis",
+            "timeline",
+            "perf",
+        ):
+            block = causal_signals.get(block_key)
+            if not isinstance(block, dict):
+                continue
+            parts.append(f"- {block_key}:")
+            for k, v in block.items():
+                if isinstance(v, dict):
+                    parts.append(f"  - {k}:")
+                    for kk, vv in v.items():
+                        parts.append(f"    - {kk}={vv}")
+                else:
+                    parts.append(f"  - {k}={v}")
 
     parts.append("\n## RAG Evidence")
     for i, e in enumerate(evidence[:8]):
@@ -342,6 +438,61 @@ class OpenAIAdapter(ModelAdapter):
         )
 
 
+class AnthropicAdapter(ModelAdapter):
+    def __init__(self, model: str = "claude-sonnet-4-20250514") -> None:
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError("anthropic package is required: pip install anthropic")
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+        self.client = anthropic.Anthropic(api_key=api_key)
+        self.model = model
+
+    def generate_analysis(self, context: dict[str, Any]) -> AnalysisResult:
+        user_prompt = _build_user_prompt(context)
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=2048,
+            system=SYSTEM_PROMPT + "\n\nYou MUST respond with only a JSON object, no other text.",
+            messages=[
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+        )
+        raw = response.content[0].text if response.content else "{}"
+        # Strip markdown code fences if present.
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            stripped = "\n".join(lines).strip()
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            logger.warning("LLM returned non-JSON: %s", raw[:200])
+            return AnalysisResult(
+                analysis_text=f"LLM parse error: {raw[:200]}",
+                recommended_metrics=[],
+                hypotheses=[],
+                next_actions=[],
+                confidence=0.0,
+                citations=[],
+                unknowns=["retry with simpler context"],
+            )
+
+        return AnalysisResult(
+            analysis_text=data.get("analysis_text", ""),
+            recommended_metrics=data.get("recommended_metrics", []),
+            hypotheses=data.get("hypotheses", []),
+            next_actions=data.get("next_actions", []),
+            confidence=float(data.get("confidence", 0.0)),
+            citations=data.get("citations", []),
+            unknowns=data.get("unknowns", []),
+        )
+
+
 class LLMError(Exception):
     """Raised when LLM call fails."""
 
@@ -351,8 +502,17 @@ class AgentError(Exception):
 
 
 def create_model_adapter(provider: str, model: str) -> ModelAdapter:
+    if provider in ("openai", "anthropic", "claude") and not _paid_llm_enabled():
+        raise ValueError(
+            "paid LLM providers are disabled (AI_LLM_NETWORK_ENABLED=0). "
+            "Use --provider mock, or set AI_LLM_NETWORK_ENABLED=1 to re-enable."
+        )
     if provider == "mock":
         return MockModelAdapter(model=model)
     if provider == "openai":
         return OpenAIAdapter(model=model)
-    raise ValueError(f"unsupported provider: {provider} (available: mock, openai)")
+    if provider in ("anthropic", "claude"):
+        return AnthropicAdapter(model=model)
+    raise ValueError(
+        f"unsupported provider: {provider} (available: mock, openai, anthropic, claude)"
+    )
