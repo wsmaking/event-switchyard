@@ -57,8 +57,8 @@ const V3_TCP_TYPE_OFFSET: usize = 275;
 const V3_TCP_QTY_OFFSET: usize = 280;
 const V3_TCP_PRICE_OFFSET: usize = 288;
 
-pub(super) struct V3TcpDecodedRequest {
-    pub(super) jwt_token: String,
+pub(super) struct V3TcpDecodedRequest<'a> {
+    pub(super) jwt_token: &'a str,
     pub(super) order_req: OrderRequest,
 }
 
@@ -99,14 +99,18 @@ fn record_ack(state: &AppState, start_ns: u64) {
 }
 
 fn record_v3_ack(state: &AppState, start_ns: u64) {
-    let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
+    let elapsed_ns = now_nanos().saturating_sub(start_ns);
+    let elapsed_us = elapsed_ns / 1_000;
     state.ack_hist.record(elapsed_us);
     state.v3_live_ack_hist.record(elapsed_us);
+    state.v3_live_ack_hist_ns.record(elapsed_ns);
 }
 
 fn record_v3_ack_accepted(state: &AppState, start_ns: u64) {
-    let elapsed_us = now_nanos().saturating_sub(start_ns) / 1_000;
+    let elapsed_ns = now_nanos().saturating_sub(start_ns);
+    let elapsed_us = elapsed_ns / 1_000;
     state.v3_live_ack_accepted_hist.record(elapsed_us);
+    state.v3_live_ack_accepted_hist_ns.record(elapsed_ns);
 }
 
 #[inline]
@@ -539,18 +543,18 @@ pub(super) async fn handle_order_v3(
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
     let (status, body) =
-        process_order_v3_hot_path(&state, principal.account_id, principal.session_id, req, t0);
+        process_order_v3_hot_path(&state, &principal.account_id, &principal.session_id, req, t0);
     Ok((status, Json(body)))
 }
 pub(super) fn process_order_v3_hot_path(
     state: &AppState,
-    account_id: String,
-    session_id: String,
+    account_id: &str,
+    session_id: &str,
     req: OrderRequest,
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
     let ingress = &state.v3_ingress;
-    let shard_id = ingress.shard_for_session(&session_id);
+    let shard_id = ingress.shard_for_session(session_id);
     if ingress.maybe_recover_shard(shard_id, t0) {
         state
             .v3_kill_recovered_total
@@ -571,15 +575,15 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_GLOBAL_KILLED"),
+            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_GLOBAL_KILLED"),
         );
     }
-    if ingress.is_session_killed(&session_id) {
+    if ingress.is_session_killed(session_id) {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_SESSION_KILLED"),
+            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SESSION_KILLED"),
         );
     }
     if ingress.is_shard_killed(shard_id) {
@@ -587,7 +591,7 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_SHARD_KILLED"),
+            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SHARD_KILLED"),
         );
     }
 
@@ -614,127 +618,129 @@ pub(super) fn process_order_v3_hot_path(
             record_v3_ack(&state, t0);
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                VolatileOrderResponse::rejected(&session_id, "REJECTED", reason),
+                VolatileOrderResponse::rejected(session_id, "REJECTED", reason),
             );
         }
     };
 
     // durable経路の詰まりも入口判定へ反映する。
-    let durable_lane_id = state.v3_durable_ingress.lane_for_shard(shard_id);
-    let durable_queue_pct = state
-        .v3_durable_ingress
-        .lane_utilization_pct(durable_lane_id);
-    let durable_backlog_growth_per_sec = state
-        .v3_durable_backlog_growth_per_sec_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed))
-        .unwrap_or_else(|| {
-            state
-                .v3_durable_backlog_growth_per_sec
-                .load(Ordering::Relaxed)
-        });
-    let durable_backlog_signal_enabled =
-        durable_queue_pct >= state.v3_durable_backlog_signal_min_queue_pct;
-    let durable_backlog_hard_failsafe = state
-        .v3_durable_backlog_hard_reject_per_sec
-        .saturating_mul(4);
-    let confirm_oldest_age_us_global = state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
-    let confirm_oldest_age_us_lane = state
-        .v3_confirm_oldest_inflight_us_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed))
-        .unwrap_or(confirm_oldest_age_us_global);
-    // Admission is lane-scoped: one degraded lane should not globally throttle healthy lanes.
-    let confirm_oldest_age_us = confirm_oldest_age_us_lane;
-    let (confirm_soft_age_us, confirm_hard_age_us) =
-        state.v3_durable_confirm_reject_ages_for_lane(durable_lane_id);
-    let lane_level = state
-        .v3_durable_admission_level_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed))
-        .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
-    let lane_inflight_now = state
-        .v3_durable_receipt_inflight_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed))
-        .unwrap_or_else(|| state.v3_durable_receipt_inflight.load(Ordering::Relaxed));
-    let lane_inflight_pct = if state.v3_durable_worker_max_inflight_receipts > 0 {
-        (lane_inflight_now as f64 * 100.0) / (state.v3_durable_worker_max_inflight_receipts as f64)
-    } else {
-        0.0
-    };
-    let guard_queue_signal = state.v3_durable_confirm_guard_min_queue_pct > 0.0
-        && durable_queue_pct >= state.v3_durable_confirm_guard_min_queue_pct;
-    let guard_inflight_signal = state.v3_durable_confirm_guard_min_inflight_pct > 0
-        && lane_inflight_pct >= state.v3_durable_confirm_guard_min_inflight_pct as f64;
-    let guard_backlog_signal = state.v3_durable_confirm_guard_min_backlog_per_sec > 0
-        && durable_backlog_growth_per_sec >= state.v3_durable_confirm_guard_min_backlog_per_sec;
-    let guard_secondary_signal =
-        lane_level > 0 || guard_queue_signal || guard_inflight_signal || guard_backlog_signal;
-    let guard_secondary_enabled =
-        !state.v3_durable_confirm_guard_secondary_required || guard_secondary_signal;
-    let hard_guard_armed = state
-        .v3_durable_confirm_guard_hard_armed_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed) > 0)
-        .unwrap_or(true);
-    let soft_guard_armed = state
-        .v3_durable_confirm_guard_soft_armed_per_lane
-        .get(durable_lane_id)
-        .map(|v| v.load(Ordering::Relaxed) > 0)
-        .unwrap_or(true);
-    let mut confirm_soft_guard_age_us = confirm_soft_age_us;
-    let mut confirm_hard_guard_age_us = confirm_hard_age_us;
-    if lane_level == 0 {
-        confirm_soft_guard_age_us = apply_confirm_guard_slack(
-            confirm_soft_guard_age_us,
-            state.v3_durable_confirm_guard_soft_slack_pct,
-        );
-        confirm_hard_guard_age_us = apply_confirm_guard_slack(
-            confirm_hard_guard_age_us,
-            state.v3_durable_confirm_guard_hard_slack_pct,
-        );
-    }
-    if confirm_soft_guard_age_us > 0
-        && confirm_hard_guard_age_us > 0
-        && confirm_hard_guard_age_us <= confirm_soft_guard_age_us
-    {
-        confirm_hard_guard_age_us = confirm_soft_guard_age_us.saturating_add(1);
-    }
-    let hard_guard_admission_enabled =
-        !(state.v3_durable_confirm_guard_hard_requires_admission && lane_level == 0);
-    let soft_guard_admission_enabled =
-        !(state.v3_durable_confirm_guard_soft_requires_admission && lane_level == 0);
-    let hard_guard_enabled =
-        hard_guard_admission_enabled && guard_secondary_enabled && hard_guard_armed;
-    let soft_guard_enabled =
-        soft_guard_admission_enabled && guard_secondary_enabled && soft_guard_armed;
-    if confirm_hard_guard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_guard_age_us {
-        if hard_guard_enabled {
-            state.increment_v3_rejected_hard_total(shard_id);
-            state
-                .v3_durable_confirm_age_hard_reject_total
-                .fetch_add(1, Ordering::Relaxed);
-            state
-                .v3_durable_backpressure_hard_total
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(counter) = state
-                .v3_durable_backpressure_hard_total_per_lane
-                .get(durable_lane_id)
-            {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            record_v3_ack(&state, t0);
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(
-                    &session_id,
-                    "REJECTED",
-                    "V3_DURABLE_CONFIRM_AGE_HARD",
-                ),
-            );
+    if state.v3_durable_ack_path_guard_enabled {
+        let durable_lane_id = state.v3_durable_ingress.lane_for_shard(shard_id);
+        let durable_queue_pct = state
+            .v3_durable_ingress
+            .lane_utilization_pct(durable_lane_id);
+        let durable_backlog_growth_per_sec = state
+            .v3_durable_backlog_growth_per_sec_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or_else(|| {
+                state
+                    .v3_durable_backlog_growth_per_sec
+                    .load(Ordering::Relaxed)
+            });
+        let durable_backlog_signal_enabled =
+            durable_queue_pct >= state.v3_durable_backlog_signal_min_queue_pct;
+        let durable_backlog_hard_failsafe = state
+            .v3_durable_backlog_hard_reject_per_sec
+            .saturating_mul(4);
+        let confirm_oldest_age_us_global =
+            state.v3_confirm_oldest_inflight_us.load(Ordering::Relaxed);
+        let confirm_oldest_age_us_lane = state
+            .v3_confirm_oldest_inflight_us_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(confirm_oldest_age_us_global);
+        // Admission is lane-scoped: one degraded lane should not globally throttle healthy lanes.
+        let confirm_oldest_age_us = confirm_oldest_age_us_lane;
+        let (confirm_soft_age_us, confirm_hard_age_us) =
+            state.v3_durable_confirm_reject_ages_for_lane(durable_lane_id);
+        let lane_level = state
+            .v3_durable_admission_level_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or_else(|| state.v3_durable_admission_level.load(Ordering::Relaxed));
+        let lane_inflight_now = state
+            .v3_durable_receipt_inflight_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or_else(|| state.v3_durable_receipt_inflight.load(Ordering::Relaxed));
+        let lane_inflight_pct = if state.v3_durable_worker_max_inflight_receipts > 0 {
+            (lane_inflight_now as f64 * 100.0)
+                / (state.v3_durable_worker_max_inflight_receipts as f64)
         } else {
-            if !hard_guard_admission_enabled {
+            0.0
+        };
+        let guard_queue_signal = state.v3_durable_confirm_guard_min_queue_pct > 0.0
+            && durable_queue_pct >= state.v3_durable_confirm_guard_min_queue_pct;
+        let guard_inflight_signal = state.v3_durable_confirm_guard_min_inflight_pct > 0
+            && lane_inflight_pct >= state.v3_durable_confirm_guard_min_inflight_pct as f64;
+        let guard_backlog_signal = state.v3_durable_confirm_guard_min_backlog_per_sec > 0
+            && durable_backlog_growth_per_sec >= state.v3_durable_confirm_guard_min_backlog_per_sec;
+        let guard_secondary_signal =
+            lane_level > 0 || guard_queue_signal || guard_inflight_signal || guard_backlog_signal;
+        let guard_secondary_enabled =
+            !state.v3_durable_confirm_guard_secondary_required || guard_secondary_signal;
+        let hard_guard_armed = state
+            .v3_durable_confirm_guard_hard_armed_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed) > 0)
+            .unwrap_or(true);
+        let soft_guard_armed = state
+            .v3_durable_confirm_guard_soft_armed_per_lane
+            .get(durable_lane_id)
+            .map(|v| v.load(Ordering::Relaxed) > 0)
+            .unwrap_or(true);
+        let mut confirm_soft_guard_age_us = confirm_soft_age_us;
+        let mut confirm_hard_guard_age_us = confirm_hard_age_us;
+        if lane_level == 0 {
+            confirm_soft_guard_age_us = apply_confirm_guard_slack(
+                confirm_soft_guard_age_us,
+                state.v3_durable_confirm_guard_soft_slack_pct,
+            );
+            confirm_hard_guard_age_us = apply_confirm_guard_slack(
+                confirm_hard_guard_age_us,
+                state.v3_durable_confirm_guard_hard_slack_pct,
+            );
+        }
+        if confirm_soft_guard_age_us > 0
+            && confirm_hard_guard_age_us > 0
+            && confirm_hard_guard_age_us <= confirm_soft_guard_age_us
+        {
+            confirm_hard_guard_age_us = confirm_soft_guard_age_us.saturating_add(1);
+        }
+        let hard_guard_admission_enabled =
+            !(state.v3_durable_confirm_guard_hard_requires_admission && lane_level == 0);
+        let soft_guard_admission_enabled =
+            !(state.v3_durable_confirm_guard_soft_requires_admission && lane_level == 0);
+        let hard_guard_enabled =
+            hard_guard_admission_enabled && guard_secondary_enabled && hard_guard_armed;
+        let soft_guard_enabled =
+            soft_guard_admission_enabled && guard_secondary_enabled && soft_guard_armed;
+        if confirm_hard_guard_age_us > 0 && confirm_oldest_age_us >= confirm_hard_guard_age_us {
+            if hard_guard_enabled {
+                state.increment_v3_rejected_hard_total(shard_id);
+                state
+                    .v3_durable_confirm_age_hard_reject_total
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .v3_durable_backpressure_hard_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = state
+                    .v3_durable_backpressure_hard_total_per_lane
+                    .get(durable_lane_id)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                record_v3_ack(&state, t0);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    VolatileOrderResponse::rejected(
+                        session_id,
+                        "REJECTED",
+                        "V3_DURABLE_CONFIRM_AGE_HARD",
+                    ),
+                );
+            } else if !hard_guard_admission_enabled {
                 state
                     .v3_durable_confirm_age_hard_reject_skipped_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -748,33 +754,31 @@ pub(super) fn process_order_v3_hot_path(
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
-    }
-    if confirm_soft_guard_age_us > 0 && confirm_oldest_age_us >= confirm_soft_guard_age_us {
-        if soft_guard_enabled {
-            state.increment_v3_rejected_soft_total(shard_id);
-            state
-                .v3_durable_confirm_age_soft_reject_total
-                .fetch_add(1, Ordering::Relaxed);
-            state
-                .v3_durable_backpressure_soft_total
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(counter) = state
-                .v3_durable_backpressure_soft_total_per_lane
-                .get(durable_lane_id)
-            {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            record_v3_ack(&state, t0);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                VolatileOrderResponse::rejected(
-                    &session_id,
-                    "REJECTED",
-                    "V3_DURABLE_CONFIRM_AGE_SOFT",
-                ),
-            );
-        } else {
-            if !soft_guard_admission_enabled {
+        if confirm_soft_guard_age_us > 0 && confirm_oldest_age_us >= confirm_soft_guard_age_us {
+            if soft_guard_enabled {
+                state.increment_v3_rejected_soft_total(shard_id);
+                state
+                    .v3_durable_confirm_age_soft_reject_total
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .v3_durable_backpressure_soft_total
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = state
+                    .v3_durable_backpressure_soft_total_per_lane
+                    .get(durable_lane_id)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                record_v3_ack(&state, t0);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    VolatileOrderResponse::rejected(
+                        session_id,
+                        "REJECTED",
+                        "V3_DURABLE_CONFIRM_AGE_SOFT",
+                    ),
+                );
+            } else if !soft_guard_admission_enabled {
                 state
                     .v3_durable_confirm_age_soft_reject_skipped_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -788,30 +792,78 @@ pub(super) fn process_order_v3_hot_path(
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
-    }
-    // 監視ループより先に深刻な飽和を検知した場合のみ即時hard拒否する。
-    let durable_failsafe_hard = durable_queue_pct >= 99.0
-        || (durable_backlog_signal_enabled
-            && durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe);
-    if durable_failsafe_hard {
-        state.increment_v3_rejected_hard_total(shard_id);
-        state
-            .v3_durable_backpressure_hard_total
-            .fetch_add(1, Ordering::Relaxed);
-        record_v3_ack(&state, t0);
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(
-                &session_id,
-                "REJECTED",
-                "V3_DURABLE_BACKPRESSURE_FAILSAFE",
-            ),
-        );
-    }
-    if state.v3_durable_admission_controller_enabled {
-        let durable_level = lane_level;
-        match durable_level {
-            2 => {
+        // 監視ループより先に深刻な飽和を検知した場合のみ即時hard拒否する。
+        let durable_failsafe_hard = durable_queue_pct >= 99.0
+            || (durable_backlog_signal_enabled
+                && durable_backlog_growth_per_sec >= durable_backlog_hard_failsafe);
+        if durable_failsafe_hard {
+            state.increment_v3_rejected_hard_total(shard_id);
+            state
+                .v3_durable_backpressure_hard_total
+                .fetch_add(1, Ordering::Relaxed);
+            record_v3_ack(&state, t0);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                VolatileOrderResponse::rejected(
+                    session_id,
+                    "REJECTED",
+                    "V3_DURABLE_BACKPRESSURE_FAILSAFE",
+                ),
+            );
+        }
+        if state.v3_durable_admission_controller_enabled {
+            let durable_level = lane_level;
+            match durable_level {
+                2 => {
+                    state.increment_v3_rejected_hard_total(shard_id);
+                    state
+                        .v3_durable_backpressure_hard_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(counter) = state
+                        .v3_durable_backpressure_hard_total_per_lane
+                        .get(durable_lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    record_v3_ack(&state, t0);
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        VolatileOrderResponse::rejected(
+                            session_id,
+                            "REJECTED",
+                            "V3_DURABLE_CONTROLLER_HARD",
+                        ),
+                    );
+                }
+                1 => {
+                    state.increment_v3_rejected_soft_total(shard_id);
+                    state
+                        .v3_durable_backpressure_soft_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(counter) = state
+                        .v3_durable_backpressure_soft_total_per_lane
+                        .get(durable_lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    record_v3_ack(&state, t0);
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        VolatileOrderResponse::rejected(
+                            session_id,
+                            "REJECTED",
+                            "V3_DURABLE_CONTROLLER_SOFT",
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        } else {
+            if durable_queue_pct >= state.v3_durable_hard_reject_pct as f64
+                || (durable_backlog_signal_enabled
+                    && durable_backlog_growth_per_sec
+                        >= state.v3_durable_backlog_hard_reject_per_sec)
+            {
                 state.increment_v3_rejected_hard_total(shard_id);
                 state
                     .v3_durable_backpressure_hard_total
@@ -826,13 +878,17 @@ pub(super) fn process_order_v3_hot_path(
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     VolatileOrderResponse::rejected(
-                        &session_id,
+                        session_id,
                         "REJECTED",
-                        "V3_DURABLE_CONTROLLER_HARD",
+                        "V3_DURABLE_BACKPRESSURE_HARD",
                     ),
                 );
             }
-            1 => {
+            if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
+                || (durable_backlog_signal_enabled
+                    && durable_backlog_growth_per_sec
+                        >= state.v3_durable_backlog_soft_reject_per_sec)
+            {
                 state.increment_v3_rejected_soft_total(shard_id);
                 state
                     .v3_durable_backpressure_soft_total
@@ -847,62 +903,12 @@ pub(super) fn process_order_v3_hot_path(
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     VolatileOrderResponse::rejected(
-                        &session_id,
+                        session_id,
                         "REJECTED",
-                        "V3_DURABLE_CONTROLLER_SOFT",
+                        "V3_DURABLE_BACKPRESSURE_SOFT",
                     ),
                 );
             }
-            _ => {}
-        }
-    } else {
-        if durable_queue_pct >= state.v3_durable_hard_reject_pct as f64
-            || (durable_backlog_signal_enabled
-                && durable_backlog_growth_per_sec >= state.v3_durable_backlog_hard_reject_per_sec)
-        {
-            state.increment_v3_rejected_hard_total(shard_id);
-            state
-                .v3_durable_backpressure_hard_total
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(counter) = state
-                .v3_durable_backpressure_hard_total_per_lane
-                .get(durable_lane_id)
-            {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            record_v3_ack(&state, t0);
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(
-                    &session_id,
-                    "REJECTED",
-                    "V3_DURABLE_BACKPRESSURE_HARD",
-                ),
-            );
-        }
-        if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
-            || (durable_backlog_signal_enabled
-                && durable_backlog_growth_per_sec >= state.v3_durable_backlog_soft_reject_per_sec)
-        {
-            state.increment_v3_rejected_soft_total(shard_id);
-            state
-                .v3_durable_backpressure_soft_total
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(counter) = state
-                .v3_durable_backpressure_soft_total_per_lane
-                .get(durable_lane_id)
-            {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            record_v3_ack(&state, t0);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                VolatileOrderResponse::rejected(
-                    &session_id,
-                    "REJECTED",
-                    "V3_DURABLE_BACKPRESSURE_SOFT",
-                ),
-            );
         }
     }
 
@@ -916,7 +922,7 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_QUEUE_KILLED"),
+            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_KILLED"),
         );
     }
     if queue_pct >= state.v3_hard_reject_pct {
@@ -924,7 +930,7 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_BACKPRESSURE_HARD"),
+            VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_HARD"),
         );
     }
 
@@ -933,14 +939,14 @@ pub(super) fn process_order_v3_hot_path(
         record_v3_ack(&state, t0);
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            VolatileOrderResponse::rejected(&session_id, "REJECTED", "V3_BACKPRESSURE_SOFT"),
+            VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_SOFT"),
         );
     }
 
-    let session_seq = ingress.next_seq(&session_id);
+    let session_seq = ingress.next_seq(session_id);
     let received_at_ns = now_nanos();
     let task = V3OrderTask {
-        session_id: session_id.clone(),
+        session_id: session_id.to_string(),
         session_seq,
         attempt_seq: session_seq,
         received_at_ns,
@@ -954,14 +960,15 @@ pub(super) fn process_order_v3_hot_path(
             state.v3_stage_enqueue_hist.record(enqueue_elapsed);
             state
                 .v3_account_symbol_position
-                .entry((account_id, position_projection.symbol_key))
+                .entry((account_id.to_string(), position_projection.symbol_key))
                 .and_modify(|v| {
                     *v = v.saturating_add(position_projection.delta_qty);
                 })
                 .or_insert(position_projection.delta_qty);
             state.increment_v3_accepted_total(shard_id);
             let serialize_t0 = now_nanos();
-            let body = VolatileOrderResponse::accepted(session_id, session_seq, received_at_ns);
+            let body =
+                VolatileOrderResponse::accepted(session_id.to_string(), session_seq, received_at_ns);
             let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
             state.v3_stage_serialize_hist.record(serialize_elapsed);
             record_v3_ack(&state, t0);
@@ -985,7 +992,7 @@ pub(super) fn process_order_v3_hot_path(
             record_v3_ack(&state, t0);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_QUEUE_FULL"),
+                VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_FULL"),
             )
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
@@ -1005,15 +1012,15 @@ pub(super) fn process_order_v3_hot_path(
             record_v3_ack(&state, t0);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(&session_id, "KILLED", "V3_INGRESS_CLOSED"),
+                VolatileOrderResponse::rejected(session_id, "KILLED", "V3_INGRESS_CLOSED"),
             )
         }
     }
 }
 
-pub(super) fn decode_v3_tcp_request(
-    frame: &[u8; V3_TCP_REQUEST_SIZE],
-) -> Result<V3TcpDecodedRequest, u32> {
+pub(super) fn decode_v3_tcp_request<'a>(
+    frame: &'a [u8; V3_TCP_REQUEST_SIZE],
+) -> Result<V3TcpDecodedRequest<'a>, u32> {
     let token_len =
         u16::from_le_bytes(frame[0..2].try_into().expect("token length bytes")) as usize;
     if token_len == 0 || token_len > V3_TCP_TOKEN_MAX_LEN {
@@ -1060,7 +1067,7 @@ pub(super) fn decode_v3_tcp_request(
     };
 
     Ok(V3TcpDecodedRequest {
-        jwt_token: jwt_token.to_string(),
+        jwt_token,
         order_req: OrderRequest {
             symbol: symbol.to_string(),
             side: side.to_string(),
@@ -2331,7 +2338,9 @@ mod tests {
             v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
             v3_durable_rejected_total_per_lane: lane_u64(),
             v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
+            v3_live_ack_hist_ns: Arc::new(LatencyHistogram::new()),
             v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
+            v3_live_ack_accepted_hist_ns: Arc::new(LatencyHistogram::new()),
             v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
@@ -2362,6 +2371,7 @@ mod tests {
             v3_durable_backlog_soft_reject_per_sec: i64::MAX,
             v3_durable_backlog_hard_reject_per_sec: i64::MAX,
             v3_durable_backlog_signal_min_queue_pct: 0.0,
+            v3_durable_ack_path_guard_enabled: true,
             v3_durable_admission_controller_enabled: false,
             v3_durable_admission_sustain_ticks: 1,
             v3_durable_admission_recover_ticks: 1,

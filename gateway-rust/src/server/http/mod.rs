@@ -1288,7 +1288,9 @@ pub(super) struct AppState {
     pub(super) v3_durable_rejected_total: Arc<AtomicU64>,
     pub(super) v3_durable_rejected_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_live_ack_hist: Arc<LatencyHistogram>,
+    pub(super) v3_live_ack_hist_ns: Arc<LatencyHistogram>,
     pub(super) v3_live_ack_accepted_hist: Arc<LatencyHistogram>,
+    pub(super) v3_live_ack_accepted_hist_ns: Arc<LatencyHistogram>,
     pub(super) v3_durable_confirm_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_append_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_fsync_hist: Arc<LatencyHistogram>,
@@ -1319,6 +1321,7 @@ pub(super) struct AppState {
     pub(super) v3_durable_backlog_soft_reject_per_sec: i64,
     pub(super) v3_durable_backlog_hard_reject_per_sec: i64,
     pub(super) v3_durable_backlog_signal_min_queue_pct: f64,
+    pub(super) v3_durable_ack_path_guard_enabled: bool,
     pub(super) v3_durable_admission_controller_enabled: bool,
     pub(super) v3_durable_admission_sustain_ticks: u64,
     pub(super) v3_durable_admission_recover_ticks: u64,
@@ -2094,6 +2097,8 @@ pub async fn run(
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(20.0)
             .clamp(0.0, 100.0);
+    let v3_durable_ack_path_guard_enabled =
+        parse_bool_env("V3_DURABLE_ACK_PATH_GUARD_ENABLED").unwrap_or(true);
     let v3_durable_admission_controller_enabled =
         parse_bool_env("V3_DURABLE_ADMISSION_CONTROLLER_ENABLED").unwrap_or(true);
     let v3_durable_admission_sustain_ticks = std::env::var("V3_DURABLE_ADMISSION_SUSTAIN_TICKS")
@@ -2572,7 +2577,9 @@ pub async fn run(
         v3_durable_rejected_total: Arc::new(AtomicU64::new(0)),
         v3_durable_rejected_total_per_lane: new_lane_u64_counters(),
         v3_live_ack_hist: Arc::new(LatencyHistogram::new()),
+        v3_live_ack_hist_ns: Arc::new(LatencyHistogram::new()),
         v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
+        v3_live_ack_accepted_hist_ns: Arc::new(LatencyHistogram::new()),
         v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
@@ -2609,6 +2616,7 @@ pub async fn run(
         v3_durable_backlog_soft_reject_per_sec,
         v3_durable_backlog_hard_reject_per_sec,
         v3_durable_backlog_signal_min_queue_pct,
+        v3_durable_ack_path_guard_enabled,
         v3_durable_admission_controller_enabled,
         v3_durable_admission_sustain_ticks,
         v3_durable_admission_recover_ticks,
@@ -2857,25 +2865,75 @@ pub async fn run(
 async fn run_v3_tcp_server(port: u16, state: AppState) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
+    let tcp_busy_poll_us = std::env::var("V3_TCP_BUSY_POLL_US")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    #[cfg(target_os = "linux")]
+    if tcp_busy_poll_us > 0 {
+        info!(
+            busy_poll_us = tcp_busy_poll_us,
+            "v3 tcp busy-poll is enabled (SO_BUSY_POLL)"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    if tcp_busy_poll_us > 0 {
+        info!(
+            busy_poll_us = tcp_busy_poll_us,
+            "V3_TCP_BUSY_POLL_US is set but ignored on non-Linux"
+        );
+    }
     info!("v3 TCP server listening on {}", addr);
 
     loop {
         let (socket, peer) = listener.accept().await?;
         let conn_state = state.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_v3_tcp_connection(socket, conn_state).await {
+            if let Err(err) = handle_v3_tcp_connection(socket, conn_state, tcp_busy_poll_us).await {
                 tracing::warn!(peer = %peer, error = %err, "v3 tcp connection error");
             }
         });
     }
 }
 
+#[cfg(target_os = "linux")]
+static V3_TCP_BUSY_POLL_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+fn configure_v3_tcp_busy_poll(socket: &tokio::net::TcpStream, busy_poll_us: u32) {
+    if busy_poll_us == 0 {
+        return;
+    }
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let value: libc::c_int = busy_poll_us.min(libc::c_int::MAX as u32) as libc::c_int;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BUSY_POLL,
+            (&value as *const libc::c_int).cast::<libc::c_void>(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if rc != 0 && !V3_TCP_BUSY_POLL_WARNED.swap(true, Ordering::Relaxed) {
+        let err = std::io::Error::last_os_error();
+        tracing::warn!(error = %err, busy_poll_us = value, "failed to set SO_BUSY_POLL");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_v3_tcp_busy_poll(_socket: &tokio::net::TcpStream, _busy_poll_us: u32) {}
+
 async fn handle_v3_tcp_connection(
     mut socket: tokio::net::TcpStream,
     state: AppState,
+    tcp_busy_poll_us: u32,
 ) -> anyhow::Result<()> {
     socket.set_nodelay(true)?;
+    configure_v3_tcp_busy_poll(&socket, tcp_busy_poll_us);
     let auth_cache_enabled = parse_bool_env("V3_TCP_AUTH_CACHE_ENABLE").unwrap_or(true);
+    let sticky_auth_context = parse_bool_env("V3_TCP_AUTH_STICKY_CONTEXT").unwrap_or(true);
     let auth_cache_capacity = std::env::var("V3_TCP_AUTH_CACHE_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -2886,6 +2944,8 @@ async fn handle_v3_tcp_connection(
     } else {
         HashMap::new()
     };
+    let mut sticky_token = String::new();
+    let mut sticky_principal: Option<crate::auth::Principal> = None;
     let mut req = [0u8; V3_TCP_REQUEST_SIZE];
     loop {
         match socket.read_exact(&mut req).await {
@@ -2896,33 +2956,66 @@ async fn handle_v3_tcp_connection(
         let t0 = gateway_core::now_nanos();
         let resp = match decode_v3_tcp_request(&req) {
             Ok(decoded) => {
-                let principal = if auth_cache_enabled {
-                    if let Some(cached) = auth_cache.get(&decoded.jwt_token) {
-                        Ok(cached.clone())
-                    } else {
-                        match authenticate_v3_tcp_token(&state, &decoded.jwt_token) {
+                let principal = if sticky_auth_context
+                    && sticky_principal.is_some()
+                    && sticky_token == decoded.jwt_token
+                {
+                    // 接続内で同一トークンが継続する場合は JWT 検証/HashMap 探索を避ける。
+                    Ok(sticky_principal.as_ref().expect("checked is_some"))
+                } else if auth_cache_enabled {
+                    let mut auth_error: Option<(StatusCode, u32)> = None;
+                    if !auth_cache.contains_key(decoded.jwt_token) {
+                        match authenticate_v3_tcp_token(&state, decoded.jwt_token) {
                             Ok(principal) => {
                                 if auth_cache.len() >= auth_cache_capacity {
                                     auth_cache.clear();
                                 }
-                                auth_cache.insert(decoded.jwt_token.clone(), principal.clone());
-                                Ok(principal)
+                                auth_cache.insert(decoded.jwt_token.to_string(), principal);
                             }
-                            Err(err) => Err(err),
+                            Err(err) => {
+                                if sticky_auth_context {
+                                    sticky_principal = None;
+                                    sticky_token.clear();
+                                }
+                                auth_error = Some(err);
+                            }
+                        }
+                    }
+                    if let Some(err) = auth_error {
+                        Err(err)
+                    } else {
+                        match auth_cache.get(decoded.jwt_token) {
+                            Some(cached) => Ok(cached),
+                            None => {
+                                Err((StatusCode::UNAUTHORIZED, orders::V3_TCP_REASON_AUTH_INVALID))
+                            }
                         }
                     }
                 } else {
-                    authenticate_v3_tcp_token(&state, &decoded.jwt_token)
+                    match authenticate_v3_tcp_token(&state, decoded.jwt_token) {
+                        Ok(principal) => {
+                            sticky_principal = Some(principal);
+                            Ok(sticky_principal.as_ref().expect("set above"))
+                        }
+                        Err(err) => Err(err),
+                    }
                 };
                 match principal {
                     Ok(principal) => {
                         let (status, body) = process_order_v3_hot_path(
                             &state,
-                            principal.account_id,
-                            principal.session_id,
+                            &principal.account_id,
+                            &principal.session_id,
                             decoded.order_req,
                             t0,
                         );
+                        if sticky_auth_context
+                            && (sticky_principal.is_none() || sticky_token != decoded.jwt_token)
+                        {
+                            sticky_token.clear();
+                            sticky_token.push_str(decoded.jwt_token);
+                            sticky_principal = Some(principal.clone());
+                        }
                         encode_v3_tcp_response(status, &body)
                     }
                     Err((status, reason_code)) => {
