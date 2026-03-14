@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, State},
     http::{StatusCode, header::AUTHORIZATION},
 };
-use gateway_core::now_nanos;
+use gateway_core::{RdtscpStamp, now_nanos};
 use std::{sync::atomic::Ordering, time::Duration};
 
 use super::{AppState, AuthErrorResponse, V3OrderTask};
@@ -106,11 +106,18 @@ fn record_v3_ack(state: &AppState, start_ns: u64) {
     state.v3_live_ack_hist_ns.record(elapsed_ns);
 }
 
-fn record_v3_ack_accepted(state: &AppState, start_ns: u64) {
+fn record_v3_ack_accepted(state: &AppState, start_ns: u64, start_tsc: Option<RdtscpStamp>) {
     let elapsed_ns = now_nanos().saturating_sub(start_ns);
     let elapsed_us = elapsed_ns / 1_000;
     state.v3_live_ack_accepted_hist.record(elapsed_us);
     state.v3_live_ack_accepted_hist_ns.record(elapsed_ns);
+    if let Some(start_tsc) = start_tsc {
+        if let Some(end_tsc) = state.capture_v3_tsc_stamp() {
+            state.record_v3_tsc_accepted(start_tsc, end_tsc, elapsed_ns);
+        } else {
+            state.v3_tsc_fallback_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[inline]
@@ -553,6 +560,7 @@ pub(super) fn process_order_v3_hot_path(
     req: OrderRequest,
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
+    let t0_tsc = state.capture_v3_tsc_stamp();
     let ingress = &state.v3_ingress;
     let shard_id = ingress.shard_for_session(session_id);
     if ingress.maybe_recover_shard(shard_id, t0) {
@@ -972,7 +980,7 @@ pub(super) fn process_order_v3_hot_path(
             let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
             state.v3_stage_serialize_hist.record(serialize_elapsed);
             record_v3_ack(&state, t0);
-            record_v3_ack_accepted(&state, t0);
+            record_v3_ack_accepted(&state, t0, t0_tsc);
             (StatusCode::ACCEPTED, body)
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(task)) => {
@@ -2230,7 +2238,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicI64, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     type HmacSha256 = Hmac<Sha256>;
@@ -2341,6 +2349,15 @@ mod tests {
             v3_live_ack_hist_ns: Arc::new(LatencyHistogram::new()),
             v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
             v3_live_ack_accepted_hist_ns: Arc::new(LatencyHistogram::new()),
+            v3_live_ack_accepted_tsc_hist_ns: Arc::new(LatencyHistogram::new()),
+            v3_tsc_clock: None,
+            v3_tsc_runtime_enabled: Arc::new(AtomicBool::new(false)),
+            v3_tsc_invariant: false,
+            v3_tsc_hz: 0,
+            v3_tsc_mismatch_threshold_pct: 20,
+            v3_tsc_fallback_total: Arc::new(AtomicU64::new(0)),
+            v3_tsc_cross_core_total: Arc::new(AtomicU64::new(0)),
+            v3_tsc_mismatch_total: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
             v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
@@ -2405,6 +2422,11 @@ mod tests {
             v3_soft_reject_pct: 85,
             v3_hard_reject_pct: 90,
             v3_kill_reject_pct: 95,
+            v3_thread_affinity_apply_success_total: Arc::new(AtomicU64::new(0)),
+            v3_thread_affinity_apply_failure_total: Arc::new(AtomicU64::new(0)),
+            v3_shard_affinity_cpu: Arc::new(vec![-1]),
+            v3_durable_affinity_cpu: Arc::new(vec![-1]),
+            v3_tcp_server_affinity_cpu: -1,
             v3_confirm_store: Arc::new(super::super::V3ConfirmStore::new(1, 500, 600_000)),
             v3_confirm_oldest_inflight_us: Arc::new(AtomicU64::new(0)),
             v3_confirm_oldest_inflight_us_per_lane: lane_u64(),

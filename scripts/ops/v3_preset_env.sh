@@ -35,6 +35,7 @@ apply_v3_ops_preset() {
       v3_preset_default TARGET_COMPLETED_RPS_EPSILON 0.0005
       v3_preset_default TARGET_ACK_ACCEPTED_P99_US 40
       v3_preset_default TARGET_ACK_ACCEPTED_P99_NS 40000
+      v3_preset_default TARGET_ACK_ACCEPTED_TSC_P99_NS 0
       v3_preset_default TARGET_ACK_P99_US 100
       v3_preset_default TARGET_ACCEPTED_RATE 0.99
       v3_preset_default TARGET_DURABLE_CONFIRM_P99_US 120000000
@@ -50,6 +51,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_BUSY_POLL_US 50
       v3_preset_default V3_TCP_AUTH_STICKY_CONTEXT true
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
+      v3_preset_default V3_TSC_TIMING_ENABLE true
+      v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 20
       v3_preset_default LOAD_WORKERS 192
       v3_preset_default LOAD_ACCOUNTS 24
       v3_preset_default LOAD_QUEUE_CAPACITY 200000
@@ -66,6 +69,7 @@ apply_v3_ops_preset() {
       v3_preset_default TARGET_COMPLETED_RPS 45000
       v3_preset_default TARGET_ACK_ACCEPTED_P99_US 40
       v3_preset_default TARGET_ACK_ACCEPTED_P99_NS 40000
+      v3_preset_default TARGET_ACK_ACCEPTED_TSC_P99_NS 0
       v3_preset_default TARGET_ACK_P99_US 100
       v3_preset_default TARGET_ACCEPTED_RATE 0.95
       v3_preset_default TARGET_REJECTED_KILLED_MAX 0
@@ -79,6 +83,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_BUSY_POLL_US 50
       v3_preset_default V3_TCP_AUTH_STICKY_CONTEXT true
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
+      v3_preset_default V3_TSC_TIMING_ENABLE false
+      v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 20
       v3_preset_default LOAD_WORKERS 512
       v3_preset_default LOAD_ACCOUNTS 64
       v3_preset_default LOAD_QUEUE_CAPACITY 1500000
@@ -92,6 +98,7 @@ apply_v3_ops_preset() {
       v3_preset_default TARGET_COMPLETED_RPS 10000
       v3_preset_default TARGET_ACK_ACCEPTED_P99_US 50
       v3_preset_default TARGET_ACK_ACCEPTED_P99_NS 0
+      v3_preset_default TARGET_ACK_ACCEPTED_TSC_P99_NS 0
       v3_preset_default TARGET_ACK_P99_US 120
       v3_preset_default TARGET_ACCEPTED_RATE 0.95
       v3_preset_default TARGET_DURABLE_CONFIRM_P99_US 0
@@ -101,6 +108,8 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_BUSY_POLL_US 0
       v3_preset_default V3_TCP_AUTH_STICKY_CONTEXT true
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER true
+      v3_preset_default V3_TSC_TIMING_ENABLE true
+      v3_preset_default V3_TSC_MISMATCH_THRESHOLD_PCT 30
       v3_preset_default ENABLE_TIMESERIES 1
       v3_preset_default TIMESERIES_INTERVAL_MS 500
       v3_preset_default LOAD_WORKERS 192
@@ -111,10 +120,12 @@ apply_v3_ops_preset() {
       v3_preset_default V3_TCP_PORT 39001
       v3_preset_default TARGET_ACK_ACCEPTED_P99_US 40
       v3_preset_default TARGET_ACK_ACCEPTED_P99_NS 40000
+      v3_preset_default TARGET_ACK_ACCEPTED_TSC_P99_NS 0
       v3_preset_default V3_DURABLE_ACK_PATH_GUARD_ENABLED true
       v3_preset_default V3_TCP_BUSY_POLL_US 0
       v3_preset_default V3_TCP_AUTH_STICKY_CONTEXT false
       v3_preset_default V3_TCP_STICKY_ACCOUNT_PER_WORKER false
+      v3_preset_default V3_TSC_TIMING_ENABLE false
       ;;
     "" )
       return 0

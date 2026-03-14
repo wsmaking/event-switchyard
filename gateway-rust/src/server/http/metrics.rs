@@ -157,6 +157,11 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_durable_backpressure_hard_total = state
         .v3_durable_backpressure_hard_total
         .load(Ordering::Relaxed);
+    let v3_durable_ack_path_guard_enabled = if state.v3_durable_ack_path_guard_enabled {
+        1
+    } else {
+        0
+    };
     let v3_durable_admission_controller_enabled = if state.v3_durable_admission_controller_enabled {
         1
     } else {
@@ -277,6 +282,48 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let v3_live_ack_p999 = state.v3_live_ack_hist.snapshot().percentile(99.9);
     let v3_live_ack_accepted_p99 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.0);
     let v3_live_ack_accepted_p999 = state.v3_live_ack_accepted_hist.snapshot().percentile(99.9);
+    let v3_hotpath_p99_ns = state.v3_live_ack_hist_ns.snapshot().percentile(99.0);
+    let v3_hotpath_p999_ns = state.v3_live_ack_hist_ns.snapshot().percentile(99.9);
+    let v3_hotpath_accepted_p99_ns = state
+        .v3_live_ack_accepted_hist_ns
+        .snapshot()
+        .percentile(99.0);
+    let v3_hotpath_accepted_p999_ns = state
+        .v3_live_ack_accepted_hist_ns
+        .snapshot()
+        .percentile(99.9);
+    let v3_hotpath_accepted_tsc_p99_ns = state
+        .v3_live_ack_accepted_tsc_hist_ns
+        .snapshot()
+        .percentile(99.0);
+    let v3_hotpath_accepted_tsc_p999_ns = state
+        .v3_live_ack_accepted_tsc_hist_ns
+        .snapshot()
+        .percentile(99.9);
+    let v3_live_ack_p99_ns = v3_live_ack_p99.saturating_mul(1_000);
+    let v3_live_ack_p999_ns = v3_live_ack_p999.saturating_mul(1_000);
+    let v3_live_ack_accepted_p99_ns = v3_live_ack_accepted_p99.saturating_mul(1_000);
+    let v3_live_ack_accepted_p999_ns = v3_live_ack_accepted_p999.saturating_mul(1_000);
+    let v3_tsc_timing_enabled = if state.v3_tsc_runtime_enabled.load(Ordering::Relaxed) {
+        1
+    } else {
+        0
+    };
+    let v3_tsc_invariant = if state.v3_tsc_invariant { 1 } else { 0 };
+    let v3_tsc_hz = state.v3_tsc_hz;
+    let v3_tsc_mismatch_threshold_pct = state.v3_tsc_mismatch_threshold_pct;
+    let v3_tsc_fallback_total = state.v3_tsc_fallback_total.load(Ordering::Relaxed);
+    let v3_tsc_cross_core_total = state.v3_tsc_cross_core_total.load(Ordering::Relaxed);
+    let v3_tsc_mismatch_total = state.v3_tsc_mismatch_total.load(Ordering::Relaxed);
+    let v3_thread_affinity_apply_success_total = state
+        .v3_thread_affinity_apply_success_total
+        .load(Ordering::Relaxed);
+    let v3_thread_affinity_apply_failure_total = state
+        .v3_thread_affinity_apply_failure_total
+        .load(Ordering::Relaxed);
+    let v3_tcp_server_affinity_cpu = state.v3_tcp_server_affinity_cpu;
+    let v3_shard_affinity_cpu = state.v3_shard_affinity_cpu.as_ref();
+    let v3_durable_affinity_cpu = state.v3_durable_affinity_cpu.as_ref();
     let v3_durable_confirm_p99 = state.v3_durable_confirm_hist.snapshot().percentile(99.0);
     let v3_durable_confirm_p999 = state.v3_durable_confirm_hist.snapshot().percentile(99.9);
     let v3_total = v3_accepted_total
@@ -964,6 +1011,88 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_fsync_p99,
     ));
     snapshot.push_str(&format!(
+        "# HELP gateway_live_ack_p99_ns Contract live ACK latency p99 in nanoseconds (/v3 hot path)\n\
+         # TYPE gateway_live_ack_p99_ns gauge\n\
+         gateway_live_ack_p99_ns {}\n\
+         # HELP gateway_live_ack_accepted_p99_ns Contract live ACK latency p99 in nanoseconds (accepted-only /v3 hot path)\n\
+         # TYPE gateway_live_ack_accepted_p99_ns gauge\n\
+         gateway_live_ack_accepted_p99_ns {}\n\
+         # HELP gateway_v3_live_ack_p99_ns /v3 ACK latency p99 in nanoseconds\n\
+         # TYPE gateway_v3_live_ack_p99_ns gauge\n\
+         gateway_v3_live_ack_p99_ns {}\n\
+         # HELP gateway_v3_live_ack_p999_ns /v3 ACK latency p99.9 in nanoseconds\n\
+         # TYPE gateway_v3_live_ack_p999_ns gauge\n\
+         gateway_v3_live_ack_p999_ns {}\n\
+         # HELP gateway_v3_live_ack_accepted_p99_ns /v3 ACK latency p99 in nanoseconds (accepted-only)\n\
+         # TYPE gateway_v3_live_ack_accepted_p99_ns gauge\n\
+         gateway_v3_live_ack_accepted_p99_ns {}\n\
+         # HELP gateway_v3_live_ack_accepted_p999_ns /v3 ACK latency p99.9 in nanoseconds (accepted-only)\n\
+         # TYPE gateway_v3_live_ack_accepted_p999_ns gauge\n\
+         gateway_v3_live_ack_accepted_p999_ns {}\n",
+        v3_live_ack_p99_ns,
+        v3_live_ack_accepted_p99_ns,
+        v3_live_ack_p99_ns,
+        v3_live_ack_p999_ns,
+        v3_live_ack_accepted_p99_ns,
+        v3_live_ack_accepted_p999_ns,
+    ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_hotpath_p99_ns /v3 hot path latency p99 in nanoseconds (direct ns histogram)\n\
+         # TYPE gateway_v3_hotpath_p99_ns gauge\n\
+         gateway_v3_hotpath_p99_ns {}\n\
+         # HELP gateway_v3_hotpath_p999_ns /v3 hot path latency p99.9 in nanoseconds (direct ns histogram)\n\
+         # TYPE gateway_v3_hotpath_p999_ns gauge\n\
+         gateway_v3_hotpath_p999_ns {}\n\
+         # HELP gateway_v3_hotpath_accepted_p99_ns /v3 hot path latency p99 in nanoseconds (accepted-only direct ns histogram)\n\
+         # TYPE gateway_v3_hotpath_accepted_p99_ns gauge\n\
+         gateway_v3_hotpath_accepted_p99_ns {}\n\
+         # HELP gateway_v3_hotpath_accepted_p999_ns /v3 hot path latency p99.9 in nanoseconds (accepted-only direct ns histogram)\n\
+         # TYPE gateway_v3_hotpath_accepted_p999_ns gauge\n\
+         gateway_v3_hotpath_accepted_p999_ns {}\n",
+        v3_hotpath_p99_ns,
+        v3_hotpath_p999_ns,
+        v3_hotpath_accepted_p99_ns,
+        v3_hotpath_accepted_p999_ns,
+    ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_hotpath_accepted_tsc_p99_ns /v3 hot path latency p99 in nanoseconds estimated by rdtscp (accepted-only)\n\
+         # TYPE gateway_v3_hotpath_accepted_tsc_p99_ns gauge\n\
+         gateway_v3_hotpath_accepted_tsc_p99_ns {}\n\
+         # HELP gateway_v3_hotpath_accepted_tsc_p999_ns /v3 hot path latency p99.9 in nanoseconds estimated by rdtscp (accepted-only)\n\
+         # TYPE gateway_v3_hotpath_accepted_tsc_p999_ns gauge\n\
+         gateway_v3_hotpath_accepted_tsc_p999_ns {}\n\
+         # HELP gateway_v3_tsc_timing_enabled /v3 rdtscp timing enabled (1/0)\n\
+         # TYPE gateway_v3_tsc_timing_enabled gauge\n\
+         gateway_v3_tsc_timing_enabled {}\n\
+         # HELP gateway_v3_tsc_invariant Invariant TSC capability detected (1/0)\n\
+         # TYPE gateway_v3_tsc_invariant gauge\n\
+         gateway_v3_tsc_invariant {}\n\
+         # HELP gateway_v3_tsc_hz Detected TSC frequency in Hz\n\
+         # TYPE gateway_v3_tsc_hz gauge\n\
+         gateway_v3_tsc_hz {}\n\
+         # HELP gateway_v3_tsc_mismatch_threshold_pct Allowed divergence percentage between rdtscp and now_nanos samples\n\
+         # TYPE gateway_v3_tsc_mismatch_threshold_pct gauge\n\
+         gateway_v3_tsc_mismatch_threshold_pct {}\n\
+         # HELP gateway_v3_tsc_fallback_total Total samples that fell back to now_nanos instead of rdtscp\n\
+         # TYPE gateway_v3_tsc_fallback_total counter\n\
+         gateway_v3_tsc_fallback_total {}\n\
+         # HELP gateway_v3_tsc_cross_core_total Total rdtscp samples skipped due to core migration\n\
+         # TYPE gateway_v3_tsc_cross_core_total counter\n\
+         gateway_v3_tsc_cross_core_total {}\n\
+         # HELP gateway_v3_tsc_mismatch_total Total rdtscp samples skipped due to divergence threshold violations\n\
+         # TYPE gateway_v3_tsc_mismatch_total counter\n\
+         gateway_v3_tsc_mismatch_total {}\n",
+        v3_hotpath_accepted_tsc_p99_ns,
+        v3_hotpath_accepted_tsc_p999_ns,
+        v3_tsc_timing_enabled,
+        v3_tsc_invariant,
+        v3_tsc_hz,
+        v3_tsc_mismatch_threshold_pct,
+        v3_tsc_fallback_total,
+        v3_tsc_cross_core_total,
+        v3_tsc_mismatch_total,
+    ));
+    snapshot.push_str(&format!(
         "# HELP gateway_v3_durable_fdatasync_p99_cached_us /v3 durable fdatasync latency p99 cache value used by worker control loop (us)\n\
          # TYPE gateway_v3_durable_fdatasync_p99_cached_us gauge\n\
          gateway_v3_durable_fdatasync_p99_cached_us {}\n",
@@ -1003,6 +1132,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # HELP gateway_v3_durable_backpressure_hard_total Total /v3 hard rejects triggered by durable backpressure\n\
          # TYPE gateway_v3_durable_backpressure_hard_total counter\n\
          gateway_v3_durable_backpressure_hard_total {}\n\
+         # HELP gateway_v3_durable_ack_path_guard_enabled Whether /v3 ACK path applies durable guard rejections (1=enabled,0=decoupled)\n\
+         # TYPE gateway_v3_durable_ack_path_guard_enabled gauge\n\
+         gateway_v3_durable_ack_path_guard_enabled {}\n\
          # HELP gateway_v3_durable_admission_controller_enabled /v3 durable admission controller enabled (1/0)\n\
          # TYPE gateway_v3_durable_admission_controller_enabled gauge\n\
          gateway_v3_durable_admission_controller_enabled {}\n\
@@ -1131,6 +1263,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_durable_receipt_inflight_max,
         v3_durable_backpressure_soft_total,
         v3_durable_backpressure_hard_total,
+        v3_durable_ack_path_guard_enabled,
         v3_durable_admission_controller_enabled,
         v3_durable_admission_level,
         v3_durable_admission_soft_trip_total,
@@ -1532,6 +1665,40 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         snapshot.push_str(&format!(
             "gateway_v3_durable_worker_loop_p99_us_per_lane{{lane=\"{}\"}} {}\n",
             lane, p99
+        ));
+    }
+    snapshot.push_str(&format!(
+        "# HELP gateway_v3_thread_affinity_apply_success_total Total successful v3 worker thread affinity applications\n\
+         # TYPE gateway_v3_thread_affinity_apply_success_total counter\n\
+         gateway_v3_thread_affinity_apply_success_total {}\n\
+         # HELP gateway_v3_thread_affinity_apply_failure_total Total failed v3 worker thread affinity applications\n\
+         # TYPE gateway_v3_thread_affinity_apply_failure_total counter\n\
+         gateway_v3_thread_affinity_apply_failure_total {}\n\
+         # HELP gateway_v3_tcp_server_affinity_cpu Configured CPU id for v3 TCP ingress thread (-1 means disabled)\n\
+         # TYPE gateway_v3_tcp_server_affinity_cpu gauge\n\
+         gateway_v3_tcp_server_affinity_cpu {}\n",
+        v3_thread_affinity_apply_success_total,
+        v3_thread_affinity_apply_failure_total,
+        v3_tcp_server_affinity_cpu,
+    ));
+    snapshot.push_str(
+        "# HELP gateway_v3_shard_affinity_cpu Configured CPU id per v3 shard single-writer thread (-1 means disabled)\n\
+         # TYPE gateway_v3_shard_affinity_cpu gauge\n",
+    );
+    for (shard, cpu) in v3_shard_affinity_cpu.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_shard_affinity_cpu{{shard=\"{}\"}} {}\n",
+            shard, cpu
+        ));
+    }
+    snapshot.push_str(
+        "# HELP gateway_v3_durable_affinity_cpu Configured CPU id per v3 durable worker thread (-1 means disabled)\n\
+         # TYPE gateway_v3_durable_affinity_cpu gauge\n",
+    );
+    for (lane, cpu) in v3_durable_affinity_cpu.iter().enumerate() {
+        snapshot.push_str(&format!(
+            "gateway_v3_durable_affinity_cpu{{lane=\"{}\"}} {}\n",
+            lane, cpu
         ));
     }
     snapshot.push_str(&format!(

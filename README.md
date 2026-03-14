@@ -170,6 +170,13 @@ export V3_TCP_BUSY_POLL_US=50
 export V3_TCP_AUTH_STICKY_CONTEXT=true
 # 負荷ワーカーをアカウント固定にして接続局所性を上げる（デフォルト true）
 export V3_TCP_STICKY_ACCOUNT_PER_WORKER=true
+# shard worker / durable worker / tcp ingress のスレッドCPU固定（Linux, 任意）
+export V3_SHARD_AFFINITY_CPUS=2-5
+export V3_DURABLE_AFFINITY_CPUS=6-9
+export V3_TCP_SERVER_AFFINITY_CPUS=10
+# rdtscp 二重計時（Phase 3）
+export V3_TSC_TIMING_ENABLE=true
+export V3_TSC_MISMATCH_THRESHOLD_PCT=20
 # プロセスのCPU固定（taskset）
 export V3_GATEWAY_TASKSET_CPUS=2-9
 scripts/ops/run_v3_open_loop_probe.sh
@@ -181,6 +188,9 @@ scripts/ops/run_v3_open_loop_probe.sh
 - `gateway_live_ack_accepted_p99_us`
 - `gateway_v3_live_ack_accepted_p99_ns`
 - `gateway_v3_hotpath_accepted_p99_ns`
+- `gateway_v3_hotpath_accepted_tsc_p99_ns`
+- `gateway_v3_tsc_timing_enabled`
+- `gateway_v3_thread_affinity_apply_failure_total`
 - `gateway_v3_durable_ack_path_guard_enabled`
 - `gateway_v3_accepted_rate`
 - `gateway_v3_rejected_soft_total`

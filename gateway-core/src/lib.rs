@@ -24,7 +24,10 @@ pub mod queue;
 pub mod risk;
 
 // 主要な型を再エクスポート（使いやすさのため）
-pub use metrics::{now_nanos, LatencyGuard, LatencyHistogram, LatencyStats};
+pub use metrics::{
+    LatencyGuard, LatencyHistogram, LatencyStats, RdtscpClock, RdtscpStamp, now_nanos,
+    rdtscp_supported,
+};
 pub use queue::{FastPathQueue, Order};
 pub use risk::{AccountPosition, RiskChecker, RiskResult, SymbolLimits};
 

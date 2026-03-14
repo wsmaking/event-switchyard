@@ -35,6 +35,7 @@ use axum::{
 use gateway_core::SymbolLimits;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::File;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
@@ -59,7 +60,7 @@ use crate::inflight::InflightControllerHandle;
 use crate::rate_limit::AccountRateLimiter;
 use crate::sse::SseHub;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
-use gateway_core::LatencyHistogram;
+use gateway_core::{LatencyHistogram, RdtscpClock, RdtscpStamp};
 use std::path::{Path, PathBuf};
 
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
@@ -1291,6 +1292,15 @@ pub(super) struct AppState {
     pub(super) v3_live_ack_hist_ns: Arc<LatencyHistogram>,
     pub(super) v3_live_ack_accepted_hist: Arc<LatencyHistogram>,
     pub(super) v3_live_ack_accepted_hist_ns: Arc<LatencyHistogram>,
+    pub(super) v3_live_ack_accepted_tsc_hist_ns: Arc<LatencyHistogram>,
+    pub(super) v3_tsc_clock: Option<Arc<RdtscpClock>>,
+    pub(super) v3_tsc_runtime_enabled: Arc<AtomicBool>,
+    pub(super) v3_tsc_invariant: bool,
+    pub(super) v3_tsc_hz: u64,
+    pub(super) v3_tsc_mismatch_threshold_pct: u64,
+    pub(super) v3_tsc_fallback_total: Arc<AtomicU64>,
+    pub(super) v3_tsc_cross_core_total: Arc<AtomicU64>,
+    pub(super) v3_tsc_mismatch_total: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_append_hist: Arc<LatencyHistogram>,
     pub(super) v3_durable_wal_fsync_hist: Arc<LatencyHistogram>,
@@ -1355,6 +1365,11 @@ pub(super) struct AppState {
     pub(super) v3_soft_reject_pct: u64,
     pub(super) v3_hard_reject_pct: u64,
     pub(super) v3_kill_reject_pct: u64,
+    pub(super) v3_thread_affinity_apply_success_total: Arc<AtomicU64>,
+    pub(super) v3_thread_affinity_apply_failure_total: Arc<AtomicU64>,
+    pub(super) v3_shard_affinity_cpu: Arc<Vec<i64>>,
+    pub(super) v3_durable_affinity_cpu: Arc<Vec<i64>>,
+    pub(super) v3_tcp_server_affinity_cpu: i64,
     pub(super) v3_confirm_store: Arc<V3ConfirmStore>,
     pub(super) v3_confirm_oldest_inflight_us: Arc<AtomicU64>,
     pub(super) v3_confirm_oldest_inflight_us_per_lane: Arc<Vec<Arc<AtomicU64>>>,
@@ -1564,6 +1579,49 @@ impl AppState {
     }
 
     #[inline]
+    pub(super) fn capture_v3_tsc_stamp(&self) -> Option<RdtscpStamp> {
+        if !self.v3_tsc_runtime_enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.v3_tsc_clock.as_ref().and_then(|clock| clock.now())
+    }
+
+    #[inline]
+    pub(super) fn record_v3_tsc_accepted(
+        &self,
+        start: RdtscpStamp,
+        end: RdtscpStamp,
+        fallback_elapsed_ns: u64,
+    ) {
+        if !self.v3_tsc_runtime_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(clock) = self.v3_tsc_clock.as_ref() else {
+            self.v3_tsc_fallback_total.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if !clock.same_core(start, end) {
+            self.v3_tsc_cross_core_total.fetch_add(1, Ordering::Relaxed);
+            self.v3_tsc_fallback_total.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let Some(tsc_elapsed_ns) = clock.elapsed_ns(start, end) else {
+            self.v3_tsc_fallback_total.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if fallback_elapsed_ns > 0 {
+            let diff_ns = tsc_elapsed_ns.abs_diff(fallback_elapsed_ns);
+            let diff_pct = ((diff_ns as f64) * 100.0) / (fallback_elapsed_ns as f64);
+            if diff_pct > self.v3_tsc_mismatch_threshold_pct as f64 {
+                self.v3_tsc_mismatch_total.fetch_add(1, Ordering::Relaxed);
+                self.v3_tsc_fallback_total.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        self.v3_live_ack_accepted_tsc_hist_ns.record(tsc_elapsed_ns);
+    }
+
+    #[inline]
     pub(super) fn v3_durable_confirm_reject_ages_for_lane(&self, lane_id: usize) -> (u64, u64) {
         let mut soft_age_us = self.v3_durable_confirm_soft_reject_age_us;
         let mut hard_age_us = self.v3_durable_confirm_hard_reject_age_us;
@@ -1645,6 +1703,116 @@ fn parse_bool_env(key: &str) -> Option<bool> {
             "0" | "false" | "no" | "off" => Some(false),
             _ => None,
         })
+}
+
+fn parse_cpu_affinity_list_env(key: &str) -> Vec<usize> {
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut cpus = Vec::new();
+    for part in raw.split(',') {
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some((lo, hi)) = token.split_once('-') {
+            let start = lo.trim().parse::<usize>().ok();
+            let end = hi.trim().parse::<usize>().ok();
+            let (Some(start), Some(end)) = (start, end) else {
+                continue;
+            };
+            if start <= end {
+                cpus.extend(start..=end);
+            } else {
+                cpus.extend(end..=start);
+            }
+            continue;
+        }
+        if let Ok(cpu) = token.parse::<usize>() {
+            cpus.push(cpu);
+        }
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    cpus
+}
+
+#[inline]
+fn affinity_cpu_for_worker(cpus: &[usize], idx: usize) -> Option<usize> {
+    if cpus.is_empty() {
+        None
+    } else {
+        Some(cpus[idx % cpus.len()])
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_current_thread_cpu(cpu: usize) -> std::io::Result<()> {
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(cpu, &mut set);
+    }
+    let rc = unsafe {
+        libc::sched_setaffinity(
+            0,
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &set as *const libc::cpu_set_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin_current_thread_cpu(_cpu: usize) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "thread affinity is only supported on Linux",
+    ))
+}
+
+fn spawn_v3_runtime_thread<Fut>(
+    name: String,
+    cpu: Option<usize>,
+    affinity_ok_total: Arc<AtomicU64>,
+    affinity_err_total: Arc<AtomicU64>,
+    fut: Fut,
+) where
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let thread_name = name.clone();
+    let affinity_err_total_spawn = affinity_err_total.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name.clone())
+        .spawn(move || {
+            if let Some(cpu) = cpu {
+                match pin_current_thread_cpu(cpu) {
+                    Ok(()) => {
+                        affinity_ok_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        affinity_err_total_spawn.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(thread = %thread_name, cpu = cpu, error = %err, "failed to pin v3 worker thread");
+                    }
+                }
+            }
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(fut),
+                Err(err) => tracing::error!(thread = %thread_name, error = %err, "failed to build dedicated v3 runtime"),
+            }
+        });
+    if let Err(err) = spawn_result {
+        affinity_err_total.fetch_add(1, Ordering::Relaxed);
+        tracing::error!(thread = %name, error = %err, "failed to spawn dedicated v3 worker thread");
+    }
 }
 
 fn mix_u64(mut x: u64) -> u64 {
@@ -1954,6 +2122,52 @@ pub async fn run(
         }
     }
     let v3_durable_lane_count = v3_shard_count;
+    let v3_shard_affinity_cpus = parse_cpu_affinity_list_env("V3_SHARD_AFFINITY_CPUS");
+    let v3_durable_affinity_cpus = parse_cpu_affinity_list_env("V3_DURABLE_AFFINITY_CPUS");
+    let v3_tcp_server_affinity_cpus = parse_cpu_affinity_list_env("V3_TCP_SERVER_AFFINITY_CPUS");
+    let v3_shard_affinity_layout = Arc::new(
+        (0..v3_shard_count)
+            .map(|idx| {
+                affinity_cpu_for_worker(&v3_shard_affinity_cpus, idx)
+                    .map(|cpu| cpu as i64)
+                    .unwrap_or(-1)
+            })
+            .collect::<Vec<_>>(),
+    );
+    let v3_durable_affinity_layout = Arc::new(
+        (0..v3_durable_lane_count)
+            .map(|idx| {
+                affinity_cpu_for_worker(&v3_durable_affinity_cpus, idx)
+                    .map(|cpu| cpu as i64)
+                    .unwrap_or(-1)
+            })
+            .collect::<Vec<_>>(),
+    );
+    let v3_tcp_server_affinity_cpu = v3_tcp_server_affinity_cpus
+        .first()
+        .copied()
+        .map(|cpu| cpu as i64)
+        .unwrap_or(-1);
+    let v3_tsc_timing_enable = parse_bool_env("V3_TSC_TIMING_ENABLE").unwrap_or(false);
+    let v3_tsc_mismatch_threshold_pct = std::env::var("V3_TSC_MISMATCH_THRESHOLD_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.clamp(1, 500))
+        .unwrap_or(20);
+    let v3_tsc_clock = if v3_tsc_timing_enable {
+        match RdtscpClock::detect() {
+            Some(clock) => Some(Arc::new(clock)),
+            None => {
+                tracing::warn!(
+                    "V3_TSC_TIMING_ENABLE=true but rdtscp clock detection failed; fallback to now_nanos only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let v3_tsc_runtime_enabled = Arc::new(AtomicBool::new(v3_tsc_clock.is_some()));
     let v3_durable_worker_batch_max = std::env::var("V3_DURABLE_WORKER_BATCH_MAX")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -2580,6 +2794,21 @@ pub async fn run(
         v3_live_ack_hist_ns: Arc::new(LatencyHistogram::new()),
         v3_live_ack_accepted_hist: Arc::new(LatencyHistogram::new()),
         v3_live_ack_accepted_hist_ns: Arc::new(LatencyHistogram::new()),
+        v3_live_ack_accepted_tsc_hist_ns: Arc::new(LatencyHistogram::new()),
+        v3_tsc_clock: v3_tsc_clock.clone(),
+        v3_tsc_runtime_enabled: Arc::clone(&v3_tsc_runtime_enabled),
+        v3_tsc_invariant: v3_tsc_clock
+            .as_ref()
+            .map(|clock| clock.invariant_tsc())
+            .unwrap_or(false),
+        v3_tsc_hz: v3_tsc_clock
+            .as_ref()
+            .map(|clock| clock.hz())
+            .unwrap_or(0),
+        v3_tsc_mismatch_threshold_pct,
+        v3_tsc_fallback_total: Arc::new(AtomicU64::new(0)),
+        v3_tsc_cross_core_total: Arc::new(AtomicU64::new(0)),
+        v3_tsc_mismatch_total: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_append_hist: Arc::new(LatencyHistogram::new()),
         v3_durable_wal_fsync_hist: Arc::new(LatencyHistogram::new()),
@@ -2650,6 +2879,11 @@ pub async fn run(
         v3_soft_reject_pct,
         v3_hard_reject_pct,
         v3_kill_reject_pct,
+        v3_thread_affinity_apply_success_total: Arc::new(AtomicU64::new(0)),
+        v3_thread_affinity_apply_failure_total: Arc::new(AtomicU64::new(0)),
+        v3_shard_affinity_cpu: Arc::clone(&v3_shard_affinity_layout),
+        v3_durable_affinity_cpu: Arc::clone(&v3_durable_affinity_layout),
+        v3_tcp_server_affinity_cpu,
         v3_confirm_store: Arc::new(V3ConfirmStore::new(
             v3_confirm_lanes,
             v3_loss_gap_timeout_ms,
@@ -2730,6 +2964,16 @@ pub async fn run(
         v3_stage_serialize_hist: Arc::new(LatencyHistogram::new()),
     };
 
+    info!(
+        shard_affinity = ?v3_shard_affinity_cpus,
+        durable_affinity = ?v3_durable_affinity_cpus,
+        tcp_server_affinity = ?v3_tcp_server_affinity_cpus,
+        tsc_enabled = v3_tsc_runtime_enabled.load(Ordering::Relaxed),
+        tsc_hz = state.v3_tsc_hz,
+        tsc_invariant = state.v3_tsc_invariant,
+        "v3 worker topology tuning"
+    );
+
     if v3_confirm_rebuild_on_start {
         let rebuild_t0 = Instant::now();
         let restored = rebuild_v3_confirm_store_from_wal(&state, v3_confirm_rebuild_max_lines);
@@ -2750,9 +2994,16 @@ pub async fn run(
 
     for (shard_id, v3_rx) in v3_rxs.into_iter().enumerate() {
         let writer_state = state.clone();
-        tokio::spawn(async move {
-            run_v3_single_writer(shard_id, v3_rx, writer_state).await;
-        });
+        let affinity_cpu = affinity_cpu_for_worker(&v3_shard_affinity_cpus, shard_id);
+        spawn_v3_runtime_thread(
+            format!("v3-shard-{shard_id}"),
+            affinity_cpu,
+            Arc::clone(&state.v3_thread_affinity_apply_success_total),
+            Arc::clone(&state.v3_thread_affinity_apply_failure_total),
+            async move {
+                run_v3_single_writer(shard_id, v3_rx, writer_state).await;
+            },
+        );
     }
     for (lane_id, v3_durable_rx) in v3_durable_rxs.into_iter().enumerate() {
         let durable_state = state.clone();
@@ -2760,18 +3011,25 @@ pub async fn run(
         let durable_batch_wait_us = durable_state.v3_durable_worker_batch_wait_us;
         let durable_batch_adaptive_cfg = v3_durable_worker_batch_adaptive_cfg;
         let durable_pressure_cfg = v3_durable_worker_pressure_cfg;
-        tokio::spawn(async move {
-            run_v3_durable_worker(
-                lane_id,
-                v3_durable_rx,
-                durable_state,
-                durable_batch_max,
-                durable_batch_wait_us,
-                durable_batch_adaptive_cfg,
-                durable_pressure_cfg,
-            )
-            .await;
-        });
+        let affinity_cpu = affinity_cpu_for_worker(&v3_durable_affinity_cpus, lane_id);
+        spawn_v3_runtime_thread(
+            format!("v3-durable-{lane_id}"),
+            affinity_cpu,
+            Arc::clone(&state.v3_thread_affinity_apply_success_total),
+            Arc::clone(&state.v3_thread_affinity_apply_failure_total),
+            async move {
+                run_v3_durable_worker(
+                    lane_id,
+                    v3_durable_rx,
+                    durable_state,
+                    durable_batch_max,
+                    durable_batch_wait_us,
+                    durable_batch_adaptive_cfg,
+                    durable_pressure_cfg,
+                )
+                .await;
+            },
+        );
     }
 
     let loss_state = state.clone();
@@ -2807,11 +3065,26 @@ pub async fn run(
     );
     if v3_tcp_enable && v3_tcp_port > 0 {
         let v3_tcp_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = run_v3_tcp_server(v3_tcp_port, v3_tcp_state).await {
-                tracing::error!(error = %err, "v3 tcp server exited");
-            }
-        });
+        let affinity_cpu = v3_tcp_server_affinity_cpus.first().copied();
+        if affinity_cpu.is_some() {
+            spawn_v3_runtime_thread(
+                "v3-tcp-ingress".to_string(),
+                affinity_cpu,
+                Arc::clone(&state.v3_thread_affinity_apply_success_total),
+                Arc::clone(&state.v3_thread_affinity_apply_failure_total),
+                async move {
+                    if let Err(err) = run_v3_tcp_server(v3_tcp_port, v3_tcp_state).await {
+                        tracing::error!(error = %err, "v3 tcp server exited");
+                    }
+                },
+            );
+        } else {
+            tokio::spawn(async move {
+                if let Err(err) = run_v3_tcp_server(v3_tcp_port, v3_tcp_state).await {
+                    tracing::error!(error = %err, "v3 tcp server exited");
+                }
+            });
+        }
     }
 
     let app_base = Router::new()
