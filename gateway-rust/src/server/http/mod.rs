@@ -70,7 +70,7 @@ use orders::{
     encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_amend_order, handle_cancel_order,
     handle_get_order, handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3,
     handle_order, handle_order_v2, handle_order_v3, handle_replace_order,
-    process_order_v3_hot_path,
+    process_order_v3_hot_path_tcp,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -3402,11 +3402,11 @@ async fn handle_v3_tcp_connection(
                 };
                 match principal {
                     Ok(principal) => {
-                        let (status, body) = process_order_v3_hot_path(
+                        let (status, body) = process_order_v3_hot_path_tcp(
                             &state,
                             &principal.account_id,
                             &principal.session_id,
-                            decoded.order_req,
+                            &decoded,
                             t0,
                         );
                         if sticky_auth_context

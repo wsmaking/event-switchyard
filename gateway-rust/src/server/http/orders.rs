@@ -17,7 +17,10 @@ use axum::{
     http::{StatusCode, header::AUTHORIZATION},
 };
 use gateway_core::{RdtscpStamp, now_nanos};
-use std::{sync::{Arc, atomic::Ordering}, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use super::{AppState, AuthErrorResponse, V3OrderTask};
 
@@ -59,7 +62,11 @@ const V3_TCP_PRICE_OFFSET: usize = 288;
 
 pub(super) struct V3TcpDecodedRequest<'a> {
     pub(super) jwt_token: &'a str,
-    pub(super) order_req: OrderRequest,
+    pub(super) symbol_key: [u8; 8],
+    pub(super) side: u8,
+    pub(super) order_type: crate::order::OrderType,
+    pub(super) qty: u64,
+    pub(super) price: u64,
 }
 
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
@@ -462,6 +469,39 @@ struct PositionCapProjection {
     delta_qty: i64,
 }
 
+#[derive(Clone, Copy)]
+struct V3HotRiskInput {
+    symbol_key: Option<[u8; 8]>,
+    side: u8,
+    order_type: crate::order::OrderType,
+    qty: u64,
+    price: u64,
+}
+
+impl V3HotRiskInput {
+    #[inline]
+    fn from_order_request(req: &OrderRequest) -> Self {
+        Self {
+            symbol_key: parse_v3_symbol_key(&req.symbol),
+            side: req.side_byte(),
+            order_type: req.order_type,
+            qty: req.qty,
+            price: req.price.unwrap_or(0),
+        }
+    }
+
+    #[inline]
+    fn from_tcp(decoded: &V3TcpDecodedRequest<'_>) -> Self {
+        Self {
+            symbol_key: Some(decoded.symbol_key),
+            side: decoded.side,
+            order_type: decoded.order_type,
+            qty: decoded.qty,
+            price: decoded.price,
+        }
+    }
+}
+
 fn projected_position_qty(
     current_position_qty: i64,
     delta_qty: i64,
@@ -481,15 +521,29 @@ fn evaluate_v3_hot_risk(
     req: &OrderRequest,
     sampled: bool,
 ) -> Result<PositionCapProjection, &'static str> {
+    evaluate_v3_hot_risk_input(
+        state,
+        account_id,
+        V3HotRiskInput::from_order_request(req),
+        sampled,
+    )
+}
+
+fn evaluate_v3_hot_risk_input(
+    state: &AppState,
+    account_id: &Arc<str>,
+    input: V3HotRiskInput,
+    sampled: bool,
+) -> Result<PositionCapProjection, &'static str> {
     let position_t0 = now_nanos();
-    let side = req.side_byte();
+    let side = input.side;
     if side != 1 && side != 2 {
         return Err("INVALID_SIDE");
     }
-    if req.qty == 0 || req.qty > state.v3_risk_max_order_qty {
+    if input.qty == 0 || input.qty > state.v3_risk_max_order_qty {
         return Err("INVALID_QTY");
     }
-    let symbol_key = match parse_v3_symbol_key(&req.symbol) {
+    let symbol_key = match input.symbol_key {
         Some(v) => v,
         None => return Err("INVALID_SYMBOL"),
     };
@@ -505,13 +559,13 @@ fn evaluate_v3_hot_risk(
     let max_qty = state
         .v3_risk_max_order_qty
         .min(symbol_limits.max_order_qty as u64);
-    if req.qty > max_qty {
+    if input.qty > max_qty {
         return Err("INVALID_QTY");
     }
     let delta_qty = if side == 1 {
-        req.qty as i64
+        input.qty as i64
     } else {
-        -(req.qty as i64)
+        -(input.qty as i64)
     };
     let current_position_qty = state.v3_position_qty(account_id, symbol_key);
     projected_position_qty(
@@ -524,13 +578,13 @@ fn evaluate_v3_hot_risk(
         state.v3_stage_risk_position_hist.record(position_elapsed);
     }
 
-    let price = req.price.unwrap_or(0);
-    if req.order_type == crate::order::OrderType::Limit && price == 0 {
+    let price = input.price;
+    if input.order_type == crate::order::OrderType::Limit && price == 0 {
         return Err("INVALID_PRICE");
     }
 
     let margin_t0 = now_nanos();
-    let notional = (req.qty as u128).saturating_mul(price as u128);
+    let notional = (input.qty as u128).saturating_mul(price as u128);
     let max_notional = state.v3_risk_max_notional.min(symbol_limits.max_notional);
     if sampled {
         let margin_elapsed = now_nanos().saturating_sub(margin_t0) / 1_000;
@@ -565,8 +619,13 @@ pub(super) async fn handle_order_v3(
 ) -> VolatileOrderResponseResult {
     let t0 = now_nanos();
     let principal = authenticate_request(&state, &headers, t0)?;
-    let (status, body) =
-        process_order_v3_hot_path(&state, &principal.account_id, &principal.session_id, req, t0);
+    let (status, body) = process_order_v3_hot_path(
+        &state,
+        &principal.account_id,
+        &principal.session_id,
+        req,
+        t0,
+    );
     Ok((status, Json(body)))
 }
 pub(super) fn process_order_v3_hot_path(
@@ -574,6 +633,38 @@ pub(super) fn process_order_v3_hot_path(
     account_id: &str,
     session_id: &str,
     req: OrderRequest,
+    t0: u64,
+) -> (StatusCode, VolatileOrderResponse) {
+    process_order_v3_hot_path_with_input(
+        state,
+        account_id,
+        session_id,
+        V3HotRiskInput::from_order_request(&req),
+        t0,
+    )
+}
+
+pub(super) fn process_order_v3_hot_path_tcp(
+    state: &AppState,
+    account_id: &str,
+    session_id: &str,
+    decoded: &V3TcpDecodedRequest<'_>,
+    t0: u64,
+) -> (StatusCode, VolatileOrderResponse) {
+    process_order_v3_hot_path_with_input(
+        state,
+        account_id,
+        session_id,
+        V3HotRiskInput::from_tcp(decoded),
+        t0,
+    )
+}
+
+fn process_order_v3_hot_path_with_input(
+    state: &AppState,
+    account_id: &str,
+    session_id: &str,
+    risk_input: V3HotRiskInput,
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
     let t0_tsc = state.capture_v3_tsc_stamp();
@@ -588,10 +679,12 @@ pub(super) fn process_order_v3_hot_path(
 
     // parse段階: JSON展開済みリクエストから必要項目を取り出す。
     let parse_t0 = now_nanos();
-    let symbol = req.symbol.as_str();
-    let qty = req.qty;
-    let price = req.price.unwrap_or(0);
-    let _ = (symbol, qty, price);
+    let _ = (
+        risk_input.side,
+        risk_input.order_type,
+        risk_input.qty,
+        risk_input.price,
+    );
     if hotpath_sampled {
         let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
         state.v3_stage_parse_hist.record(parse_elapsed);
@@ -627,7 +720,8 @@ pub(super) fn process_order_v3_hot_path(
 
     // risk段階: 最小の stateless チェックのみ実行し、共有ロックを避ける。
     let risk_t0 = now_nanos();
-    let risk_result = evaluate_v3_hot_risk(&state, &account_id_ref, &req, hotpath_sampled);
+    let risk_result =
+        evaluate_v3_hot_risk_input(&state, &account_id_ref, risk_input, hotpath_sampled);
     if hotpath_sampled {
         let risk_elapsed = now_nanos().saturating_sub(risk_t0) / 1_000;
         state.v3_stage_risk_hist.record(risk_elapsed);
@@ -1080,8 +1174,7 @@ pub(super) fn decode_v3_tcp_request<'a>(
     let symbol =
         std::str::from_utf8(&symbol_raw[..symbol_len]).map_err(|_| V3_TCP_REASON_BAD_SYMBOL)?;
     let side = match frame[V3_TCP_SIDE_OFFSET] {
-        1 => "BUY",
-        2 => "SELL",
+        1 | 2 => frame[V3_TCP_SIDE_OFFSET],
         _ => return Err(V3_TCP_REASON_BAD_SIDE),
     };
     let order_type = match frame[V3_TCP_TYPE_OFFSET] {
@@ -1100,23 +1193,19 @@ pub(super) fn decode_v3_tcp_request<'a>(
             .expect("price bytes"),
     );
     let price = if order_type == crate::order::OrderType::Market {
-        None
+        0
     } else {
-        Some(raw_price)
+        raw_price
     };
+    let symbol_key = parse_v3_symbol_key(symbol).ok_or(V3_TCP_REASON_BAD_SYMBOL)?;
 
     Ok(V3TcpDecodedRequest {
         jwt_token,
-        order_req: OrderRequest {
-            symbol: symbol.to_string(),
-            side: side.to_string(),
-            order_type,
-            qty,
-            price,
-            time_in_force: crate::order::TimeInForce::Gtc,
-            expire_at: None,
-            client_order_id: None,
-        },
+        symbol_key,
+        side,
+        order_type,
+        qty,
+        price,
     })
 }
 
@@ -3913,11 +4002,14 @@ mod tests {
         let frame = v3_tcp_request(&token, "AAPL", 1, 1, 100, 15_000);
         let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
         assert_eq!(decoded.jwt_token, token);
-        assert_eq!(decoded.order_req.symbol, "AAPL");
-        assert_eq!(decoded.order_req.side, "BUY");
-        assert_eq!(decoded.order_req.order_type, OrderType::Limit);
-        assert_eq!(decoded.order_req.qty, 100);
-        assert_eq!(decoded.order_req.price, Some(15_000));
+        assert_eq!(
+            decoded.symbol_key,
+            parse_v3_symbol_key("AAPL").expect("symbol key")
+        );
+        assert_eq!(decoded.side, 1);
+        assert_eq!(decoded.order_type, OrderType::Limit);
+        assert_eq!(decoded.qty, 100);
+        assert_eq!(decoded.price, 15_000);
     }
 
     #[tokio::test]
