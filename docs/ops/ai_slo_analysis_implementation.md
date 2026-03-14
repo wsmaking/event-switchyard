@@ -1,84 +1,99 @@
-# SLO違反AI分析 実装メモ（mock default / OpenAI opt-in）
+# SLO違反AI分析 実装メモ（Agent一本化 / OpenAI+Claude対応）
 
-最終更新: 2026-03-13
+最終更新: 2026-03-14
 
-## 1. どこに実装したか
+## 1. 実装方針（現在）
 
-- メイン実装:
-  - `scripts/ops/analyze_slo_with_ai.py`
-- 依存追加:
-  - `requirements.txt` に `openai>=1.0.0` を追加
+- 解析ロジックは `ai_incident_agent.py` に一本化
+- `analyze_slo_with_ai.py` は legacy CLI名を維持したラッパー
+  - 内部で `run_agent_with_llm()` を呼び出す
+  - stdout は従来互換（Violation Summary / LLM Analysis / Recommended Metrics）
+- provider は `mock` / `openai` / `claude`（`anthropic` も同義）をサポート
 
-## 2. アーキテクチャ
+## 2. どこに実装したか
+
+- Agent本体: `scripts/ops/ai_incident_agent.py`
+- Provider抽象: `scripts/ops/ai_model_adapter.py`
+  - `MockModelAdapter`
+  - `OpenAIAdapter`
+  - `AnthropicAdapter`（Claude）
+- 互換CLIラッパー: `scripts/ops/analyze_slo_with_ai.py`
+- 負荷+AI統合実行: `scripts/ops/run_ai_perf_probe.py`
+
+依存:
+- `openai>=1.0.0`
+- `anthropic>=0.34.0`
+
+## 3. アーキテクチャ
 
 ```mermaid
 flowchart LR
-  SUM["var/results/{run_name}.summary.txt"] --> CORE["SLO Analyzer\n(parse + fixed-threshold check)"]
-  DOC["docs/ops/current_design_visualization.md\n(Section 2/4/9)"] --> CORE
-  PROM["var/results/{run_name}.metrics.prom\n(optional)"] --> CORE
+  ENTRY1["analyze_slo_with_ai.py\n(legacy CLI wrapper)"] --> AGENT["ai_incident_agent.py\nDetect -> Retrieve -> Analyze -> Report"]
+  ENTRY2["run_v3_open_loop_probe.sh\n(Gate FAIL auto triage)"] --> AGENT
+  ENTRY3["run_ai_perf_probe.py"] --> AGENT
 
-  CORE --> PROMPT["Prompt Builder\n(5-part context)"]
-  PROMPT --> ADAPTER["Provider Adapter\n(default: mock)"]
-  ADAPTER --> MOCK["Mock LLM\n(no API call)"]
-  ADAPTER --> OPENAI["OpenAI API\n(opt-in: --provider openai)"]
-  MOCK --> OUT["stdout\n1) violation summary\n2) LLM analysis\n3) recommended metrics"]
-  OPENAI --> OUT["stdout\n1) violation summary\n2) LLM analysis\n3) recommended metrics"]
+  AGENT --> TOOLS["ai_tools.py\nsummary/metrics/perf/timeseries + RAG"]
+  AGENT --> ADAPTER["ai_model_adapter.py"]
+  ADAPTER --> MOCK["mock"]
+  ADAPTER --> OA["openai"]
+  ADAPTER --> CL["claude (anthropic)"]
 
-  ADAPTER -. future switch .-> CLAUDE["Claude provider\n(future)"]
+  AGENT --> OUT["triage.json / stdout"]
 ```
 
-## 3. どう実装したか（要件マッピング）
+## 4. Provider挙動
 
-| 要件 | 実装箇所 | 実装内容 |
-|---|---|---|
-| 入力（必須）`summary.txt` | `main()` | `--run-name` から `var/results/{run_name}.summary.txt` を解決して必須チェック |
-| 入力（必須）`current_design_visualization.md` | `main()` | `--design-doc`（既定 `docs/ops/current_design_visualization.md`）を必須チェック |
-| 入力（任意）`metrics.prom` | `main()` + `parse_prom_file()` | 存在時のみ読み込み。未存在でも処理継続 |
-| 固定SLO閾値 | `SLO_RULES` | `ack_accepted_p99<=40`, `accepted_rate>=0.99`, `completed_rps>=10000`, `loss_suspect_total==0`, `rejected_killed==0` を固定定義 |
-| 乖離幅計算 | `deviation_pct()` / `format_deviation()` | ルール別に乖離率を計算。閾値0系は `n/a` 表示 |
-| LLMコンテキスト構造 | `build_prompt()` | 1)SLO定義 2)計測値 3)違反と乖離 4)設計Section2/4/9 5)質問文 を1つのプロンプトに整形 |
-| 設計Doc Section 2/4/9優先 | `extract_markdown_sections()` | `## 2.`, `## 4.`, `## 9.` を抽出してプロンプトへ埋め込み |
-| 出力フォーマット（stdout） | `print_stdout_output()` | 1) Violation Summary 2) LLM Analysis 3) Recommended Metrics を固定順で出力 |
-| モデル指定 | CLI引数 `--model` | 既定は `mock-triage` 相当。OpenAI利用時に `gpt-5-nano` 等を指定可能 |
-| LLM連携（デフォルト） | `call_mock_once()` | API呼び出しなしで決定論的JSONを返す |
-| API呼び出し1回（opt-in） | `call_openai_once()` | `--provider openai` 指定時のみ `responses.create(...)` を1回呼び出し |
-| ストリーミング不要 | `call_openai_once()` | 非ストリーミングの同期呼び出しのみ |
-| APIキー環境変数（opt-in） | `call_openai_once()` | `OPENAI_API_KEY` を必須で読み取り |
-| hot path非介入 | 配置設計 | `scripts/ops` のオフライン解析スクリプトとして実装。Gateway本体コードは未変更 |
+| provider | 実際のアダプタ | 既定モデル | 必須環境変数 |
+|---|---|---|---|
+| `mock` | `MockModelAdapter` | `mock-triage-v1` | なし |
+| `openai` | `OpenAIAdapter` | `gpt-5-nano` | `OPENAI_API_KEY` |
+| `claude` / `anthropic` | `AnthropicAdapter` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
 
-## 4. 実行方法
+失敗時:
+- LLM/API失敗時は deterministic report にフォールバック
+- Gateway hot path には非介入（opsスクリプトのみ）
+
+## 5. 実行方法
 
 ```bash
-# dry-run（APIを呼ばず出力確認）
-scripts/ops/analyze_slo_with_ai.py \
-  --run-name v3_open_loop_20260312_215143 \
-  --dry-run
-```
-
-```bash
-# 実行（デフォルト: モック、API呼び出しなし）
-scripts/ops/analyze_slo_with_ai.py \
-  --run-name v3_open_loop_20260312_215143 \
+# 1) 互換CLI（Agent経路）
+python3 scripts/ops/analyze_slo_with_ai.py \
+  --run-name <RUN_NAME> \
   --provider mock
 ```
 
 ```bash
-# 実行（OpenAI APIを1回呼ぶ: opt-in）
+# 2) OpenAI
 export OPENAI_API_KEY=...your_key...
-scripts/ops/analyze_slo_with_ai.py \
-  --run-name v3_open_loop_20260312_215143 \
+python3 scripts/ops/analyze_slo_with_ai.py \
+  --run-name <RUN_NAME> \
   --provider openai \
   --model gpt-5-nano
 ```
 
-## 5. Claudeへ将来切り替えるとき
+```bash
+# 3) Claude
+export ANTHROPIC_API_KEY=...your_key...
+python3 scripts/ops/analyze_slo_with_ai.py \
+  --run-name <RUN_NAME> \
+  --provider claude \
+  --model claude-sonnet-4-20250514
+```
 
-現状は `--provider openai` のみ実装済み。`--provider claude` は予約済み分岐。
+```bash
+# 4) dry-run（LLM呼び出しなし）
+python3 scripts/ops/analyze_slo_with_ai.py \
+  --run-name <RUN_NAME> \
+  --dry-run
+```
 
-切替時の変更点は以下に限定される想定:
+## 6. 最新拡張（Agent入力）
 
-1. `call_openai_once()` と同じ入出力契約の `call_claude_once()` を追加  
-2. `main()` の provider 分岐で `claude` を有効化  
-3. 既存の SLO判定・データ抽出・プロンプト構造・stdout出力はそのまま再利用
+- `summary + metrics + perf + timeseries` を入力として使用
+- `build_causal_signals()` により時系列因果ヒントを生成
+  - `causal_signals.timeline.order`
+  - `causal_signals.timeline.order_consistent`
 
-この分離により、モデル/ベンダ変更時も運用ロジック（SLO評価と文脈構造）を不変にできる。
+関連資料:
+- `docs/ops/ai_impl_structure_map.md`
+- `docs/ops/ai_rag_agent_triage_design.md`

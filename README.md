@@ -298,7 +298,10 @@ python3 scripts/ops/ai_triage_notify.py --triage-json var/results/<RUN_NAME>.tri
 ```
 
 環境変数:
-- `AI_TRIAGE_PROVIDER`: `mock`(default) / `openai`
+- `AI_TRIAGE_PROVIDER`: `mock`(default) / `openai` / `claude`（`anthropic` も可）
+- `AI_LLM_NETWORK_ENABLED`: `0`(default)。`0` の間は課金系LLM呼び出しをブロックして `mock` / deterministic fallback で動作
+- `OPENAI_API_KEY`: `openai` 利用時に必要
+- `ANTHROPIC_API_KEY`: `claude` / `anthropic` 利用時に必要
 - `AI_TRIAGE_GRAFANA`: `1`(default) / `0`で無効化
 - `GRAFANA_URL`, `GRAFANA_USER`, `GRAFANA_PASSWORD`: Grafana接続先
 
@@ -344,11 +347,28 @@ python3 scripts/ops/run_ai_perf_probe.py \
   -- scripts/ops/run_v3_open_loop_probe.sh
 ```
 
+Claudeで解析する場合:
+
+```bash
+export ANTHROPIC_API_KEY=...your_key...
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode auto \
+  --provider claude \
+  --model claude-sonnet-4-20250514 \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+```
+
 出力物:
 - `var/results/<RUN_NAME>.perf.json`
 - `var/results/<RUN_NAME>.triage.json`（`--skip-ai` なし時）
 - `var/results/<RUN_NAME>.perf_stat.csv`（Linux `perf` 使用時）
 - `var/results/<RUN_NAME>.powermetrics.txt` / `.powermetrics.err.txt`（macOS `powermetrics` 使用時）
+- `var/results/<RUN_NAME>.timeseries.jsonl`（`run_v3_open_loop_probe.sh` 実行時、時系列サンプリング）
+
+時系列サンプリング制御（`run_v3_open_loop_probe.sh`）:
+- `ENABLE_TIMESERIES`（default: `1`）
+- `TIMESERIES_INTERVAL_MS`（default: `500`）
+- `TIMESERIES_METRICS`（default: root-cause判定向け主要メトリクス）
 
 ベースライン比較（差分%）:
 

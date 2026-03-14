@@ -13,11 +13,11 @@
 前提制約:
 - `/v3/orders` hot path 非介入
 - read-only 解析
-- 失敗時は既存運用（手動調査 or 単発スクリプト）に即時フォールバック
+- 失敗時は既存運用（手動調査 or deterministic fallback）に即時フォールバック
 
 ## 1. なぜこの題材が「ちょうど良い」か
 
-- 入力データが既にある（`summary.txt`, `metrics.prom`, `perf.json`, `docs/ops/*.md`）
+- 入力データが既にある（`summary.txt`, `metrics.prom`, `perf.json`, `timeseries.jsonl`, `docs/ops/*.md`）
 - 成果が測りやすい（MTTA, 初動正答率, 再現性）
 - 誤作動時の影響が限定的（助言系で、執行ロジックに非介入）
 - RAG/Agentの差分価値が明確（「どの根拠でそう言ったか」を強化できる）
@@ -30,7 +30,8 @@ flowchart LR
     A1["var/results/*.summary.txt"]
     A2["var/results/*.metrics.prom"]
     A3["var/results/*.perf.json"]
-    A4["docs/ops/*.md"]
+    A4["var/results/*.timeseries.jsonl"]
+    A5["docs/ops/*.md"]
   end
 
   subgraph INGEST["Ingest + Index"]
@@ -48,7 +49,7 @@ flowchart LR
 
   subgraph LLM["Model Adapter"]
     D1["OpenAI Adapter\n(default: gpt-5-nano)"]
-    D2["Claude Adapter\n(future)"]
+    D2["Anthropic Adapter\n(default: claude-sonnet-4-20250514)"]
   end
 
   E1["Final Report\nviolation summary / hypotheses / next metrics / citations"]
@@ -56,7 +57,8 @@ flowchart LR
   A1 --> B1
   A2 --> B1
   A3 --> B1
-  A4 --> B1
+  A4 --> C2
+  A5 --> B1
   B1 --> B2 --> B3
   B2 --> B4
   B3 --> C2
@@ -77,6 +79,7 @@ flowchart LR
 3. `var/results/*/*.summary.txt` と `var/results/*.summary.txt`  
 4. `var/results/*/*.metrics.prom` と `var/results/*.metrics.prom`（全文ではなく重要行抽出）
 5. `var/results/*/*.perf.json` と `var/results/*.perf.json`（counter/derived/delta を抽出）
+6. `var/results/*/*.timeseries.jsonl` と `var/results/*.timeseries.jsonl`（Agentが直接読み込み、因果順序判定に使用）
 
 ## 3.2 チャンク戦略
 
@@ -92,6 +95,9 @@ flowchart LR
 - perf.json:
   - 1ファイル1チャンク
   - `counter_mode`, `collection_ok`, `counters.*`, `derived.*`, `delta_vs_baseline.*` を格納
+- timeseries.jsonl:
+  - FTS indexには載せず、Agent実行時に直接ロード
+  - `pressure -> backpressure -> accepted_rate drop` の時系列順序を抽出
 
 ## 3.3 索引方式（推奨: ハイブリッド）
 
@@ -124,6 +130,8 @@ flowchart LR
 3. `retrieve_evidence(query, top_k, filters)`  
 4. `compare_recent_runs(metric_names[], window)`  
 5. `list_related_runs(pattern, limit)`
+6. `get_run_timeseries(run_name)`  
+7. `build_causal_signals(summary, metrics, timeseries, perf)`
 
 すべて read-only。
 
@@ -151,7 +159,7 @@ stateDiagram-v2
 
 ## 4.5 失敗時フォールバック
 
-1. Agent失敗 -> 単発解析スクリプト (`analyze_slo_with_ai.py`)  
+1. Agent失敗 -> deterministic report（SLO違反一覧 + 推奨メトリクス固定リスト）  
 2. LLM失敗 -> deterministic report（SLO違反一覧 + 推奨メトリクス固定リスト）  
 3. Index不整合 -> lexicalのみで継続
 
@@ -166,8 +174,8 @@ interface ModelAdapter:
 ```
 
 実装:
-- `OpenAIAdapter`（初期: `gpt-5-nano`）
-- `ClaudeAdapter`（将来追加）
+- `OpenAIAdapter`（既定: `gpt-5-nano`）
+- `AnthropicAdapter`（既定: `claude-sonnet-4-20250514`）
 
 切替は `--provider` と `--model` のCLI設定のみで実施し、  
 RAG/Agentロジックは不変とする。
@@ -220,10 +228,12 @@ RAG/Agentロジックは不変とする。
 scripts/ops/
   ai_rag_index.py            # 実装済み: index build/update (SQLite FTS5)
   ai_rag_query.py            # 実装済み: retrieval debug CLI
-  ai_incident_agent.py       # 実装済み: orchestrator (mock/openai)
-  ai_model_adapter.py        # 実装済み: ModelAdapter + Mock/OpenAI
-  ai_tools.py                # 実装済み: file/query utilities (read-only)
-  run_ai_perf_probe.py       # 実装済み: probe実行 + perf収集 + triage連携
+  ai_incident_agent.py       # 実装済み: orchestrator (mock/openai/claude)
+  ai_model_adapter.py        # 実装済み: ModelAdapter + Mock/OpenAI/Anthropic
+  ai_tools.py                # 実装済み: file/query + causal signal utilities (read-only)
+  run_ai_perf_probe.py       # 実装済み: probe実行 + perf収集 + triage連携 (mock/openai/claude)
+  analyze_slo_with_ai.py     # 実装済み: legacy CLIラッパー（内部はAgent経路）
+  collect_metrics_timeseries.py  # 実装済み: run中の /metrics 周期サンプリング
 var/ai_index/
   docs.sqlite                # 実行時生成: FTS + metadata
   vectors.jsonl              # optional embeddings
@@ -263,23 +273,21 @@ docs/ops/
 - オフライン評価データで再現性検証
 
 4. Phase D（任意）
-- Claude adapter追加
-- A/B比較（OpenAI vs Claude）で採用判定
+- OpenAI vs Claude のA/B比較運用
+- コスト/品質/応答時間の継続最適化
 
 ## 10. 既存実装との関係
 
-- 既存:
-  - `scripts/ops/analyze_slo_with_ai.py`（単発解析）
-- 位置づけ:
-  - これは Phase Aの前段機能として維持
-  - RAG/Agent導入後も fallback path として残す
+- `scripts/ops/analyze_slo_with_ai.py` は legacy CLI名を維持した互換ラッパー
+- 内部実装は `ai_incident_agent.py` を直接呼び出す（Agent一本化）
+- fallbackは単発経路ではなく deterministic report に統一
 
 ## 11. 実装開始時の最小タスク
 
 1. `ai_rag_index.py` で `docs/ops/current_design_visualization.md` のセクション索引を作る
 2. `ai_rag_query.py` で `accepted_rate` クエリの top-k を可視化する
 3. `ai_incident_agent.py` で `Detect -> Retrieve -> Analyze -> Report` の1ループを実装する
-4. `analyze_slo_with_ai.py` の出力を Agent入力JSONとして再利用する
+4. `analyze_slo_with_ai.py` を Agent呼び出しラッパーに置換して入口を一本化する
 
 ## 12. 実務化ロードマップ（2026-03-14 追記）
 
@@ -287,7 +295,7 @@ docs/ops/
 
 | 項目 | 設計 | 実装 | Gap |
 |---|---|---|---|
-| LLM接続 | OpenAI/Claude切替可能 | MockModelAdapterのみ（if文分岐） | **LLMが繋がっていない** |
+| LLM接続 | OpenAI/Claude切替可能 | OpenAIAdapter + AnthropicAdapter 実装済み | なし |
 | Agent反復 | Analyze→NeedMore→Retrieve ループ | 1直線（ループなし） | **根拠不足時の再検索がない** |
 | インデクス範囲 | docs/ops + var/results | docs/ops/*.md のみ | **過去run結果がRAGで引けない** |
 | 索引方式 | ハイブリッド4段 | FTS5 BM25のみ | Vector/再ランク未実装（後回し可） |
@@ -296,17 +304,17 @@ docs/ops/
 
 ### 12.2 実装ステップ（優先順）
 
-#### Step 1: LLM接続（OpenAIAdapter）
+#### Step 1: LLM接続（OpenAI/Claude）
 
-`ai_model_adapter.py` に `OpenAIAdapter` を追加。
+`ai_model_adapter.py` に `OpenAIAdapter` / `AnthropicAdapter` を実装。
 
-- `openai` パッケージで `chat.completions.create` を呼ぶ
-- `response_format={"type": "json_object"}` でJSON出力を強制
-- system prompt に引用ルール（3.4）を埋め込み、citations なし主張を禁止
-- `--provider openai --model gpt-5-nano` で切替
+- provider切替は `--provider openai|claude`（`anthropic` も同義）
+- JSON出力契約を system prompt 側で固定
+- `--provider openai --model gpt-5-nano` / `--provider claude --model claude-sonnet-4-20250514`
 
 環境変数:
-- `OPENAI_API_KEY`: APIキー（未設定時は mock fallback）
+- `OPENAI_API_KEY`: OpenAI 利用時
+- `ANTHROPIC_API_KEY`: Claude 利用時
 
 #### Step 2: Agent反復ループ
 
@@ -334,6 +342,7 @@ for step in range(MAX_STEPS):
 - `*.summary.txt`: 1ファイル1チャンク（key=value をそのまま格納）
 - `*.metrics.prom`: 重要メトリクスのみ抽出して1チャンク化
 - `*.perf.json`: counter/derived/delta を抽出して1チャンク化
+- `*.timeseries.jsonl`: Agentで直接ロード（index未登録）
 - メタデータ: `type=run_result`, `run_name`, `mtime`
 
 #### Step 4: 評価フレームワーク
@@ -354,9 +363,7 @@ for step in range(MAX_STEPS):
 ```
 try:
     report = run_agent_with_llm(args)        # Agent + LLM
-except (AgentError, TimeoutError):
-    report = run_single_shot(args)            # 単発解析
-except LLMError:
+except (AgentError, TimeoutError, LLMError):
     report = run_deterministic(args)          # SLO違反一覧 + 固定リスト
 ```
 
@@ -365,7 +372,7 @@ except LLMError:
 | 項目 | 理由 |
 |---|---|
 | Vector検索 (Stage C) | FTS5で実用上十分。embedding API依存とコストを増やす価値が薄い |
-| Claude Adapter | OpenAIで動けば十分。ModelAdapterの構造があるので後から即追加可能 |
+| 追加ベンダ統合（Claude以外） | 現状 OpenAI/Claude で運用要件を満たしており、優先度が低い |
 | 再ランク (Stage D) | BM25 + ルールフィルタで実用上十分 |
 | 自動修復 / 設定変更適用 | 設計書4.1で明示的に非目的としている |
 
@@ -375,10 +382,11 @@ except LLMError:
 scripts/ops/
   ai_rag_index.py            # 更新: summary/metrics/perf インデクス追加
   ai_rag_query.py            # 変更なし
-  ai_incident_agent.py       # 更新: Agent反復ループ + フォールバック
-  ai_model_adapter.py        # 更新: OpenAIAdapter追加
-  ai_tools.py                # 変更なし
+  ai_incident_agent.py       # 更新: Agent反復ループ + フォールバック + causal_signals
+  ai_model_adapter.py        # 更新: OpenAIAdapter/AnthropicAdapter + causal_signals prompt投入
+  ai_tools.py                # 更新: causal_signals / timeseries loader
   run_ai_perf_probe.py       # 新規: probe + counter収集 + triage連携
+  collect_metrics_timeseries.py  # 新規: run中時系列収集
   ai_eval.py                 # 新規: 評価フレームワーク
 var/ai_index/
   docs.sqlite                # 更新: summary/metrics/perf チャンク追加
@@ -403,11 +411,17 @@ Section 12 で実装した Agent + RAG + 評価フレームワークを、
   ↓
 負荷試験実行 (run_v3_open_loop_probe.sh)
   ↓
+時系列収集 (collect_metrics_timeseries.py)
+  - var/results/<run>.timeseries.jsonl
+  ↓
 Strict Gate 判定
   ACK p99 ≤ 40μs? accepted_rate ≥ 0.99? LOSS_SUSPECT = 0?
   ↓ PASS → exit 0
   ↓ FAIL
 AI Triage 自動実行 (ai_incident_agent.py)
+  ↓
+causal_signals 生成
+  - pressure -> backpressure -> rate_drop 順序判定
   ↓
 .triage.json 出力 → [artifacts] triage=path
   ↓
@@ -418,15 +432,21 @@ exit 1
 
 | ファイル | 変更内容 |
 |---|---|
-| `scripts/ops/run_v3_open_loop_probe.sh` | Gate FAIL 時に `ai_incident_agent.py` を自動呼び出し。`AI_TRIAGE_PROVIDER` 環境変数で provider 切替（default: `mock`） |
+| `scripts/ops/run_v3_open_loop_probe.sh` | run中に時系列サンプリング（`*.timeseries.jsonl`）を収集。Gate FAIL 時は `ai_incident_agent.py` を自動呼び出し |
+| `scripts/ops/collect_metrics_timeseries.py` | `/metrics` を周期サンプリングして JSONL 出力 |
+| `scripts/ops/ai_tools.py` | `build_causal_signals()` を追加し、時系列順序から主因ヒントを算出 |
 | `scripts/ops/check_v3_local_strict_gate.sh` | loop wrapper の最終 FAIL 時に、生成された `.triage.json` の一覧を表示 |
 
 ### 13.3 制御
 
 | 環境変数 | デフォルト | 説明 |
 |---|---|---|
-| `AI_TRIAGE_PROVIDER` | `mock` | `mock` or `openai`。本番 LLM を使う場合は `openai` に切替 |
+| `AI_TRIAGE_PROVIDER` | `mock` | `mock` / `openai` / `claude`（`anthropic` も可） |
 | `OPENAI_API_KEY` | (なし) | `openai` 時に必要 |
+| `ANTHROPIC_API_KEY` | (なし) | `claude` / `anthropic` 時に必要 |
+| `ENABLE_TIMESERIES` | `1` | `run_v3_open_loop_probe.sh` で時系列収集を有効化 |
+| `TIMESERIES_INTERVAL_MS` | `500` | `/metrics` サンプル間隔（ms） |
+| `TIMESERIES_METRICS` | 主要root-cause群 | 収集対象メトリクスをカンマ区切りで指定 |
 
 Triage 実行は `|| true` でガードされており、Agent 障害時も Gate の exit code に影響しない。
 
@@ -449,5 +469,6 @@ Gate 失敗時に、人が聞く前にレポートが生成され、
 | 順 | 項目 | 状態 | 備考 |
 |---|---|---|---|
 | 1 | Gate → Triage 自動接続 | **完了** | `run_v3_open_loop_probe.sh` に 10 行追加 |
-| 2 | LLM 実接続テスト | 未着手 | API key 設定 + `AI_TRIAGE_PROVIDER=openai` で実行 |
-| 3 | 出力アダプタ | 未着手 | Slack webhook / Grafana annotation API / CI artifact |
+| 2 | 時系列収集 + 因果順序判定 | **完了** | `timeseries.jsonl` + `causal_signals.timeline.order` |
+| 3 | LLM 実接続テスト | **完了** | `openai` / `claude` の両providerで疎通確認済み |
+| 4 | 出力アダプタ | 未着手 | Slack webhook / Grafana annotation API / CI artifact |
