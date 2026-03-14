@@ -34,6 +34,10 @@ TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX="${TARGET_DURABLE_INFLIGHT_HOT_LANE_S
 WARN_DURABLE_INFLIGHT_SKEW_RATIO="${WARN_DURABLE_INFLIGHT_SKEW_RATIO:-2.50}"
 WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE="${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE:-0.30}"
 ENFORCE_GATE="${ENFORCE_GATE:-0}"
+ENABLE_TIMESERIES="${ENABLE_TIMESERIES:-1}"
+TIMESERIES_INTERVAL_MS="${TIMESERIES_INTERVAL_MS:-500}"
+TIMESERIES_TIMEOUT_SEC="${TIMESERIES_TIMEOUT_SEC:-1.0}"
+TIMESERIES_METRICS="${TIMESERIES_METRICS:-gateway_v3_accepted_rate,gateway_v3_rejected_soft_total,gateway_v3_rejected_hard_total,gateway_v3_rejected_killed_total,gateway_v3_loss_suspect_total,gateway_v3_durable_queue_depth,gateway_v3_durable_queue_utilization_pct,gateway_v3_durable_queue_utilization_pct_max,gateway_v3_durable_backlog_growth_per_sec,gateway_v3_durable_backpressure_soft_total,gateway_v3_durable_backpressure_hard_total,gateway_v3_durable_confirm_p99_us}"
 
 # Raised preset by default (can be overridden via env).
 V3_SOFT_REJECT_PCT="${V3_SOFT_REJECT_PCT:-85}"
@@ -75,8 +79,8 @@ V3_DURABLE_ADMISSION_RECOVER_TICKS="${V3_DURABLE_ADMISSION_RECOVER_TICKS:-8}"
 V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US="${V3_DURABLE_ADMISSION_SOFT_FSYNC_P99_US:-4000}"
 V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US="${V3_DURABLE_ADMISSION_HARD_FSYNC_P99_US:-8000}"
 V3_DURABLE_ADMISSION_FSYNC_PRESIGNAL_PCT="${V3_DURABLE_ADMISSION_FSYNC_PRESIGNAL_PCT:-0.75}"
-V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS:-6}"
-V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS:-6}"
+V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS:-0}"
+V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS="${V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS:-0}"
 V3_DURABLE_FSYNC_EWMA_ALPHA_PCT="${V3_DURABLE_FSYNC_EWMA_ALPHA_PCT:-30}"
 V3_DURABLE_FSYNC_SOFT_INFLIGHT_CAP_PCT="${V3_DURABLE_FSYNC_SOFT_INFLIGHT_CAP_PCT:-50}"
 V3_DURABLE_FSYNC_HARD_INFLIGHT_CAP_PCT="${V3_DURABLE_FSYNC_HARD_INFLIGHT_CAP_PCT:-20}"
@@ -207,6 +211,7 @@ LOG_FILE="$OUT_DIR/v3_open_loop_${STAMP}.gateway.log"
 LOAD_OUT="$OUT_DIR/v3_open_loop_${STAMP}.load.txt"
 METRICS_OUT="$OUT_DIR/v3_open_loop_${STAMP}.metrics.prom"
 SUMMARY_OUT="$OUT_DIR/v3_open_loop_${STAMP}.summary.txt"
+TIMESERIES_OUT="$OUT_DIR/v3_open_loop_${STAMP}.timeseries.jsonl"
 AUDIT_LOG_PATH="${AUDIT_LOG_PATH:-$OUT_DIR/v3_open_loop_${STAMP}.audit.log}"
 GATEWAY_WAL_PATH="${GATEWAY_WAL_PATH:-$AUDIT_LOG_PATH}"
 GATEWAY_AUDIT_PATH="${GATEWAY_AUDIT_PATH:-$GATEWAY_WAL_PATH}"
@@ -220,12 +225,24 @@ elif [[ ! -x ./gateway-rust/target/release/gateway-rust ]]; then
 fi
 
 cleanup() {
+  if [[ -n "${TIMESERIES_PID:-}" ]]; then
+    kill "${TIMESERIES_PID}" >/dev/null 2>&1 || true
+    wait "${TIMESERIES_PID}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${GATEWAY_PID:-}" ]]; then
     kill "${GATEWAY_PID}" >/dev/null 2>&1 || true
     wait "${GATEWAY_PID}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
+
+stop_timeseries_sampler() {
+  if [[ -n "${TIMESERIES_PID:-}" ]]; then
+    kill "${TIMESERIES_PID}" >/dev/null 2>&1 || true
+    wait "${TIMESERIES_PID}" >/dev/null 2>&1 || true
+    TIMESERIES_PID=""
+  fi
+}
 
 echo "[start] gateway-rust on ${HOST}:${PORT}"
 rm -f "$AUDIT_LOG_PATH"
@@ -341,6 +358,22 @@ if ! curl -sS "http://${HOST}:${PORT}/health" >/dev/null 2>&1; then
 fi
 
 echo "[load] open-loop transport=${V3_INGRESS_TRANSPORT} target_rps=${TARGET_RPS} duration=${DURATION}s workers=${LOAD_WORKERS} accounts=${LOAD_ACCOUNTS}"
+timeseries_started=0
+timeseries_samples=0
+if [[ "$ENABLE_TIMESERIES" == "1" || "$ENABLE_TIMESERIES" == "true" || "$ENABLE_TIMESERIES" == "TRUE" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 scripts/ops/collect_metrics_timeseries.py \
+      --url "http://${HOST}:${PORT}/metrics" \
+      --out "$TIMESERIES_OUT" \
+      --interval-ms "$TIMESERIES_INTERVAL_MS" \
+      --metrics "$TIMESERIES_METRICS" \
+      --timeout-sec "$TIMESERIES_TIMEOUT_SEC" >/dev/null 2>&1 &
+    TIMESERIES_PID=$!
+    timeseries_started=1
+  else
+    echo "[timeseries] skipped: python3 not found"
+  fi
+fi
 load_final_catchup_flag=()
 if [[ "${LOAD_FINAL_CATCHUP}" == "1" || "${LOAD_FINAL_CATCHUP}" == "true" || "${LOAD_FINAL_CATCHUP}" == "TRUE" ]]; then
   load_final_catchup_flag+=(--final-catchup)
@@ -380,6 +413,10 @@ else
 fi
 
 curl -sS "http://${HOST}:${PORT}/metrics" >"$METRICS_OUT"
+stop_timeseries_sampler
+if [[ "$timeseries_started" == "1" && -f "$TIMESERIES_OUT" ]]; then
+  timeseries_samples="$(wc -l <"$TIMESERIES_OUT" | awk '{print $1}')"
+fi
 
 load_value() {
   local key="$1"
@@ -419,6 +456,13 @@ server_rejected_killed_total="$(metric_value gateway_v3_rejected_killed_total)"
 server_loss_suspect_total="$(metric_value gateway_v3_loss_suspect_total)"
 server_durable_confirm_p99_us="$(metric_value gateway_v3_durable_confirm_p99_us)"
 server_durable_confirm_p999_us="$(metric_value gateway_v3_durable_confirm_p999_us)"
+server_durable_queue_depth="$(metric_value gateway_v3_durable_queue_depth)"
+server_durable_queue_capacity="$(metric_value gateway_v3_durable_queue_capacity)"
+server_durable_queue_utilization_pct="$(metric_value gateway_v3_durable_queue_utilization_pct)"
+server_durable_queue_utilization_pct_max="$(metric_value gateway_v3_durable_queue_utilization_pct_max)"
+server_durable_backlog_growth_per_sec="$(metric_value gateway_v3_durable_backlog_growth_per_sec)"
+server_durable_queue_full_total="$(metric_value gateway_v3_durable_queue_full_total)"
+server_durable_queue_closed_total="$(metric_value gateway_v3_durable_queue_closed_total)"
 server_durable_backpressure_soft_total="$(metric_value gateway_v3_durable_backpressure_soft_total)"
 server_durable_backpressure_hard_total="$(metric_value gateway_v3_durable_backpressure_hard_total)"
 server_durable_admission_controller_enabled="$(metric_value gateway_v3_durable_admission_controller_enabled)"
@@ -479,6 +523,13 @@ server_rejected_killed_total="${server_rejected_killed_total:-0}"
 server_loss_suspect_total="${server_loss_suspect_total:-0}"
 server_durable_confirm_p99_us="${server_durable_confirm_p99_us:-0}"
 server_durable_confirm_p999_us="${server_durable_confirm_p999_us:-0}"
+server_durable_queue_depth="${server_durable_queue_depth:-0}"
+server_durable_queue_capacity="${server_durable_queue_capacity:-0}"
+server_durable_queue_utilization_pct="${server_durable_queue_utilization_pct:-0}"
+server_durable_queue_utilization_pct_max="${server_durable_queue_utilization_pct_max:-0}"
+server_durable_backlog_growth_per_sec="${server_durable_backlog_growth_per_sec:-0}"
+server_durable_queue_full_total="${server_durable_queue_full_total:-0}"
+server_durable_queue_closed_total="${server_durable_queue_closed_total:-0}"
 server_durable_lanes="${server_durable_lanes:-0}"
 server_confirm_store_lanes="${server_confirm_store_lanes:-0}"
 server_durable_worker_max_inflight_receipts="${server_durable_worker_max_inflight_receipts:-0}"
@@ -540,6 +591,10 @@ target_durable_inflight_skew_ratio_max=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}
 target_durable_inflight_hot_lane_share_max=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}
 warn_durable_inflight_skew_ratio=${WARN_DURABLE_INFLIGHT_SKEW_RATIO}
 warn_durable_inflight_hot_lane_share=${WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE}
+timeseries_enabled=${ENABLE_TIMESERIES}
+timeseries_interval_ms=${TIMESERIES_INTERVAL_MS}
+timeseries_samples=${timeseries_samples}
+timeseries_metrics=${TIMESERIES_METRICS}
 ingress_transport=${V3_INGRESS_TRANSPORT}
 v3_http_ingress_enable=${V3_HTTP_INGRESS_ENABLE}
 v3_http_confirm_enable=${V3_HTTP_CONFIRM_ENABLE}
@@ -641,6 +696,13 @@ server_live_ack_accepted_p999_us=${server_live_ack_accepted_p999_us}
 server_accepted_rate=${server_accepted_rate}
 server_durable_confirm_p99_us=${server_durable_confirm_p99_us}
 server_durable_confirm_p999_us=${server_durable_confirm_p999_us}
+server_durable_queue_depth=${server_durable_queue_depth}
+server_durable_queue_capacity=${server_durable_queue_capacity}
+server_durable_queue_utilization_pct=${server_durable_queue_utilization_pct}
+server_durable_queue_utilization_pct_max=${server_durable_queue_utilization_pct_max}
+server_durable_backlog_growth_per_sec=${server_durable_backlog_growth_per_sec}
+server_durable_queue_full_total=${server_durable_queue_full_total}
+server_durable_queue_closed_total=${server_durable_queue_closed_total}
 server_accepted_total=${server_accepted_total}
 server_rejected_soft_total=${server_rejected_soft_total}
 server_rejected_hard_total=${server_rejected_hard_total}
@@ -696,11 +758,13 @@ warn_lane_hot_lane_share=${warn_lane_hot_lane_share}
 gate_pass=${overall_pass}
 load_out=${LOAD_OUT}
 metrics_out=${METRICS_OUT}
+timeseries_out=${TIMESERIES_OUT}
 gateway_log=${LOG_FILE}
 EOF
 
 echo "[summary] offered_rps=${offered_rps} completed_rps=${completed_rps} client_accepted_rate=${client_accepted_rate} server_accepted_rate=${server_accepted_rate}"
 echo "[summary] server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}"
+echo "[summary_durable] queue_util_max=${server_durable_queue_utilization_pct_max} backlog_growth_per_sec=${server_durable_backlog_growth_per_sec} backpressure_soft_total=${server_durable_backpressure_soft_total} backpressure_hard_total=${server_durable_backpressure_hard_total}"
 echo "[gate] completed_rps>=${completed_rps_floor} (target=${TARGET_COMPLETED_RPS}, eps=${TARGET_COMPLETED_RPS_EPSILON}):${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
 echo "[lane] observed_lanes=${server_durable_receipt_inflight_lanes_observed} skew_ratio=${server_durable_receipt_inflight_skew_ratio} hot_lane_share=${server_durable_receipt_inflight_hot_lane_share} max_lane_inflight=${server_durable_receipt_inflight_max_lane_max} max_global_inflight=${server_durable_receipt_inflight_max}"
 echo "[gate_lane] coverage:${pass_lane_coverage} lane_cap:${pass_lane_inflight_cap} global_cap:${pass_global_inflight_cap} skew<=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}:${pass_lane_inflight_skew} hot_share<=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}:${pass_lane_hot_lane_share}"
@@ -717,5 +781,32 @@ fi
 
 if [[ "$ENFORCE_GATE" == "1" && "$overall_pass" != "1" ]]; then
   echo "FAIL: open-loop strict gate not satisfied"
+  # Auto-triage: run AI incident agent on gate failure.
+  RUN_NAME="v3_open_loop_${STAMP}"
+  TRIAGE_OUT="$OUT_DIR/${RUN_NAME}.triage.json"
+  AI_TRIAGE_PROVIDER="${AI_TRIAGE_PROVIDER:-mock}"
+  AI_LLM_NETWORK_ENABLED="${AI_LLM_NETWORK_ENABLED:-0}"
+  if [[ "$AI_LLM_NETWORK_ENABLED" != "1" && "$AI_TRIAGE_PROVIDER" != "mock" ]]; then
+    echo "[triage] paid LLM disabled (AI_LLM_NETWORK_ENABLED=${AI_LLM_NETWORK_ENABLED}); forcing provider=mock"
+    AI_TRIAGE_PROVIDER="mock"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    echo "[triage] running AI triage agent (provider=${AI_TRIAGE_PROVIDER})..."
+    python3 "$ROOT_DIR/scripts/ops/ai_incident_agent.py" \
+      --run-name "$RUN_NAME" \
+      --results-dir "$OUT_DIR" \
+      --provider "$AI_TRIAGE_PROVIDER" \
+      --out "$TRIAGE_OUT" 2>&1 || echo "[triage] agent failed (non-fatal)"
+    if [[ -f "$TRIAGE_OUT" ]]; then
+      echo "[artifacts] triage=${TRIAGE_OUT}"
+      # Post triage to Grafana as annotation.
+      if [[ "${AI_TRIAGE_GRAFANA:-1}" == "1" ]]; then
+        python3 "$ROOT_DIR/scripts/ops/ai_triage_notify.py" \
+          --triage-json "$TRIAGE_OUT" 2>&1 || echo "[grafana] annotation failed (non-fatal)"
+      fi
+    fi
+  else
+    echo "[triage] skipped: python3 not found"
+  fi
   exit 1
 fi

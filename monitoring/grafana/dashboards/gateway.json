@@ -12,6 +12,22 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "name": "AI Triage (Gate Fail)",
+        "target": {
+          "limit": 100,
+          "matchAny": true,
+          "tags": ["gate-fail"],
+          "type": "tags"
+        }
       }
     ]
   },
@@ -20,7 +36,7 @@
   "graphTooltip": 0,
   "id": null,
   "links": [],
-  "liveNow": true,
+  "liveNow": false,
   "panels": [
     {
       "datasource": {
@@ -29,222 +45,21 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "reqps"
+          "unit": "percentunit"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 7,
+        "w": 6,
         "x": 0,
         "y": 0
       },
       "id": 1,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "rate(gateway_http_requests_total[5s])",
-          "legendFormat": "http requests",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(gateway_http_unauthorized_total[5s])",
-          "legendFormat": "unauthorized",
-          "refId": "B"
-        }
-      ],
-      "title": "HTTP Request Rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "ops"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "rate(gateway_orders_accepted_total[5s])",
-          "legendFormat": "accepted (202)",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(gateway_orders_rejected_total[5s])",
-          "legendFormat": "rejected",
-          "refId": "B"
-        },
-        {
-          "expr": "rate(gateway_cancels_requested_total[5s])",
-          "legendFormat": "cancel requested",
-          "refId": "C"
-        }
-      ],
-      "title": "Order/Cxl Rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1000
-              },
-              {
-                "color": "red",
-                "value": 5000
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 8
-      },
-      "id": 3,
-      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -253,17 +68,17 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "textMode": "auto"
       },
       "targets": [
         {
-          "expr": "gateway_fastpath_queue_depth",
+          "expr": "gateway_v3_accepted_rate",
+          "legendFormat": "accepted_rate",
           "refId": "A"
         }
       ],
-      "title": "FastPath Queue Depth",
-      "type": "gauge"
+      "title": "Accepted Rate",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -272,87 +87,124 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
+          "unit": "us"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "gateway_live_ack_accepted_p99_us",
+          "legendFormat": "ack_accepted_p99_us",
+          "refId": "A"
+        }
+      ],
+      "title": "ACK Accepted p99",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "us"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "gateway_v3_durable_confirm_p99_us",
+          "legendFormat": "durable_confirm_p99_us",
+          "refId": "A"
+        }
+      ],
+      "title": "Durable Confirm p99",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
           "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 8
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 0
       },
       "id": 4,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "textMode": "auto"
       },
       "targets": [
         {
-          "expr": "gateway_sse_clients{scope=\"order\"}",
-          "legendFormat": "order stream",
+          "expr": "gateway_v3_rejected_hard_total",
+          "legendFormat": "rejected_hard_total",
           "refId": "A"
-        },
-        {
-          "expr": "gateway_sse_clients{scope=\"account\"}",
-          "legendFormat": "account stream",
-          "refId": "B"
         }
       ],
-      "title": "SSE Clients",
-      "type": "timeseries"
+      "title": "Rejected Hard Total",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -361,59 +213,15 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 8
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 7
       },
       "id": 5,
       "options": {
@@ -430,17 +238,27 @@
       },
       "targets": [
         {
-          "expr": "gateway_sse_dispatch_queue_depth",
-          "legendFormat": "dispatch queue depth",
+          "expr": "rate(gateway_v3_accepted_total[1m])",
+          "legendFormat": "accepted/s",
           "refId": "A"
         },
         {
-          "expr": "rate(gateway_sse_dispatch_dropped_total[5s])",
-          "legendFormat": "dropped/sec",
+          "expr": "rate(gateway_v3_rejected_soft_total[1m])",
+          "legendFormat": "rejected_soft/s",
           "refId": "B"
+        },
+        {
+          "expr": "rate(gateway_v3_rejected_hard_total[1m])",
+          "legendFormat": "rejected_hard/s",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(gateway_v3_rejected_killed_total[1m])",
+          "legendFormat": "rejected_killed/s",
+          "refId": "D"
         }
       ],
-      "title": "SSE Dispatch",
+      "title": "Order Outcome Rate",
       "type": "timeseries"
     },
     {
@@ -450,59 +268,15 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
           "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
-        "x": 0,
-        "y": 16
+        "x": 12,
+        "y": 7
       },
       "id": 6,
       "options": {
@@ -519,22 +293,17 @@
       },
       "targets": [
         {
-          "expr": "gateway_kafka_publisher_queue_depth",
-          "legendFormat": "kafka queue depth",
+          "expr": "gateway_v3_queue_depth",
+          "legendFormat": "ingress_queue_depth",
           "refId": "A"
         },
         {
-          "expr": "rate(gateway_kafka_publisher_dropped_total[5s])",
-          "legendFormat": "dropped/sec",
+          "expr": "gateway_v3_durable_queue_depth",
+          "legendFormat": "durable_queue_depth",
           "refId": "B"
-        },
-        {
-          "expr": "rate(gateway_kafka_publisher_errors_total[5s])",
-          "legendFormat": "errors/sec",
-          "refId": "C"
         }
       ],
-      "title": "Kafka Publisher Health",
+      "title": "Queue Depth",
       "type": "timeseries"
     },
     {
@@ -544,58 +313,14 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "bytes"
+          "unit": "percent"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 16
       },
       "id": 7,
@@ -613,17 +338,17 @@
       },
       "targets": [
         {
-          "expr": "jvm_heap_used_bytes",
-          "legendFormat": "heap used",
+          "expr": "gateway_v3_queue_utilization_pct",
+          "legendFormat": "ingress_queue_util_pct",
           "refId": "A"
         },
         {
-          "expr": "jvm_heap_max_bytes",
-          "legendFormat": "heap max",
+          "expr": "gateway_v3_durable_queue_utilization_pct_max",
+          "legendFormat": "durable_queue_util_pct_max",
           "refId": "B"
         }
       ],
-      "title": "JVM Heap (Gateway)",
+      "title": "Queue Utilization (%)",
       "type": "timeseries"
     },
     {
@@ -633,59 +358,15 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
           "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
-        "x": 0,
-        "y": 24
+        "x": 12,
+        "y": 16
       },
       "id": 8,
       "options": {
@@ -702,30 +383,38 @@
       },
       "targets": [
         {
-          "expr": "jvm_threads",
-          "legendFormat": "threads",
+          "expr": "gateway_v3_loss_suspect_total",
+          "legendFormat": "loss_suspect_total",
           "refId": "A"
         },
         {
-          "expr": "gateway_uptime_seconds",
-          "legendFormat": "uptime(s)",
+          "expr": "gateway_v3_shard_killed_total",
+          "legendFormat": "shard_killed_total",
           "refId": "B"
+        },
+        {
+          "expr": "gateway_v3_global_killed_total",
+          "legendFormat": "global_killed_total",
+          "refId": "C"
         }
       ],
-      "title": "Process Basics (Gateway)",
+      "title": "Loss/Kill Counters",
       "type": "timeseries"
     }
   ],
-  "refresh": "1s",
-  "schemaVersion": 38,
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "style": "dark",
   "tags": [
-    "gateway"
+    "gateway",
+    "v3",
+    "rust"
   ],
   "templating": {
     "list": []
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
@@ -735,4 +424,3 @@
   "version": 1,
   "weekStart": ""
 }
-

@@ -4222,28 +4222,19 @@ async fn run_v3_loss_monitor(state: AppState) {
     let mut confirm_hard_over_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_soft_clear_streak_per_lane = vec![0u64; lane_count];
     let mut confirm_hard_clear_streak_per_lane = vec![0u64; lane_count];
+    // Fsync-only escalation is opt-in.
+    // Keep durability signals observable, but avoid hard-clamping admission by storage jitter
+    // unless an explicit sustain tick is configured.
     let fsync_only_soft_sustain_ticks =
         std::env::var("V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(
-                state
-                    .v3_durable_admission_sustain_ticks
-                    .saturating_mul(2)
-                    .max(1),
-            );
+            .unwrap_or(0);
     let fsync_only_hard_sustain_ticks =
         std::env::var("V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(
-                state
-                    .v3_durable_admission_sustain_ticks
-                    .saturating_mul(2)
-                    .max(1),
-            );
+            .unwrap_or(0);
     loop {
         ticker.tick().await;
         let now_ns = gateway_core::now_nanos();
@@ -4802,9 +4793,11 @@ async fn run_v3_loss_monitor(state: AppState) {
                 } else {
                     fsync_hard_streak_per_lane[lane_id] = 0;
                 }
-                let fsync_only_soft = fsync_soft
+                let fsync_only_soft = fsync_only_soft_sustain_ticks > 0
+                    && fsync_soft
                     && fsync_soft_streak_per_lane[lane_id] >= fsync_only_soft_sustain_ticks;
-                let fsync_only_hard = fsync_hard
+                let fsync_only_hard = fsync_only_hard_sustain_ticks > 0
+                    && fsync_hard
                     && fsync_hard_streak_per_lane[lane_id] >= fsync_only_hard_sustain_ticks;
                 let fsync_presignal_queue_pct = (state.v3_durable_soft_reject_pct as f64
                     * state.v3_durable_admission_fsync_presignal_pct)

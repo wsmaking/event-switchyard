@@ -40,6 +40,12 @@ data/
 LY*.md
 README.md
 *.md
+!docs/ops/ai_slo_analysis_implementation.md
+!docs/ops/ai_rag_agent_triage_design.md
+!docs/ops/ai_impl_structure_map.md
+
+# --- Secrets
+.env
 
 # --- Docker
 *.local.yaml
@@ -48,9 +54,8 @@ W1-*.html
 W1-*.csv
 symbols.txt
 e1
-var/results/
-var/logs/
-var/run/
+var/
+# If you really need to commit a file under var/, use: git add -f var/<path>
 *.pid
 *.jwt
 .gradle-user-home/
