@@ -178,9 +178,9 @@ export V3_TCP_SERVER_AFFINITY_CPUS=10
 export V3_TSC_TIMING_ENABLE=true
 export V3_TSC_MISMATCH_THRESHOLD_PCT=20
 # worker実行モデル A/B（true=専用current-thread runtime, false=tokio::spawn）
-export V3_DEDICATED_WORKER_RUNTIME=true
+export V3_DEDICATED_WORKER_RUNTIME=false
 # ホットパス計測ヒストグラムのサンプリング間隔（1=全件）
-export V3_HOTPATH_HISTOGRAM_SAMPLE_RATE=1
+export V3_HOTPATH_HISTOGRAM_SAMPLE_RATE=8
 # プロセスのCPU固定（taskset）
 export V3_GATEWAY_TASKSET_CPUS=2-9
 scripts/ops/run_v3_open_loop_probe.sh
