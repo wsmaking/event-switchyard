@@ -717,5 +717,27 @@ fi
 
 if [[ "$ENFORCE_GATE" == "1" && "$overall_pass" != "1" ]]; then
   echo "FAIL: open-loop strict gate not satisfied"
+  # Auto-triage: run AI incident agent on gate failure.
+  RUN_NAME="v3_open_loop_${STAMP}"
+  TRIAGE_OUT="$OUT_DIR/${RUN_NAME}.triage.json"
+  AI_TRIAGE_PROVIDER="${AI_TRIAGE_PROVIDER:-mock}"
+  if command -v python3 >/dev/null 2>&1; then
+    echo "[triage] running AI triage agent (provider=${AI_TRIAGE_PROVIDER})..."
+    python3 "$ROOT_DIR/scripts/ops/ai_incident_agent.py" \
+      --run-name "$RUN_NAME" \
+      --results-dir "$OUT_DIR" \
+      --provider "$AI_TRIAGE_PROVIDER" \
+      --out "$TRIAGE_OUT" 2>&1 || echo "[triage] agent failed (non-fatal)"
+    if [[ -f "$TRIAGE_OUT" ]]; then
+      echo "[artifacts] triage=${TRIAGE_OUT}"
+      # Post triage to Grafana as annotation.
+      if [[ "${AI_TRIAGE_GRAFANA:-1}" == "1" ]]; then
+        python3 "$ROOT_DIR/scripts/ops/ai_triage_notify.py" \
+          --triage-json "$TRIAGE_OUT" 2>&1 || echo "[grafana] annotation failed (non-fatal)"
+      fi
+    fi
+  else
+    echo "[triage] skipped: python3 not found"
+  fi
   exit 1
 fi

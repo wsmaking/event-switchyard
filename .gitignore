@@ -40,6 +40,9 @@ data/
 LY*.md
 README.md
 *.md
+!docs/ops/ai_slo_analysis_implementation.md
+!docs/ops/ai_rag_agent_triage_design.md
+!docs/ops/ai_impl_structure_map.md
 
 # --- Docker
 *.local.yaml

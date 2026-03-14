@@ -149,6 +149,219 @@ TARGET_RPS=10000 DURATION=300 scripts/ops/run_v3_open_loop_probe.sh
 - `gateway_v3_stage_enqueue_p99_us`
 - `gateway_v3_stage_serialize_p99_us`
 
+## モニタリング（Grafana + Prometheus）
+
+### 環境共通の検証手順（macOS / Linux）
+
+前提:
+- Docker + `docker compose` が使えること（Linux は Docker 20.10+ 推奨）
+- Python 3.10+（`scripts/ops/open_loop_v3_load.py` 実行用）
+- Windows は WSL2 上で実行する想定
+
+0. 検証対象の Gateway endpoint を決める（既定: `127.0.0.1:8081`）
+```bash
+export GATEWAY_HOST=127.0.0.1
+export GATEWAY_PORT=8081
+```
+- Prometheus の既定 scrape 先は `host.docker.internal:8081`。
+- `GATEWAY_PORT` を変える場合は `monitoring/prometheus.yml` も同じポートに合わせる。
+
+1. Gateway が `/health` と `/metrics` を返す状態にする
+```bash
+curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/health"
+curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | head
+```
+
+2. Prometheus + Grafana を起動する（composeファイルを明示）
+```bash
+docker compose -f docker-compose.yml --profile monitoring up -d prometheus grafana
+```
+
+3. Monitoring 側の起動確認
+```bash
+curl -sS http://127.0.0.1:9090/-/ready
+curl -sS http://127.0.0.1:3000/api/health
+```
+
+4. Prometheus ターゲット確認
+```bash
+curl -sS 'http://127.0.0.1:9090/api/v1/targets?state=active'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="event-switchyard-gateway"}'
+```
+- `event-switchyard-gateway (host.docker.internal:8081)` が `health: up` ならOK。
+- `hft-fast-path (host.docker.internal:8080)` は Kotlin 側未起動なら `down` で正常。
+
+5. 負荷前メトリクス確認
+```bash
+curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | grep -E '^(gateway_v3_accepted_total|gateway_v3_rejected_soft_total|gateway_v3_rejected_hard_total|gateway_v3_rejected_killed_total|gateway_v3_accepted_rate) '
+```
+
+6. 再計測を実行
+- 推奨（最善条件の再計測 + gate判定 + summary出力）:
+```bash
+export PORT="${GATEWAY_PORT}" DURATION=60 TARGET_RPS=10000 TARGET_COMPLETED_RPS=10000 \
+  TARGET_ACK_ACCEPTED_P99_US=40 TARGET_ACCEPTED_RATE=0.99 \
+  TARGET_DURABLE_CONFIRM_P99_US=120000000 WARN_DURABLE_CONFIRM_P99_US=120000000 \
+  ENFORCE_GATE=1 V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS=0 \
+  V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS=0 BUILD_RELEASE=0
+scripts/ops/run_v3_open_loop_probe.sh
+```
+- 手元 Gateway に対して軽く負荷だけ流したい場合:
+```bash
+scripts/ops/open_loop_v3_load.py --host "${GATEWAY_HOST}" --port "${GATEWAY_PORT}" --duration-sec 20 --target-rps 1000 --workers 32 --accounts 16
+```
+
+7. 負荷後メトリクス確認（増分確認）
+```bash
+curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | grep -E '^(gateway_v3_accepted_total|gateway_v3_rejected_soft_total|gateway_v3_rejected_hard_total|gateway_v3_rejected_killed_total|gateway_v3_accepted_rate) '
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_rejected_hard_total[1m])'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_accepted_total[1m])'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increase(gateway_v3_accepted_total[15m])'
+```
+
+注記:
+- `gateway_v3_accepted_rate` は累積カウンタ比率（process start以降）なので、過去runの影響を受ける。
+- 「直近の受理状況」を見るときは `rate(gateway_v3_accepted_total[1m])` と reject系 `rate(...)` を併用する。
+- `run_v3_open_loop_probe.sh` は run 終了時に Gateway を停止するため、`up` は `0` に戻る。計測有無は `increase(...[15m])` で確認する。
+
+### Grafana で確認
+1. `http://localhost:3000` を開く
+2. ログイン: `admin` / `admin`
+3. 時間範囲を `Last 15 minutes` に設定
+4. ダッシュボード:
+   - `http://localhost:3000/d/hft-fast-path/hft-fast-path-real-time-performance`
+   - `http://localhost:3000/d/gateway-ops/gateway-operations`
+5. クエリを直接確認する場合:
+   - 左メニュー `Explore` を開く
+   - クエリ行 `A` の右隣 datasource が `Prometheus` になっていることを確認
+   - `Prometheus disabled` と表示される場合は datasource プルダウンから `Prometheus` を選択
+   - クエリ例:
+     - `rate(gateway_v3_accepted_total[1m])`
+     - `rate(gateway_v3_rejected_hard_total[1m])`
+     - `increase(gateway_v3_accepted_total[15m])`
+     - `gateway_live_ack_accepted_p99_us`
+
+### トラブルシュート
+
+#### 1) Grafanaに何も表示されない
+- Prometheusで直接クエリ:
+```bash
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="event-switchyard-gateway"}'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_accepted_total[1m])'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increase(gateway_v3_accepted_total[15m])'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=gateway_live_ack_accepted_p99_us'
+```
+- ここで値が返るなら、Grafana側の時間範囲/ダッシュボード選択の問題。
+
+#### 2) `event-switchyard-gateway` が `down`
+- まず Gateway が `http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics` で応答するか確認。
+- ポートが `8081` 以外なら `monitoring/prometheus.yml` の target を修正し、Prometheus再起動:
+```bash
+docker compose -f docker-compose.yml --profile monitoring restart prometheus
+```
+
+#### 3) 古いダッシュボード定義が残る
+- monitoring volume を初期化して再作成:
+```bash
+docker compose -f docker-compose.yml --profile monitoring down -v
+docker compose -f docker-compose.yml --profile monitoring up -d prometheus grafana
+```
+
+#### 4) `/v3/orders` が `500 {"error":"SecretNotConfigured"}` を返す
+- Gateway起動時に `JWT_HS256_SECRET` が未設定。
+- 例（accepted確認を優先する簡易起動）:
+```bash
+cd gateway-rust
+JWT_HS256_SECRET=secret123 V3_DURABLE_ADMISSION_CONTROLLER_ENABLED=0 ./target/release/gateway-rust
+```
+
+### Grafanaログインできない場合
+```bash
+docker exec hft-grafana grafana cli admin reset-admin-password admin
+```
+
+### 停止
+```bash
+docker compose -f docker-compose.yml --profile monitoring down
+```
+
+## AI Triage（Gate失敗時の自動原因分析）
+
+Gate失敗時に自動実行され、Grafanaにannotationとして投稿される。
+
+```bash
+# 手動実行
+python3 scripts/ops/ai_incident_agent.py --run-name <RUN_NAME> --results-dir var/results
+
+# Grafanaに手動投稿
+python3 scripts/ops/ai_triage_notify.py --triage-json var/results/<RUN_NAME>.triage.json
+```
+
+環境変数:
+- `AI_TRIAGE_PROVIDER`: `mock`(default) / `openai`
+- `AI_TRIAGE_GRAFANA`: `1`(default) / `0`で無効化
+- `GRAFANA_URL`, `GRAFANA_USER`, `GRAFANA_PASSWORD`: Grafana接続先
+
+### CPUカウンタ付き実行（Mac/Linux共通）
+
+`run_ai_perf_probe.py` は「負荷実行 + CPU/電力カウンタ収集 + triage」を1回で実行する。
+
+```bash
+# 1) RAG index更新（docs + summary + metrics + perf）
+python3 scripts/ops/ai_rag_index.py --docs-dir docs/ops --results-dir var/results --db-path var/ai_index/docs.sqlite
+
+# 2) 環境非依存でまず確実に動かす（counterなし）
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode none \
+  --provider mock \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+```
+
+OS別カウンタ収集:
+
+```bash
+# Linux: perf stat
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode linux-perf \
+  --provider mock \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+
+# macOS: powermetrics（権限により collection_ok=false になる場合あり）
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode mac-powermetrics \
+  --provider mock \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+```
+
+OpenAIで解析する場合:
+
+```bash
+export OPENAI_API_KEY=...your_key...
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode auto \
+  --provider openai \
+  --model gpt-5-nano \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+```
+
+出力物:
+- `var/results/<RUN_NAME>.perf.json`
+- `var/results/<RUN_NAME>.triage.json`（`--skip-ai` なし時）
+- `var/results/<RUN_NAME>.perf_stat.csv`（Linux `perf` 使用時）
+- `var/results/<RUN_NAME>.powermetrics.txt` / `.powermetrics.err.txt`（macOS `powermetrics` 使用時）
+
+ベースライン比較（差分%）:
+
+```bash
+python3 scripts/ops/run_ai_perf_probe.py \
+  --counter-mode auto \
+  --baseline-run-name <BASELINE_RUN_NAME> \
+  --provider mock \
+  -- scripts/ops/run_v3_open_loop_probe.sh
+```
+
+設計: `docs/ops/ai_rag_agent_triage_design.md`
+
 ## 運用上の注意
 - `ack_p99` 単独で品質判定しない。
 - `accepted_rate` と `ack_accepted_p99` を必ず併記する。

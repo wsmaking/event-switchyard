@@ -332,4 +332,10 @@ if [[ "$ok" == "1" ]]; then
 fi
 
 echo "FAIL: local strict gate failed (pass_ratio=${pass_ratio}, required=${MIN_PASS_RATIO})"
+# List triage reports from failed runs.
+triage_files="$(find "$OUT_DIR" -name '*.triage.json' -newer "$RAW_TSV" 2>/dev/null || true)"
+if [[ -n "$triage_files" ]]; then
+  echo "[triage] reports from failed runs:"
+  echo "$triage_files" | while read -r f; do echo "  $f"; done
+fi
 exit 1
