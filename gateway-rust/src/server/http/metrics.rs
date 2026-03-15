@@ -392,6 +392,13 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_confirm_rebuild_restored_total
         .load(Ordering::Relaxed);
     let v3_confirm_rebuild_elapsed_ms = state.v3_confirm_rebuild_elapsed_ms.load(Ordering::Relaxed);
+    let v3_replay_position_applied_total = state.v3_replay_position_applied_total.load(Ordering::Relaxed);
+    let v3_replay_session_seq_seeded_total = state
+        .v3_replay_session_seq_seeded_total
+        .load(Ordering::Relaxed);
+    let v3_replay_session_shard_seeded_total = state
+        .v3_replay_session_shard_seeded_total
+        .load(Ordering::Relaxed);
     let v3_durable_confirm_soft_reject_age_us = state.v3_durable_confirm_soft_reject_age_us;
     let v3_durable_confirm_hard_reject_age_us = state.v3_durable_confirm_hard_reject_age_us;
     let v3_durable_confirm_guard_soft_slack_pct = state.v3_durable_confirm_guard_soft_slack_pct;
@@ -1733,7 +1740,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          gateway_v3_confirm_rebuild_restored_total {}\n\
          # HELP gateway_v3_confirm_rebuild_elapsed_ms Elapsed milliseconds for /v3 confirm WAL rebuild at startup\n\
          # TYPE gateway_v3_confirm_rebuild_elapsed_ms gauge\n\
-         gateway_v3_confirm_rebuild_elapsed_ms {}\n",
+         gateway_v3_confirm_rebuild_elapsed_ms {}\n\
+         # HELP gateway_v3_replay_position_applied_total Total /v3 position deltas applied from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_position_applied_total counter\n\
+         gateway_v3_replay_position_applied_total {}\n\
+         # HELP gateway_v3_replay_session_seq_seeded_total Total /v3 session sequence floors seeded from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_session_seq_seeded_total counter\n\
+         gateway_v3_replay_session_seq_seeded_total {}\n\
+         # HELP gateway_v3_replay_session_shard_seeded_total Total /v3 session shard bindings seeded from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_session_shard_seeded_total counter\n\
+         gateway_v3_replay_session_shard_seeded_total {}\n",
         v3_confirm_store_size,
         v3_confirm_store_lanes,
         v3_confirm_lane_skew_pct,
@@ -1743,6 +1759,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_confirm_gc_removed_total,
         v3_confirm_rebuild_restored_total,
         v3_confirm_rebuild_elapsed_ms,
+        v3_replay_position_applied_total,
+        v3_replay_session_seq_seeded_total,
+        v3_replay_session_shard_seeded_total,
     ));
     snapshot.push_str(
         "# HELP gateway_v3_confirm_oldest_inflight_us_per_lane Oldest /v3 inflight confirm age per lane in microseconds\n\
