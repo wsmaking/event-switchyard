@@ -1031,17 +1031,14 @@ impl V3Ingress {
 
     pub(super) fn seed_next_seq_floor(&self, session_id: &str, next_seq: u64) -> bool {
         let target = next_seq.max(1);
-        if let Some(counter) = self.session_seq.get(session_id) {
-            return counter.fetch_max(target, Ordering::Relaxed) < target;
+        use dashmap::mapref::entry::Entry;
+        match self.session_seq.entry(session_id.to_string()) {
+            Entry::Occupied(counter) => counter.get().fetch_max(target, Ordering::Relaxed) < target,
+            Entry::Vacant(slot) => {
+                slot.insert(Arc::new(AtomicU64::new(target)));
+                true
+            }
         }
-        let counter = Arc::new(AtomicU64::new(target));
-        let existing = self
-            .session_seq
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::clone(&counter))
-            .value()
-            .clone();
-        existing.fetch_max(target, Ordering::Relaxed) < target
     }
 
     pub(super) fn seed_session_shard(&self, session_id: &str, shard_id: usize) -> bool {
@@ -1375,6 +1372,9 @@ pub(super) struct AppState {
     pub(super) v3_durable_worker_batch_wait_min_us: u64,
     pub(super) v3_durable_worker_batch_wait_us: u64,
     pub(super) v3_durable_worker_receipt_timeout_us: u64,
+    pub(super) v3_durable_replica_enabled: bool,
+    pub(super) v3_durable_replica_required: bool,
+    pub(super) v3_durable_replica_receipt_timeout_us: u64,
     pub(super) v3_durable_worker_max_inflight_receipts: usize,
     pub(super) v3_durable_worker_max_inflight_receipts_global: usize,
     pub(super) v3_durable_worker_inflight_soft_cap_pct: u64,
@@ -1415,6 +1415,9 @@ pub(super) struct AppState {
     pub(super) v3_durable_backpressure_hard_total: Arc<AtomicU64>,
     pub(super) v3_durable_backpressure_hard_total_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_write_error_total: Arc<AtomicU64>,
+    pub(super) v3_durable_replica_append_total: Arc<AtomicU64>,
+    pub(super) v3_durable_replica_write_error_total: Arc<AtomicU64>,
+    pub(super) v3_durable_replica_receipt_timeout_total: Arc<AtomicU64>,
     pub(super) v3_durable_receipt_timeout_total: Arc<AtomicU64>,
     pub(super) v3_durable_receipt_inflight_per_lane: Arc<Vec<Arc<AtomicU64>>>,
     pub(super) v3_durable_receipt_inflight_max_per_lane: Arc<Vec<Arc<AtomicU64>>>,
@@ -2496,6 +2499,15 @@ pub async fn run(
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20_000_000);
+    let v3_durable_replica_enabled = parse_bool_env("V3_DURABLE_REPLICA_ENABLED").unwrap_or(false);
+    let v3_durable_replica_required = v3_durable_replica_enabled
+        && parse_bool_env("V3_DURABLE_REPLICA_REQUIRED").unwrap_or(false);
+    let v3_durable_replica_receipt_timeout_us =
+        std::env::var("V3_DURABLE_REPLICA_RECEIPT_TIMEOUT_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(v3_durable_worker_receipt_timeout_us.max(1));
     let v3_durable_worker_max_inflight_receipts =
         std::env::var("V3_DURABLE_WORKER_MAX_INFLIGHT_RECEIPTS")
             .ok()
@@ -3135,6 +3147,9 @@ pub async fn run(
         v3_durable_worker_batch_wait_min_us,
         v3_durable_worker_batch_wait_us,
         v3_durable_worker_receipt_timeout_us,
+        v3_durable_replica_enabled,
+        v3_durable_replica_required,
+        v3_durable_replica_receipt_timeout_us,
         v3_durable_worker_max_inflight_receipts,
         v3_durable_worker_max_inflight_receipts_global,
         v3_durable_worker_inflight_soft_cap_pct,
@@ -3175,6 +3190,9 @@ pub async fn run(
         v3_durable_backpressure_hard_total: Arc::new(AtomicU64::new(0)),
         v3_durable_backpressure_hard_total_per_lane: new_lane_u64_counters(),
         v3_durable_write_error_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_replica_append_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_replica_write_error_total: Arc::new(AtomicU64::new(0)),
+        v3_durable_replica_receipt_timeout_total: Arc::new(AtomicU64::new(0)),
         v3_durable_receipt_timeout_total: Arc::new(AtomicU64::new(0)),
         v3_durable_receipt_inflight_per_lane: new_lane_u64_counters(),
         v3_durable_receipt_inflight_max_per_lane: new_lane_u64_counters(),
@@ -4199,16 +4217,10 @@ async fn run_v3_durable_worker(
         .get(lane_id)
         .cloned()
         .unwrap_or_else(|| Arc::clone(&state.audit_log));
-    let replica_enabled = parse_bool_env("V3_DURABLE_REPLICA_ENABLED").unwrap_or(false);
-    let replica_required =
-        replica_enabled && parse_bool_env("V3_DURABLE_REPLICA_REQUIRED").unwrap_or(false);
-    let replica_receipt_timeout = Duration::from_micros(
-        std::env::var("V3_DURABLE_REPLICA_RECEIPT_TIMEOUT_US")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(state.v3_durable_worker_receipt_timeout_us.max(1)),
-    );
+    let replica_enabled = state.v3_durable_replica_enabled;
+    let replica_required = state.v3_durable_replica_required;
+    let replica_receipt_timeout =
+        Duration::from_micros(state.v3_durable_replica_receipt_timeout_us.max(1));
     let replica_audit_log = if replica_enabled {
         let replica_path = v3_durable_lane_replica_wal_path(lane_audit_log.path());
         match AuditLog::new(&replica_path) {
@@ -4791,6 +4803,9 @@ async fn run_v3_durable_worker(
 
                     if replica_required {
                         let replica_required_append = replica_audit_log.as_ref().map(|replica| {
+                            state
+                                .v3_durable_replica_append_total
+                                .fetch_add(1, Ordering::Relaxed);
                             replica.append_json_line_with_durable_receipt(event_line, append_t0)
                         });
                         let state_for_receipt = state.clone();
@@ -4848,6 +4863,16 @@ async fn run_v3_durable_worker(
                                         timed_out: false,
                                     }
                                 };
+                                if !replica_ok {
+                                    state_for_receipt
+                                        .v3_durable_replica_write_error_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    if replica_timed_out {
+                                        state_for_receipt
+                                            .v3_durable_replica_receipt_timeout_total
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                                 if outcome.reject_reason == "WAL_REPLICA_UNAVAILABLE" {
                                     state_for_receipt
                                         .v3_durable_write_error_total
@@ -4861,12 +4886,18 @@ async fn run_v3_durable_worker(
                     }
 
                     let replica_best_effort_timings = replica_audit_log.as_ref().map(|replica| {
+                        state
+                            .v3_durable_replica_append_total
+                            .fetch_add(1, Ordering::Relaxed);
                         replica.append_json_line_with_timings(event_line, append_t0)
                     });
                     if let Some(replica_timings) = replica_best_effort_timings {
                         if replica_timings.enqueue_done_ns == 0
                             && replica_timings.durable_done_ns == 0
                         {
+                            state
+                                .v3_durable_replica_write_error_total
+                                .fetch_add(1, Ordering::Relaxed);
                             state
                                 .v3_durable_write_error_total
                                 .fetch_add(1, Ordering::Relaxed);
@@ -5806,6 +5837,29 @@ mod tests {
     }
 
     #[test]
+    fn v3_ingress_seed_methods_keep_floor_and_shard_binding() {
+        let mut shards = Vec::new();
+        let mut _rxs = Vec::new();
+        for _ in 0..2 {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            shards.push(V3ShardIngress::new(tx, 8));
+            _rxs.push(rx);
+        }
+        let ingress = V3Ingress::new(shards, false, 95, 10, 5, 32, 64, 128);
+
+        assert!(ingress.seed_next_seq_floor("sess-a", 10));
+        assert!(!ingress.seed_next_seq_floor("sess-a", 5));
+        assert_eq!(ingress.next_seq("sess-a"), 10);
+
+        assert!(ingress.seed_session_shard("sess-a", 1));
+        assert!(!ingress.seed_session_shard("sess-a", 0));
+        assert_eq!(ingress.shard_for_session("sess-a"), 1);
+
+        assert!(ingress.seed_session_shard("sess-b", 99));
+        assert_eq!(ingress.shard_for_session("sess-b"), 1);
+    }
+
+    #[test]
     fn v3_confirm_store_lane_hash_is_stable_and_skew_is_observable() {
         let store = V3ConfirmStore::new(4, 500, 60_000);
         let lane_a = store.lane_for_session("sess-a");
@@ -5972,6 +6026,74 @@ mod tests {
             .snapshot("sess-c", 3)
             .expect("sess-c snapshot must exist");
         assert_eq!(sess_c.status, V3ConfirmStatus::DurableAccepted);
+    }
+
+    #[test]
+    fn collect_v3_rebuild_records_parses_runtime_fields_and_max_seq() {
+        let symbol_key = FastPathEngine::symbol_to_bytes("AAPL");
+        let symbol_key_u64 = u64::from_le_bytes(symbol_key);
+        let events = vec![
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 1,
+                account_id: "acc-a".to_string(),
+                order_id: Some("v3/sess-a/5".to_string()),
+                data: json!({
+                    "positionSymbolKey": symbol_key_u64.to_string(),
+                    "positionDeltaQty": "7",
+                    "shardId": "3",
+                }),
+            })
+            .expect("serialize accepted event a5"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableRejected".to_string(),
+                at: 2,
+                account_id: "acc-b".to_string(),
+                order_id: Some("v3/sess-b/2".to_string()),
+                data: json!({
+                    "reason": "RISK_REJECTED",
+                    "shardId": 1,
+                }),
+            })
+            .expect("serialize rejected event b2"),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 3,
+                account_id: "acc-a".to_string(),
+                order_id: Some("v3/sess-a/6".to_string()),
+                data: json!({
+                    "positionSymbolKey": symbol_key_u64,
+                    "positionDeltaQty": -4,
+                    "shardId": 4,
+                }),
+            })
+            .expect("serialize accepted event a6"),
+        ]
+        .join("\n");
+        let reader = BufReader::new(Cursor::new(events.into_bytes()));
+        let (records, max_seq_per_session) = collect_v3_rebuild_records_from_reader(reader, 1024);
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(max_seq_per_session.get("sess-a"), Some(&6));
+        assert_eq!(max_seq_per_session.get("sess-b"), Some(&2));
+
+        let accepted = records
+            .get(&("sess-a".to_string(), 6))
+            .expect("sess-a/6 must exist");
+        assert_eq!(accepted.status, V3ConfirmStatus::DurableAccepted);
+        assert_eq!(accepted.account_id, "acc-a");
+        assert_eq!(accepted.position_symbol_key, Some(symbol_key));
+        assert_eq!(accepted.position_delta_qty, Some(-4));
+        assert_eq!(accepted.shard_id, Some(4));
+
+        let rejected = records
+            .get(&("sess-b".to_string(), 2))
+            .expect("sess-b/2 must exist");
+        assert_eq!(rejected.status, V3ConfirmStatus::DurableRejected);
+        assert_eq!(rejected.reason.as_deref(), Some("RISK_REJECTED"));
+        assert_eq!(rejected.position_symbol_key, None);
+        assert_eq!(rejected.position_delta_qty, None);
+        assert_eq!(rejected.shard_id, Some(1));
     }
 
     #[test]

@@ -118,6 +118,18 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_durable_backlog_growth_per_sec
         .load(Ordering::Relaxed);
     let v3_durable_write_error_total = state.v3_durable_write_error_total.load(Ordering::Relaxed);
+    let v3_durable_replica_enabled = if state.v3_durable_replica_enabled { 1 } else { 0 };
+    let v3_durable_replica_required = if state.v3_durable_replica_required { 1 } else { 0 };
+    let v3_durable_replica_receipt_timeout_us = state.v3_durable_replica_receipt_timeout_us;
+    let v3_durable_replica_append_total = state
+        .v3_durable_replica_append_total
+        .load(Ordering::Relaxed);
+    let v3_durable_replica_write_error_total = state
+        .v3_durable_replica_write_error_total
+        .load(Ordering::Relaxed);
+    let v3_durable_replica_receipt_timeout_total = state
+        .v3_durable_replica_receipt_timeout_total
+        .load(Ordering::Relaxed);
     let v3_durable_receipt_timeout_total = state
         .v3_durable_receipt_timeout_total
         .load(Ordering::Relaxed);
@@ -1114,6 +1126,24 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         "# HELP gateway_v3_durable_write_error_total Total /v3 durable write/receipt errors\n\
          # TYPE gateway_v3_durable_write_error_total counter\n\
          gateway_v3_durable_write_error_total {}\n\
+         # HELP gateway_v3_durable_replica_enabled /v3 durable replica WAL enabled (1/0)\n\
+         # TYPE gateway_v3_durable_replica_enabled gauge\n\
+         gateway_v3_durable_replica_enabled {}\n\
+         # HELP gateway_v3_durable_replica_required /v3 durable replica WAL required for acceptance (1/0)\n\
+         # TYPE gateway_v3_durable_replica_required gauge\n\
+         gateway_v3_durable_replica_required {}\n\
+         # HELP gateway_v3_durable_replica_receipt_timeout_us Configured /v3 durable replica receipt timeout in durable worker (microseconds)\n\
+         # TYPE gateway_v3_durable_replica_receipt_timeout_us gauge\n\
+         gateway_v3_durable_replica_receipt_timeout_us {}\n\
+         # HELP gateway_v3_durable_replica_append_total Total /v3 replica append attempts\n\
+         # TYPE gateway_v3_durable_replica_append_total counter\n\
+         gateway_v3_durable_replica_append_total {}\n\
+         # HELP gateway_v3_durable_replica_write_error_total Total /v3 replica write/receipt errors\n\
+         # TYPE gateway_v3_durable_replica_write_error_total counter\n\
+         gateway_v3_durable_replica_write_error_total {}\n\
+         # HELP gateway_v3_durable_replica_receipt_timeout_total Total /v3 replica receipt timeout events inside durable worker\n\
+         # TYPE gateway_v3_durable_replica_receipt_timeout_total counter\n\
+         gateway_v3_durable_replica_receipt_timeout_total {}\n\
          # HELP gateway_v3_durable_receipt_timeout_total Total /v3 durable receipt timeout events inside durable worker\n\
          # TYPE gateway_v3_durable_receipt_timeout_total counter\n\
          gateway_v3_durable_receipt_timeout_total {}\n\
@@ -1265,6 +1295,12 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total counter\n\
          gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total {}\n",
         v3_durable_write_error_total,
+        v3_durable_replica_enabled,
+        v3_durable_replica_required,
+        v3_durable_replica_receipt_timeout_us,
+        v3_durable_replica_append_total,
+        v3_durable_replica_write_error_total,
+        v3_durable_replica_receipt_timeout_total,
         v3_durable_receipt_timeout_total,
         v3_durable_worker_receipt_timeout_us,
         v3_durable_worker_max_inflight_receipts,

@@ -17,6 +17,9 @@ TARGET_ACCEPTED_RATE="${TARGET_ACCEPTED_RATE:-0.99}"
 TARGET_WRITE_ERROR_TOTAL_MAX="${TARGET_WRITE_ERROR_TOTAL_MAX:-0}"
 TARGET_RECEIPT_TIMEOUT_TOTAL_MAX="${TARGET_RECEIPT_TIMEOUT_TOTAL_MAX:-0}"
 TARGET_LOSS_SUSPECT_TOTAL_MAX="${TARGET_LOSS_SUSPECT_TOTAL_MAX:-0}"
+TARGET_REPLAY_POSITION_APPLIED_TOTAL_MIN="${TARGET_REPLAY_POSITION_APPLIED_TOTAL_MIN:-1}"
+TARGET_REPLAY_SESSION_SEQ_SEEDED_TOTAL_MIN="${TARGET_REPLAY_SESSION_SEQ_SEEDED_TOTAL_MIN:-1}"
+TARGET_REPLAY_SESSION_SHARD_SEEDED_TOTAL_MIN="${TARGET_REPLAY_SESSION_SHARD_SEEDED_TOTAL_MIN:-1}"
 BUILD_RELEASE="${BUILD_RELEASE:-0}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/var/results}"
 V3_SOFT_REJECT_PCT="${V3_SOFT_REJECT_PCT:-85}"
@@ -174,8 +177,14 @@ curl -sS "http://${HOST}:${PORT}/metrics" >"$METRICS_REBUILD"
 
 rebuild_restored_total="$(metric_value "$METRICS_REBUILD" gateway_v3_confirm_rebuild_restored_total)"
 rebuild_elapsed_ms="$(metric_value "$METRICS_REBUILD" gateway_v3_confirm_rebuild_elapsed_ms)"
+replay_position_applied_total="$(metric_value "$METRICS_REBUILD" gateway_v3_replay_position_applied_total)"
+replay_session_seq_seeded_total="$(metric_value "$METRICS_REBUILD" gateway_v3_replay_session_seq_seeded_total)"
+replay_session_shard_seeded_total="$(metric_value "$METRICS_REBUILD" gateway_v3_replay_session_shard_seeded_total)"
 rebuild_restored_total="${rebuild_restored_total:-0}"
 rebuild_elapsed_ms="${rebuild_elapsed_ms:-0}"
+replay_position_applied_total="${replay_position_applied_total:-0}"
+replay_session_seq_seeded_total="${replay_session_seq_seeded_total:-0}"
+replay_session_shard_seeded_total="${replay_session_shard_seeded_total:-0}"
 
 echo "[phase2] post-restart load"
 python3 scripts/ops/open_loop_v3_load.py \
@@ -207,11 +216,14 @@ post_loss_suspect_total="${post_loss_suspect_total:-0}"
 delta_loss_suspect_total="$(awk -v a="$post_loss_suspect_total" -v b="$pre_loss_suspect_total" 'BEGIN{d=(a+0)-(b+0); if (d<0) d=0; printf "%.0f", d}')"
 
 pass_rebuild="$(awk -v v="$rebuild_restored_total" 'BEGIN{print (v+0>0)?1:0}')"
+pass_replay_position_applied="$(awk -v v="$replay_position_applied_total" -v t="$TARGET_REPLAY_POSITION_APPLIED_TOTAL_MIN" 'BEGIN{print (v+0>=t+0)?1:0}')"
+pass_replay_session_seq_seeded="$(awk -v v="$replay_session_seq_seeded_total" -v t="$TARGET_REPLAY_SESSION_SEQ_SEEDED_TOTAL_MIN" 'BEGIN{print (v+0>=t+0)?1:0}')"
+pass_replay_session_shard_seeded="$(awk -v v="$replay_session_shard_seeded_total" -v t="$TARGET_REPLAY_SESSION_SHARD_SEEDED_TOTAL_MIN" 'BEGIN{print (v+0>=t+0)?1:0}')"
 pass_accepted_rate="$(awk -v v="$post_accepted_rate" -v t="$TARGET_ACCEPTED_RATE" 'BEGIN{print (v+0>=t+0)?1:0}')"
 pass_write_error="$(awk -v v="$post_write_error_total" -v t="$TARGET_WRITE_ERROR_TOTAL_MAX" 'BEGIN{print (v+0<=t+0)?1:0}')"
 pass_receipt_timeout="$(awk -v v="$post_receipt_timeout_total" -v t="$TARGET_RECEIPT_TIMEOUT_TOTAL_MAX" 'BEGIN{print (v+0<=t+0)?1:0}')"
 pass_loss_suspect="$(awk -v v="$delta_loss_suspect_total" -v t="$TARGET_LOSS_SUSPECT_TOTAL_MAX" 'BEGIN{print (v+0<=t+0)?1:0}')"
-gate_pass=$((pass_rebuild & pass_accepted_rate & pass_write_error & pass_receipt_timeout & pass_loss_suspect))
+gate_pass=$((pass_rebuild & pass_replay_position_applied & pass_replay_session_seq_seeded & pass_replay_session_shard_seeded & pass_accepted_rate & pass_write_error & pass_receipt_timeout & pass_loss_suspect))
 
 cat <<EOF >"$SUMMARY"
 v3_crash_replay_gate
@@ -222,6 +234,9 @@ target_accepted_rate=${TARGET_ACCEPTED_RATE}
 target_write_error_total_max=${TARGET_WRITE_ERROR_TOTAL_MAX}
 target_receipt_timeout_total_max=${TARGET_RECEIPT_TIMEOUT_TOTAL_MAX}
 target_loss_suspect_total_max=${TARGET_LOSS_SUSPECT_TOTAL_MAX}
+target_replay_position_applied_total_min=${TARGET_REPLAY_POSITION_APPLIED_TOTAL_MIN}
+target_replay_session_seq_seeded_total_min=${TARGET_REPLAY_SESSION_SEQ_SEEDED_TOTAL_MIN}
+target_replay_session_shard_seeded_total_min=${TARGET_REPLAY_SESSION_SHARD_SEEDED_TOTAL_MIN}
 v3_soft_reject_pct=${V3_SOFT_REJECT_PCT}
 v3_hard_reject_pct=${V3_HARD_REJECT_PCT}
 v3_kill_reject_pct=${V3_KILL_REJECT_PCT}
@@ -234,6 +249,9 @@ v3_durable_worker_batch_wait_us=${V3_DURABLE_WORKER_BATCH_WAIT_US}
 v3_durable_worker_batch_wait_min_us=${V3_DURABLE_WORKER_BATCH_WAIT_MIN_US}
 rebuild_restored_total=${rebuild_restored_total}
 rebuild_elapsed_ms=${rebuild_elapsed_ms}
+replay_position_applied_total=${replay_position_applied_total}
+replay_session_seq_seeded_total=${replay_session_seq_seeded_total}
+replay_session_shard_seeded_total=${replay_session_shard_seeded_total}
 post_accepted_rate=${post_accepted_rate}
 post_write_error_total=${post_write_error_total}
 post_receipt_timeout_total=${post_receipt_timeout_total}
@@ -241,6 +259,9 @@ pre_loss_suspect_total=${pre_loss_suspect_total}
 post_loss_suspect_total=${post_loss_suspect_total}
 delta_loss_suspect_total=${delta_loss_suspect_total}
 pass_rebuild=${pass_rebuild}
+pass_replay_position_applied=${pass_replay_position_applied}
+pass_replay_session_seq_seeded=${pass_replay_session_seq_seeded}
+pass_replay_session_shard_seeded=${pass_replay_session_shard_seeded}
 pass_accepted_rate=${pass_accepted_rate}
 pass_write_error=${pass_write_error}
 pass_receipt_timeout=${pass_receipt_timeout}
