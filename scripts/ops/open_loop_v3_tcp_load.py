@@ -114,6 +114,8 @@ def worker_loop(
     q: queue.Queue,
     scheduler_done: threading.Event,
     stop_now: threading.Event,
+    sticky_account_per_worker: bool,
+    worker_account_idx: int,
     stats: WorkerStats,
 ) -> None:
     conn: socket.socket | None = None
@@ -128,6 +130,8 @@ def worker_loop(
                 break
             continue
 
+        if sticky_account_per_worker:
+            account_idx = worker_account_idx
         account_id = account_ids[account_idx]
         frame = frames_by_account[account_id]
         stats.attempted += 1
@@ -181,6 +185,11 @@ def main() -> None:
     parser.add_argument("--queue-capacity", type=int, default=20_000)
     parser.add_argument("--request-timeout-sec", type=float, default=2.0)
     parser.add_argument("--drain-timeout-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--sticky-account-per-worker",
+        action="store_true",
+        help="Each worker sticks to one account/token to keep connection auth context stable",
+    )
     parser.add_argument(
         "--max-burst-per-tick",
         type=int,
@@ -238,6 +247,8 @@ def main() -> None:
                 q,
                 scheduler_done,
                 stop_now,
+                args.sticky_account_per_worker,
+                wid % args.accounts,
                 worker_stats[wid],
             ),
             daemon=True,
@@ -332,6 +343,7 @@ def main() -> None:
     print(f"workers={args.workers}")
     print(f"accounts={args.accounts}")
     print(f"queue_capacity={args.queue_capacity}")
+    print(f"sticky_account_per_worker={int(args.sticky_account_per_worker)}")
     print(f"max_burst_per_tick={args.max_burst_per_tick}")
     print(f"final_catchup={int(args.final_catchup)}")
     print(f"offered_total_target={offered_total_target}")
@@ -358,6 +370,12 @@ def main() -> None:
     print(f"client_ack_accepted_p50_us={percentile(accepted_latencies_us, 50.0):.3f}")
     print(f"client_ack_accepted_p99_us={percentile(accepted_latencies_us, 99.0):.3f}")
     print(f"client_ack_accepted_p999_us={percentile(accepted_latencies_us, 99.9):.3f}")
+    print(f"client_e2e_p50_us={percentile(latencies_us, 50.0):.3f}")
+    print(f"client_e2e_p99_us={percentile(latencies_us, 99.0):.3f}")
+    print(f"client_e2e_p999_us={percentile(latencies_us, 99.9):.3f}")
+    print(f"client_e2e_accepted_p50_us={percentile(accepted_latencies_us, 50.0):.3f}")
+    print(f"client_e2e_accepted_p99_us={percentile(accepted_latencies_us, 99.0):.3f}")
+    print(f"client_e2e_accepted_p999_us={percentile(accepted_latencies_us, 99.9):.3f}")
     for status, count in sorted(status_counts.items()):
         print(f"status_{status}_total={count}")
 

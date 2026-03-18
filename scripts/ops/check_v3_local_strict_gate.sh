@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -n "${V3_OPS_PRESET:-}" ]]; then
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/ops/v3_preset_env.sh"
+  apply_v3_ops_preset "$V3_OPS_PRESET"
+fi
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-29001}"
 DURATION="${DURATION:-300}"
@@ -10,6 +15,8 @@ TARGET_COMPLETED_RPS="${TARGET_COMPLETED_RPS:-10000}"
 TARGET_COMPLETED_RPS_EPSILON="${TARGET_COMPLETED_RPS_EPSILON:-0.0005}"
 TARGET_ACK_P99_US="${TARGET_ACK_P99_US:-100}"
 TARGET_ACK_ACCEPTED_P99_US="${TARGET_ACK_ACCEPTED_P99_US:-40}"
+TARGET_ACK_ACCEPTED_P99_NS="${TARGET_ACK_ACCEPTED_P99_NS:-0}"
+TARGET_ACK_ACCEPTED_TSC_P99_NS="${TARGET_ACK_ACCEPTED_TSC_P99_NS:-0}"
 TARGET_ACCEPTED_RATE="${TARGET_ACCEPTED_RATE:-0.99}"
 DURABLE_TAIL_STAGE="${DURABLE_TAIL_STAGE:-1}"
 if [[ -z "${TARGET_DURABLE_CONFIRM_P99_US:-}" ]]; then
@@ -123,7 +130,19 @@ V3_DURABLE_CONFIRM_GUARD_RECOVER_HYSTERESIS_PCT="${V3_DURABLE_CONFIRM_GUARD_RECO
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE:-true}"
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT:-35}"
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT:-80}"
+V3_DURABLE_ACK_PATH_GUARD_ENABLED="${V3_DURABLE_ACK_PATH_GUARD_ENABLED:-true}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
+V3_TCP_BUSY_POLL_US="${V3_TCP_BUSY_POLL_US:-0}"
+V3_TCP_AUTH_STICKY_CONTEXT="${V3_TCP_AUTH_STICKY_CONTEXT:-true}"
+V3_TCP_STICKY_ACCOUNT_PER_WORKER="${V3_TCP_STICKY_ACCOUNT_PER_WORKER:-true}"
+V3_SHARD_AFFINITY_CPUS="${V3_SHARD_AFFINITY_CPUS:-}"
+V3_DURABLE_AFFINITY_CPUS="${V3_DURABLE_AFFINITY_CPUS:-}"
+V3_TCP_SERVER_AFFINITY_CPUS="${V3_TCP_SERVER_AFFINITY_CPUS:-}"
+V3_TSC_TIMING_ENABLE="${V3_TSC_TIMING_ENABLE:-false}"
+V3_TSC_MISMATCH_THRESHOLD_PCT="${V3_TSC_MISMATCH_THRESHOLD_PCT:-20}"
+V3_DEDICATED_WORKER_RUNTIME="${V3_DEDICATED_WORKER_RUNTIME:-true}"
+V3_HOTPATH_HISTOGRAM_SAMPLE_RATE="${V3_HOTPATH_HISTOGRAM_SAMPLE_RATE:-1}"
+V3_GATEWAY_TASKSET_CPUS="${V3_GATEWAY_TASKSET_CPUS:-}"
 AUDIT_FDATASYNC_MAX_WAIT_US="${AUDIT_FDATASYNC_MAX_WAIT_US:-80}"
 AUDIT_FDATASYNC_MAX_BATCH="${AUDIT_FDATASYNC_MAX_BATCH:-32}"
 AUDIT_FDATASYNC_MAX_DEFER_US="${AUDIT_FDATASYNC_MAX_DEFER_US:-0}"
@@ -154,7 +173,7 @@ cd "$ROOT_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 RAW_TSV="$OUT_DIR/v3_local_strict_gate_${STAMP}.tsv"
 LOOP_SUMMARY="$OUT_DIR/v3_local_strict_gate_${STAMP}.summary.txt"
-echo -e "run\trc\tcompleted_rps\taccepted_rate\tack_accepted_p99_us\tdurable_confirm_p99_us\tsummary_path" >"$RAW_TSV"
+echo -e "run\trc\tcompleted_rps\taccepted_rate\tack_accepted_p99_us\tack_accepted_p99_ns\tack_accepted_tsc_p99_ns\tdurable_confirm_p99_us\tsummary_path" >"$RAW_TSV"
 
 pass_count=0
 for run in $(seq 1 "$RUNS"); do
@@ -173,6 +192,8 @@ for run in $(seq 1 "$RUNS"); do
   TARGET_COMPLETED_RPS_EPSILON="$TARGET_COMPLETED_RPS_EPSILON" \
   TARGET_ACK_P99_US="$TARGET_ACK_P99_US" \
   TARGET_ACK_ACCEPTED_P99_US="$TARGET_ACK_ACCEPTED_P99_US" \
+  TARGET_ACK_ACCEPTED_P99_NS="$TARGET_ACK_ACCEPTED_P99_NS" \
+  TARGET_ACK_ACCEPTED_TSC_P99_NS="$TARGET_ACK_ACCEPTED_TSC_P99_NS" \
   TARGET_ACCEPTED_RATE="$TARGET_ACCEPTED_RATE" \
   TARGET_DURABLE_CONFIRM_P99_US="$TARGET_DURABLE_CONFIRM_P99_US" \
   WARN_DURABLE_CONFIRM_P99_US="$WARN_DURABLE_CONFIRM_P99_US" \
@@ -265,7 +286,19 @@ for run in $(seq 1 "$RUNS"); do
   V3_DURABLE_CONFIRM_GUARD_AUTOTUNE="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE" \
   V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT" \
   V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT" \
+  V3_DURABLE_ACK_PATH_GUARD_ENABLED="$V3_DURABLE_ACK_PATH_GUARD_ENABLED" \
   FASTPATH_DRAIN_WORKERS="$FASTPATH_DRAIN_WORKERS" \
+  V3_TCP_BUSY_POLL_US="$V3_TCP_BUSY_POLL_US" \
+  V3_TCP_AUTH_STICKY_CONTEXT="$V3_TCP_AUTH_STICKY_CONTEXT" \
+  V3_TCP_STICKY_ACCOUNT_PER_WORKER="$V3_TCP_STICKY_ACCOUNT_PER_WORKER" \
+  V3_SHARD_AFFINITY_CPUS="$V3_SHARD_AFFINITY_CPUS" \
+  V3_DURABLE_AFFINITY_CPUS="$V3_DURABLE_AFFINITY_CPUS" \
+  V3_TCP_SERVER_AFFINITY_CPUS="$V3_TCP_SERVER_AFFINITY_CPUS" \
+  V3_TSC_TIMING_ENABLE="$V3_TSC_TIMING_ENABLE" \
+  V3_TSC_MISMATCH_THRESHOLD_PCT="$V3_TSC_MISMATCH_THRESHOLD_PCT" \
+  V3_DEDICATED_WORKER_RUNTIME="$V3_DEDICATED_WORKER_RUNTIME" \
+  V3_HOTPATH_HISTOGRAM_SAMPLE_RATE="$V3_HOTPATH_HISTOGRAM_SAMPLE_RATE" \
+  V3_GATEWAY_TASKSET_CPUS="$V3_GATEWAY_TASKSET_CPUS" \
   AUDIT_FDATASYNC_MAX_WAIT_US="$AUDIT_FDATASYNC_MAX_WAIT_US" \
   AUDIT_FDATASYNC_MAX_BATCH="$AUDIT_FDATASYNC_MAX_BATCH" \
   AUDIT_FDATASYNC_MAX_DEFER_US="$AUDIT_FDATASYNC_MAX_DEFER_US" \
@@ -284,19 +317,28 @@ for run in $(seq 1 "$RUNS"); do
   completed_rps="NA"
   accepted_rate="NA"
   ack_accepted_p99="NA"
+  ack_accepted_p99_ns="NA"
+  ack_accepted_tsc_p99_ns="NA"
   durable_confirm_p99="NA"
   if [[ -n "$summary_path" ]]; then
     completed_rps="$(awk -F= '/^completed_rps=/{print $2}' "$summary_path" | tail -n1)"
     accepted_rate="$(awk -F= '/^server_accepted_rate=/{print $2}' "$summary_path" | tail -n1)"
     ack_accepted_p99="$(awk -F= '/^server_live_ack_accepted_p99_us=/{print $2}' "$summary_path" | tail -n1)"
+    ack_accepted_p99_ns="$(awk -F= '/^server_hotpath_accepted_p99_ns=/{print $2}' "$summary_path" | tail -n1)"
+    if [[ -z "$ack_accepted_p99_ns" ]]; then
+      ack_accepted_p99_ns="$(awk -F= '/^server_live_ack_accepted_p99_ns=/{print $2}' "$summary_path" | tail -n1)"
+    fi
     durable_confirm_p99="$(awk -F= '/^server_durable_confirm_p99_us=/{print $2}' "$summary_path" | tail -n1)"
     completed_rps="${completed_rps:-NA}"
     accepted_rate="${accepted_rate:-NA}"
     ack_accepted_p99="${ack_accepted_p99:-NA}"
+    ack_accepted_p99_ns="${ack_accepted_p99_ns:-NA}"
+    ack_accepted_tsc_p99_ns="$(awk -F= '/^server_hotpath_accepted_tsc_p99_ns=/{print $2}' "$summary_path" | tail -n1)"
+    ack_accepted_tsc_p99_ns="${ack_accepted_tsc_p99_ns:-NA}"
     durable_confirm_p99="${durable_confirm_p99:-NA}"
   fi
-  echo -e "${run}\t${rc}\t${completed_rps}\t${accepted_rate}\t${ack_accepted_p99}\t${durable_confirm_p99}\t${summary_path}" >>"$RAW_TSV"
-  echo "[run ${run}/${RUNS}] rc=${rc} completed_rps=${completed_rps} accepted_rate=${accepted_rate} ack_accepted_p99_us=${ack_accepted_p99} durable_confirm_p99_us=${durable_confirm_p99}"
+  echo -e "${run}\t${rc}\t${completed_rps}\t${accepted_rate}\t${ack_accepted_p99}\t${ack_accepted_p99_ns}\t${ack_accepted_tsc_p99_ns}\t${durable_confirm_p99}\t${summary_path}" >>"$RAW_TSV"
+  echo "[run ${run}/${RUNS}] rc=${rc} completed_rps=${completed_rps} accepted_rate=${accepted_rate} ack_accepted_p99_us=${ack_accepted_p99} ack_accepted_p99_ns=${ack_accepted_p99_ns} ack_accepted_tsc_p99_ns=${ack_accepted_tsc_p99_ns} durable_confirm_p99_us=${durable_confirm_p99}"
   if [[ "$rc" -eq 0 ]]; then
     pass_count=$((pass_count + 1))
   fi
@@ -317,6 +359,8 @@ pass_ratio="$(awk -v p="$pass_count" -v r="$RUNS" 'BEGIN{if(r<=0){print 0}else{p
   echo "target_completed_rps_epsilon=${TARGET_COMPLETED_RPS_EPSILON}"
   echo "target_live_ack_p99_us=${TARGET_ACK_P99_US}"
   echo "target_live_ack_accepted_p99_us=${TARGET_ACK_ACCEPTED_P99_US}"
+  echo "target_live_ack_accepted_p99_ns=${TARGET_ACK_ACCEPTED_P99_NS}"
+  echo "target_live_ack_accepted_tsc_p99_ns=${TARGET_ACK_ACCEPTED_TSC_P99_NS}"
   echo "target_accepted_rate=${TARGET_ACCEPTED_RATE}"
   echo "target_durable_confirm_p99_us=${TARGET_DURABLE_CONFIRM_P99_US}"
   echo "raw_tsv=${RAW_TSV}"

@@ -2,11 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -n "${V3_OPS_PRESET:-}" ]]; then
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/ops/v3_preset_env.sh"
+  apply_v3_ops_preset "$V3_OPS_PRESET"
+fi
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-29001}"
-# Disable TCP listener by default for HTTP-only gate runs.
+# Legacy gateway TCP listener (non-v3 ingress) stays disabled by default.
 TCP_PORT="${TCP_PORT:-0}"
-V3_INGRESS_TRANSPORT="${V3_INGRESS_TRANSPORT:-http}"
+V3_INGRESS_TRANSPORT="${V3_INGRESS_TRANSPORT:-tcp}"
 V3_TCP_PORT="${V3_TCP_PORT:-39001}"
 TARGET_RPS="${TARGET_RPS:-10000}"
 DURATION="${DURATION:-30}"
@@ -19,6 +24,8 @@ TARGET_COMPLETED_RPS="${TARGET_COMPLETED_RPS:-$TARGET_RPS}"
 TARGET_COMPLETED_RPS_EPSILON="${TARGET_COMPLETED_RPS_EPSILON:-0.0005}"
 TARGET_ACK_P99_US="${TARGET_ACK_P99_US:-100}"
 TARGET_ACK_ACCEPTED_P99_US="${TARGET_ACK_ACCEPTED_P99_US:-40}"
+TARGET_ACK_ACCEPTED_P99_NS="${TARGET_ACK_ACCEPTED_P99_NS:-0}"
+TARGET_ACK_ACCEPTED_TSC_P99_NS="${TARGET_ACK_ACCEPTED_TSC_P99_NS:-0}"
 TARGET_ACCEPTED_RATE="${TARGET_ACCEPTED_RATE:-0.99}"
 TARGET_DURABLE_CONFIRM_P99_US="${TARGET_DURABLE_CONFIRM_P99_US:-0}"
 WARN_DURABLE_CONFIRM_P99_US="${WARN_DURABLE_CONFIRM_P99_US:-0}"
@@ -37,7 +44,7 @@ ENFORCE_GATE="${ENFORCE_GATE:-0}"
 ENABLE_TIMESERIES="${ENABLE_TIMESERIES:-1}"
 TIMESERIES_INTERVAL_MS="${TIMESERIES_INTERVAL_MS:-500}"
 TIMESERIES_TIMEOUT_SEC="${TIMESERIES_TIMEOUT_SEC:-1.0}"
-TIMESERIES_METRICS="${TIMESERIES_METRICS:-gateway_v3_accepted_rate,gateway_v3_rejected_soft_total,gateway_v3_rejected_hard_total,gateway_v3_rejected_killed_total,gateway_v3_loss_suspect_total,gateway_v3_durable_queue_depth,gateway_v3_durable_queue_utilization_pct,gateway_v3_durable_queue_utilization_pct_max,gateway_v3_durable_backlog_growth_per_sec,gateway_v3_durable_backpressure_soft_total,gateway_v3_durable_backpressure_hard_total,gateway_v3_durable_confirm_p99_us}"
+TIMESERIES_METRICS="${TIMESERIES_METRICS:-gateway_v3_accepted_rate,gateway_v3_hotpath_accepted_p99_ns,gateway_live_ack_accepted_p99_ns,gateway_live_ack_accepted_p99_us,gateway_v3_rejected_soft_total,gateway_v3_rejected_hard_total,gateway_v3_rejected_killed_total,gateway_v3_loss_suspect_total,gateway_v3_durable_queue_depth,gateway_v3_durable_queue_utilization_pct,gateway_v3_durable_queue_utilization_pct_max,gateway_v3_durable_backlog_growth_per_sec,gateway_v3_durable_backpressure_soft_total,gateway_v3_durable_backpressure_hard_total,gateway_v3_durable_confirm_p99_us}"
 
 # Raised preset by default (can be overridden via env).
 V3_SOFT_REJECT_PCT="${V3_SOFT_REJECT_PCT:-85}"
@@ -110,9 +117,21 @@ V3_DURABLE_CONFIRM_GUARD_RECOVER_HYSTERESIS_PCT="${V3_DURABLE_CONFIRM_GUARD_RECO
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE:-true}"
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT:-35}"
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT="${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT:-80}"
+V3_DURABLE_ACK_PATH_GUARD_ENABLED="${V3_DURABLE_ACK_PATH_GUARD_ENABLED:-true}"
 V3_CONFIRM_REBUILD_ON_START="${V3_CONFIRM_REBUILD_ON_START:-false}"
 V3_CONFIRM_REBUILD_MAX_LINES="${V3_CONFIRM_REBUILD_MAX_LINES:-500000}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
+V3_TCP_BUSY_POLL_US="${V3_TCP_BUSY_POLL_US:-0}"
+V3_TCP_AUTH_STICKY_CONTEXT="${V3_TCP_AUTH_STICKY_CONTEXT:-true}"
+V3_TCP_STICKY_ACCOUNT_PER_WORKER="${V3_TCP_STICKY_ACCOUNT_PER_WORKER:-true}"
+V3_SHARD_AFFINITY_CPUS="${V3_SHARD_AFFINITY_CPUS:-}"
+V3_DURABLE_AFFINITY_CPUS="${V3_DURABLE_AFFINITY_CPUS:-}"
+V3_TCP_SERVER_AFFINITY_CPUS="${V3_TCP_SERVER_AFFINITY_CPUS:-}"
+V3_TSC_TIMING_ENABLE="${V3_TSC_TIMING_ENABLE:-false}"
+V3_TSC_MISMATCH_THRESHOLD_PCT="${V3_TSC_MISMATCH_THRESHOLD_PCT:-20}"
+V3_DEDICATED_WORKER_RUNTIME="${V3_DEDICATED_WORKER_RUNTIME:-true}"
+V3_HOTPATH_HISTOGRAM_SAMPLE_RATE="${V3_HOTPATH_HISTOGRAM_SAMPLE_RATE:-1}"
+V3_GATEWAY_TASKSET_CPUS="${V3_GATEWAY_TASKSET_CPUS:-}"
 AUDIT_FDATASYNC_MAX_WAIT_US="${AUDIT_FDATASYNC_MAX_WAIT_US:-80}"
 AUDIT_FDATASYNC_MAX_BATCH="${AUDIT_FDATASYNC_MAX_BATCH:-32}"
 AUDIT_FDATASYNC_MAX_DEFER_US="${AUDIT_FDATASYNC_MAX_DEFER_US:-0}"
@@ -248,6 +267,15 @@ echo "[start] gateway-rust on ${HOST}:${PORT}"
 rm -f "$AUDIT_LOG_PATH"
 rm -f "$GATEWAY_WAL_PATH"
 rm -f "${GATEWAY_WAL_PATH}".v3.lane*.log >/dev/null 2>&1 || true
+gateway_cmd=(./gateway-rust/target/release/gateway-rust)
+if [[ "$(uname -s)" == "Linux" && -n "$V3_GATEWAY_TASKSET_CPUS" ]]; then
+  if command -v taskset >/dev/null 2>&1; then
+    gateway_cmd=(taskset -c "$V3_GATEWAY_TASKSET_CPUS" "${gateway_cmd[@]}")
+    echo "[start] taskset cores=${V3_GATEWAY_TASKSET_CPUS}"
+  else
+    echo "[start] WARN: V3_GATEWAY_TASKSET_CPUS is set but taskset is not installed"
+  fi
+fi
 V3_SOFT_REJECT_PCT="$V3_SOFT_REJECT_PCT" \
 V3_HARD_REJECT_PCT="$V3_HARD_REJECT_PCT" \
 V3_KILL_REJECT_PCT="$V3_KILL_REJECT_PCT" \
@@ -319,6 +347,7 @@ V3_DURABLE_CONFIRM_GUARD_RECOVER_HYSTERESIS_PCT="$V3_DURABLE_CONFIRM_GUARD_RECOV
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE" \
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT" \
 V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT="$V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT" \
+V3_DURABLE_ACK_PATH_GUARD_ENABLED="$V3_DURABLE_ACK_PATH_GUARD_ENABLED" \
 V3_CONFIRM_REBUILD_ON_START="$V3_CONFIRM_REBUILD_ON_START" \
 V3_CONFIRM_REBUILD_MAX_LINES="$V3_CONFIRM_REBUILD_MAX_LINES" \
 AUDIT_FDATASYNC_MAX_WAIT_US="$AUDIT_FDATASYNC_MAX_WAIT_US" \
@@ -337,13 +366,22 @@ V3_HTTP_INGRESS_ENABLE="$V3_HTTP_INGRESS_ENABLE" \
 V3_HTTP_CONFIRM_ENABLE="$V3_HTTP_CONFIRM_ENABLE" \
 V3_TCP_ENABLE="$V3_TCP_ENABLE" \
 V3_TCP_PORT="$V3_TCP_PORT" \
+V3_TCP_BUSY_POLL_US="$V3_TCP_BUSY_POLL_US" \
+V3_TCP_AUTH_STICKY_CONTEXT="$V3_TCP_AUTH_STICKY_CONTEXT" \
+V3_SHARD_AFFINITY_CPUS="$V3_SHARD_AFFINITY_CPUS" \
+V3_DURABLE_AFFINITY_CPUS="$V3_DURABLE_AFFINITY_CPUS" \
+V3_TCP_SERVER_AFFINITY_CPUS="$V3_TCP_SERVER_AFFINITY_CPUS" \
+V3_TSC_TIMING_ENABLE="$V3_TSC_TIMING_ENABLE" \
+V3_TSC_MISMATCH_THRESHOLD_PCT="$V3_TSC_MISMATCH_THRESHOLD_PCT" \
+V3_DEDICATED_WORKER_RUNTIME="$V3_DEDICATED_WORKER_RUNTIME" \
+V3_HOTPATH_HISTOGRAM_SAMPLE_RATE="$V3_HOTPATH_HISTOGRAM_SAMPLE_RATE" \
 GATEWAY_PORT="$PORT" \
 GATEWAY_TCP_PORT="$TCP_PORT" \
 JWT_HS256_SECRET=secret123 \
 KAFKA_ENABLE=0 \
 FASTPATH_DRAIN_ENABLE=1 \
 FASTPATH_DRAIN_WORKERS="$FASTPATH_DRAIN_WORKERS" \
-./gateway-rust/target/release/gateway-rust >"$LOG_FILE" 2>&1 &
+"${gateway_cmd[@]}" >"$LOG_FILE" 2>&1 &
 GATEWAY_PID=$!
 
 for _ in $(seq 1 100); do
@@ -378,6 +416,10 @@ load_final_catchup_flag=()
 if [[ "${LOAD_FINAL_CATCHUP}" == "1" || "${LOAD_FINAL_CATCHUP}" == "true" || "${LOAD_FINAL_CATCHUP}" == "TRUE" ]]; then
   load_final_catchup_flag+=(--final-catchup)
 fi
+load_sticky_account_flag=()
+if [[ "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "1" || "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "true" || "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "TRUE" ]]; then
+  load_sticky_account_flag+=(--sticky-account-per-worker)
+fi
 if [[ "$V3_INGRESS_TRANSPORT" == "tcp" ]]; then
   python3 scripts/ops/open_loop_v3_tcp_load.py \
     --host "$HOST" \
@@ -393,6 +435,7 @@ if [[ "$V3_INGRESS_TRANSPORT" == "tcp" ]]; then
     --max-burst-per-tick "$LOAD_MAX_BURST_PER_TICK" \
     --request-timeout-sec "$REQUEST_TIMEOUT_SEC" \
     --drain-timeout-sec "$DRAIN_TIMEOUT_SEC" \
+    "${load_sticky_account_flag[@]}" \
     "${load_final_catchup_flag[@]}" >"$LOAD_OUT"
 else
   python3 scripts/ops/open_loop_v3_load.py \
@@ -435,6 +478,10 @@ client_ack_p99_us="$(load_value client_ack_p99_us)"
 client_ack_p999_us="$(load_value client_ack_p999_us)"
 client_ack_accepted_p99_us="$(load_value client_ack_accepted_p99_us)"
 client_ack_accepted_p999_us="$(load_value client_ack_accepted_p999_us)"
+client_e2e_p99_us="$(load_value client_e2e_p99_us)"
+client_e2e_p999_us="$(load_value client_e2e_p999_us)"
+client_e2e_accepted_p99_us="$(load_value client_e2e_accepted_p99_us)"
+client_e2e_accepted_p999_us="$(load_value client_e2e_accepted_p999_us)"
 accepted_total="$(load_value accepted_total)"
 rejected_total="$(load_value rejected_total)"
 error_total="$(load_value error_total)"
@@ -447,7 +494,17 @@ status_503_total="$(load_value status_503_total)"
 
 server_live_ack_p99_us="$(metric_value gateway_live_ack_p99_us)"
 server_live_ack_accepted_p99_us="$(metric_value gateway_live_ack_accepted_p99_us)"
+server_live_ack_accepted_p99_ns="$(metric_value gateway_live_ack_accepted_p99_ns)"
+server_hotpath_accepted_p99_ns="$(metric_value gateway_v3_hotpath_accepted_p99_ns)"
+server_hotpath_accepted_tsc_p99_ns="$(metric_value gateway_v3_hotpath_accepted_tsc_p99_ns)"
+server_tsc_timing_enabled="$(metric_value gateway_v3_tsc_timing_enabled)"
+server_tsc_fallback_total="$(metric_value gateway_v3_tsc_fallback_total)"
+server_tsc_cross_core_total="$(metric_value gateway_v3_tsc_cross_core_total)"
+server_tsc_mismatch_total="$(metric_value gateway_v3_tsc_mismatch_total)"
+server_thread_affinity_apply_success_total="$(metric_value gateway_v3_thread_affinity_apply_success_total)"
+server_thread_affinity_apply_failure_total="$(metric_value gateway_v3_thread_affinity_apply_failure_total)"
 server_live_ack_accepted_p999_us="$(metric_value gateway_v3_live_ack_accepted_p999_us)"
+server_durable_ack_path_guard_enabled="$(metric_value gateway_v3_durable_ack_path_guard_enabled)"
 server_accepted_rate="$(metric_value gateway_v3_accepted_rate)"
 server_accepted_total="$(metric_value gateway_v3_accepted_total)"
 server_rejected_soft_total="$(metric_value gateway_v3_rejected_soft_total)"
@@ -516,8 +573,46 @@ drop_ratio="${drop_ratio:-1}"
 unsent_total="${unsent_total:-999999999}"
 client_ack_p999_us="${client_ack_p999_us:-0}"
 client_ack_accepted_p999_us="${client_ack_accepted_p999_us:-0}"
+if [[ -z "${client_e2e_p99_us}" ]]; then
+  client_e2e_p99_us="$client_ack_p99_us"
+fi
+if [[ -z "${client_e2e_p999_us}" ]]; then
+  client_e2e_p999_us="$client_ack_p999_us"
+fi
+if [[ -z "${client_e2e_accepted_p99_us}" ]]; then
+  client_e2e_accepted_p99_us="$client_ack_accepted_p99_us"
+fi
+if [[ -z "${client_e2e_accepted_p999_us}" ]]; then
+  client_e2e_accepted_p999_us="$client_ack_accepted_p999_us"
+fi
 server_live_ack_p99_us="${server_live_ack_p99_us:-999999}"
+server_live_ack_accepted_p99_us="${server_live_ack_accepted_p99_us:-999999}"
+if [[ -z "${server_live_ack_accepted_p99_ns}" ]]; then
+  server_live_ack_accepted_p99_ns="$(awk -v v="$server_live_ack_accepted_p99_us" 'BEGIN{printf "%.0f", (v+0)*1000.0}')"
+fi
+if [[ -z "${server_hotpath_accepted_p99_ns}" ]]; then
+  server_hotpath_accepted_p99_ns="$server_live_ack_accepted_p99_ns"
+fi
+server_tsc_timing_enabled="${server_tsc_timing_enabled:-0}"
+if [[ -z "${server_hotpath_accepted_tsc_p99_ns}" ]]; then
+  server_hotpath_accepted_tsc_p99_ns="$server_hotpath_accepted_p99_ns"
+fi
+if ! awk -v v="$server_hotpath_accepted_tsc_p99_ns" 'BEGIN{exit ((v+0)>0)?0:1}'; then
+  server_hotpath_accepted_tsc_p99_ns="$server_hotpath_accepted_p99_ns"
+fi
+if [[ "$server_tsc_timing_enabled" != "1" ]]; then
+  server_hotpath_accepted_tsc_p99_ns="$server_hotpath_accepted_p99_ns"
+fi
+server_live_ack_accepted_p99_ns="${server_live_ack_accepted_p99_ns:-999999999}"
+server_hotpath_accepted_p99_ns="${server_hotpath_accepted_p99_ns:-999999999}"
+server_hotpath_accepted_tsc_p99_ns="${server_hotpath_accepted_tsc_p99_ns:-999999999}"
+server_tsc_fallback_total="${server_tsc_fallback_total:-0}"
+server_tsc_cross_core_total="${server_tsc_cross_core_total:-0}"
+server_tsc_mismatch_total="${server_tsc_mismatch_total:-0}"
+server_thread_affinity_apply_success_total="${server_thread_affinity_apply_success_total:-0}"
+server_thread_affinity_apply_failure_total="${server_thread_affinity_apply_failure_total:-0}"
 server_live_ack_accepted_p999_us="${server_live_ack_accepted_p999_us:-999999}"
+server_durable_ack_path_guard_enabled="${server_durable_ack_path_guard_enabled:-1}"
 server_accepted_rate="${server_accepted_rate:-0}"
 server_rejected_killed_total="${server_rejected_killed_total:-0}"
 server_loss_suspect_total="${server_loss_suspect_total:-0}"
@@ -547,6 +642,8 @@ completed_rps_floor="$(awk -v t="$TARGET_COMPLETED_RPS" -v e="$TARGET_COMPLETED_
 pass_completed_rps="$(awk -v v="$completed_rps" -v f="$completed_rps_floor" 'BEGIN{print (v+0>=f+0) ? 1 : 0}')"
 pass_ack="$(awk -v v="$server_live_ack_p99_us" -v t="$TARGET_ACK_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
 pass_ack_accepted="$(awk -v v="$server_live_ack_accepted_p99_us" -v t="$TARGET_ACK_ACCEPTED_P99_US" 'BEGIN{print (v+0<=t+0) ? 1 : 0}')"
+pass_ack_accepted_ns="$(awk -v v="$server_hotpath_accepted_p99_ns" -v t="$TARGET_ACK_ACCEPTED_P99_NS" 'BEGIN{if ((t+0)<=0) print 1; else print (v+0<=t+0) ? 1 : 0}')"
+pass_ack_accepted_tsc_ns="$(awk -v v="$server_hotpath_accepted_tsc_p99_ns" -v t="$TARGET_ACK_ACCEPTED_TSC_P99_NS" 'BEGIN{if ((t+0)<=0) print 1; else print (v+0<=t+0) ? 1 : 0}')"
 pass_rate="$(awk -v v="$server_accepted_rate" -v t="$TARGET_ACCEPTED_RATE" 'BEGIN{print (v+0>=t+0) ? 1 : 0}')"
 pass_durable_confirm="$(awk -v v="$server_durable_confirm_p99_us" -v t="$TARGET_DURABLE_CONFIRM_P99_US" 'BEGIN{if ((t+0)<=0) print 1; else print (v+0<=t+0)?1:0}')"
 warn_durable_confirm="$(awk -v v="$server_durable_confirm_p99_us" -v t="$WARN_DURABLE_CONFIRM_P99_US" 'BEGIN{if ((t+0)<=0) print 0; else print (v+0>t+0)?1:0}')"
@@ -564,7 +661,7 @@ pass_lane_hot_lane_share="$(awk -v strict="$TARGET_STRICT_PER_LANE_CHECKS" -v v=
 pass_lane_checks=$((pass_lane_coverage & pass_lane_inflight_cap & pass_global_inflight_cap & pass_lane_inflight_skew & pass_lane_hot_lane_share))
 warn_lane_inflight_skew="$(awk -v v="$server_durable_receipt_inflight_skew_ratio" -v t="$WARN_DURABLE_INFLIGHT_SKEW_RATIO" 'BEGIN{print (v+0>t+0)?1:0}')"
 warn_lane_hot_lane_share="$(awk -v v="$server_durable_receipt_inflight_hot_lane_share" -v t="$WARN_DURABLE_INFLIGHT_HOT_LANE_SHARE" 'BEGIN{print (v+0>t+0)?1:0}')"
-overall_pass=$((pass_completed_rps & pass_ack & pass_ack_accepted & pass_rate & pass_durable_confirm & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent & pass_lane_topology & pass_lane_checks))
+overall_pass=$((pass_completed_rps & pass_ack & pass_ack_accepted & pass_ack_accepted_ns & pass_ack_accepted_tsc_ns & pass_rate & pass_durable_confirm & pass_killed & pass_loss & pass_offered_ratio & pass_drop_ratio & pass_unsent & pass_lane_topology & pass_lane_checks))
 
 cat >"$SUMMARY_OUT" <<EOF
 v3_open_loop_probe
@@ -577,6 +674,8 @@ target_completed_rps_epsilon=${TARGET_COMPLETED_RPS_EPSILON}
 target_completed_rps_floor=${completed_rps_floor}
 target_live_ack_p99_us=${TARGET_ACK_P99_US}
 target_live_ack_accepted_p99_us=${TARGET_ACK_ACCEPTED_P99_US}
+target_live_ack_accepted_p99_ns=${TARGET_ACK_ACCEPTED_P99_NS}
+target_live_ack_accepted_tsc_p99_ns=${TARGET_ACK_ACCEPTED_TSC_P99_NS}
 target_accepted_rate=${TARGET_ACCEPTED_RATE}
 target_durable_confirm_p99_us=${TARGET_DURABLE_CONFIRM_P99_US}
 warn_durable_confirm_p99_us=${WARN_DURABLE_CONFIRM_P99_US}
@@ -600,9 +699,20 @@ v3_http_ingress_enable=${V3_HTTP_INGRESS_ENABLE}
 v3_http_confirm_enable=${V3_HTTP_CONFIRM_ENABLE}
 v3_tcp_enable=${V3_TCP_ENABLE}
 v3_tcp_port=${V3_TCP_PORT}
+v3_tcp_busy_poll_us=${V3_TCP_BUSY_POLL_US}
+v3_tcp_auth_sticky_context=${V3_TCP_AUTH_STICKY_CONTEXT}
+v3_shard_affinity_cpus=${V3_SHARD_AFFINITY_CPUS}
+v3_durable_affinity_cpus=${V3_DURABLE_AFFINITY_CPUS}
+v3_tcp_server_affinity_cpus=${V3_TCP_SERVER_AFFINITY_CPUS}
+v3_tsc_timing_enable=${V3_TSC_TIMING_ENABLE}
+v3_tsc_mismatch_threshold_pct=${V3_TSC_MISMATCH_THRESHOLD_PCT}
+v3_dedicated_worker_runtime=${V3_DEDICATED_WORKER_RUNTIME}
+v3_hotpath_histogram_sample_rate=${V3_HOTPATH_HISTOGRAM_SAMPLE_RATE}
+v3_gateway_taskset_cpus=${V3_GATEWAY_TASKSET_CPUS}
 load_workers=${LOAD_WORKERS}
 load_accounts=${LOAD_ACCOUNTS}
 load_queue_capacity=${LOAD_QUEUE_CAPACITY}
+load_sticky_account_per_worker=${V3_TCP_STICKY_ACCOUNT_PER_WORKER}
 load_max_burst_per_tick=${LOAD_MAX_BURST_PER_TICK}
 load_final_catchup=${LOAD_FINAL_CATCHUP}
 v3_soft_reject_pct=${V3_SOFT_REJECT_PCT}
@@ -665,6 +775,7 @@ v3_durable_confirm_guard_recover_hysteresis_pct=${V3_DURABLE_CONFIRM_GUARD_RECOV
 v3_durable_confirm_guard_autotune=${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE}
 v3_durable_confirm_guard_autotune_low_pressure_pct=${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_LOW_PRESSURE_PCT}
 v3_durable_confirm_guard_autotune_high_pressure_pct=${V3_DURABLE_CONFIRM_GUARD_AUTOTUNE_HIGH_PRESSURE_PCT}
+v3_durable_ack_path_guard_enabled=${V3_DURABLE_ACK_PATH_GUARD_ENABLED}
 audit_fdatasync_max_wait_us=${AUDIT_FDATASYNC_MAX_WAIT_US}
 audit_fdatasync_max_batch=${AUDIT_FDATASYNC_MAX_BATCH}
 audit_fdatasync_max_defer_us=${AUDIT_FDATASYNC_MAX_DEFER_US}
@@ -682,6 +793,10 @@ client_ack_p99_us=${client_ack_p99_us}
 client_ack_p999_us=${client_ack_p999_us}
 client_ack_accepted_p99_us=${client_ack_accepted_p99_us}
 client_ack_accepted_p999_us=${client_ack_accepted_p999_us}
+client_e2e_p99_us=${client_e2e_p99_us}
+client_e2e_p999_us=${client_e2e_p999_us}
+client_e2e_accepted_p99_us=${client_e2e_accepted_p99_us}
+client_e2e_accepted_p999_us=${client_e2e_accepted_p999_us}
 client_accepted_total=${accepted_total}
 client_rejected_total=${rejected_total}
 client_error_total=${error_total}
@@ -692,7 +807,17 @@ status_429_total=${status_429_total}
 status_503_total=${status_503_total}
 server_live_ack_p99_us=${server_live_ack_p99_us}
 server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}
+server_live_ack_accepted_p99_ns=${server_live_ack_accepted_p99_ns}
+server_hotpath_accepted_p99_ns=${server_hotpath_accepted_p99_ns}
+server_hotpath_accepted_tsc_p99_ns=${server_hotpath_accepted_tsc_p99_ns}
+server_tsc_timing_enabled=${server_tsc_timing_enabled}
+server_tsc_fallback_total=${server_tsc_fallback_total}
+server_tsc_cross_core_total=${server_tsc_cross_core_total}
+server_tsc_mismatch_total=${server_tsc_mismatch_total}
+server_thread_affinity_apply_success_total=${server_thread_affinity_apply_success_total}
+server_thread_affinity_apply_failure_total=${server_thread_affinity_apply_failure_total}
 server_live_ack_accepted_p999_us=${server_live_ack_accepted_p999_us}
+server_durable_ack_path_guard_enabled=${server_durable_ack_path_guard_enabled}
 server_accepted_rate=${server_accepted_rate}
 server_durable_confirm_p99_us=${server_durable_confirm_p99_us}
 server_durable_confirm_p999_us=${server_durable_confirm_p999_us}
@@ -738,6 +863,8 @@ server_durable_receipt_inflight_hot_lane_share=${server_durable_receipt_inflight
 gate_pass_completed_rps=${pass_completed_rps}
 gate_pass_live_ack_p99=${pass_ack}
 gate_pass_live_ack_accepted_p99=${pass_ack_accepted}
+gate_pass_live_ack_accepted_p99_ns=${pass_ack_accepted_ns}
+gate_pass_live_ack_accepted_tsc_p99_ns=${pass_ack_accepted_tsc_ns}
 gate_pass_accepted_rate=${pass_rate}
 gate_pass_durable_confirm_p99=${pass_durable_confirm}
 warn_durable_confirm_p99=${warn_durable_confirm}
@@ -763,9 +890,9 @@ gateway_log=${LOG_FILE}
 EOF
 
 echo "[summary] offered_rps=${offered_rps} completed_rps=${completed_rps} client_accepted_rate=${client_accepted_rate} server_accepted_rate=${server_accepted_rate}"
-echo "[summary] server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us}"
+echo "[summary] client_e2e_accepted_p99_us=${client_e2e_accepted_p99_us} server_live_ack_p99_us=${server_live_ack_p99_us} server_live_ack_accepted_p99_us=${server_live_ack_accepted_p99_us} server_hotpath_accepted_p99_ns=${server_hotpath_accepted_p99_ns}"
 echo "[summary_durable] queue_util_max=${server_durable_queue_utilization_pct_max} backlog_growth_per_sec=${server_durable_backlog_growth_per_sec} backpressure_soft_total=${server_durable_backpressure_soft_total} backpressure_hard_total=${server_durable_backpressure_hard_total}"
-echo "[gate] completed_rps>=${completed_rps_floor} (target=${TARGET_COMPLETED_RPS}, eps=${TARGET_COMPLETED_RPS_EPSILON}):${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
+echo "[gate] completed_rps>=${completed_rps_floor} (target=${TARGET_COMPLETED_RPS}, eps=${TARGET_COMPLETED_RPS_EPSILON}):${pass_completed_rps} live_ack_p99<=${TARGET_ACK_P99_US}:${pass_ack} live_ack_accepted_p99<=${TARGET_ACK_ACCEPTED_P99_US}:${pass_ack_accepted} hotpath_accepted_p99_ns<=${TARGET_ACK_ACCEPTED_P99_NS}:${pass_ack_accepted_ns} hotpath_accepted_tsc_p99_ns<=${TARGET_ACK_ACCEPTED_TSC_P99_NS}:${pass_ack_accepted_tsc_ns} accepted_rate>=${TARGET_ACCEPTED_RATE}:${pass_rate} durable_confirm_p99<=${TARGET_DURABLE_CONFIRM_P99_US}:${pass_durable_confirm} rejected_killed<=${TARGET_REJECTED_KILLED_MAX}:${pass_killed} loss_suspect<=${TARGET_LOSS_SUSPECT_MAX}:${pass_loss} lane_topology:${pass_lane_topology} lane_checks:${pass_lane_checks}"
 echo "[lane] observed_lanes=${server_durable_receipt_inflight_lanes_observed} skew_ratio=${server_durable_receipt_inflight_skew_ratio} hot_lane_share=${server_durable_receipt_inflight_hot_lane_share} max_lane_inflight=${server_durable_receipt_inflight_max_lane_max} max_global_inflight=${server_durable_receipt_inflight_max}"
 echo "[gate_lane] coverage:${pass_lane_coverage} lane_cap:${pass_lane_inflight_cap} global_cap:${pass_global_inflight_cap} skew<=${TARGET_DURABLE_INFLIGHT_SKEW_RATIO_MAX}:${pass_lane_inflight_skew} hot_share<=${TARGET_DURABLE_INFLIGHT_HOT_LANE_SHARE_MAX}:${pass_lane_hot_lane_share}"
 echo "[warn] durable_confirm_p99>${WARN_DURABLE_CONFIRM_P99_US}:${warn_durable_confirm} observed=${server_durable_confirm_p99_us}"

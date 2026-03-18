@@ -105,6 +105,8 @@ curl -sS http://127.0.0.1:29001/metrics
   - `V3_HTTP_INGRESS_ENABLE=false` で HTTP受注を無効化
   - `V3_HTTP_CONFIRM_ENABLE=true` で confirm照会は HTTP 維持可能
   - `V3_TCP_ENABLE=true` + `V3_TCP_PORT=<port>` で v3 TCP受注を有効化
+  - `V3_TCP_AUTH_STICKY_CONTEXT=true` で接続内同一JWTの再検証を省略（デフォルト有効）
+  - `scripts/ops/run_v3_open_loop_probe.sh` の既定は `V3_INGRESS_TRANSPORT=tcp`（HTTPで測る場合のみ `V3_INGRESS_TRANSPORT=http` を明示）
 
 ## よく使う検証コマンド
 ### local strict gate（Linux未確保時）
@@ -137,8 +139,64 @@ RUNS=5 WARMUP_RUNS=1 scripts/ops/run_v3_phase2_compare.sh
 TARGET_RPS=10000 DURATION=300 scripts/ops/run_v3_open_loop_probe.sh
 ```
 
+## プリセット実行（v3）
+- 使えるプリセット一覧:
+```bash
+scripts/ops/v3_preset_env.sh --list
+```
+- ラッパー実行（推奨）:
+```bash
+scripts/ops/run_v3_preset.sh hft_best strict
+scripts/ops/run_v3_preset.sh hft_capacity capability
+scripts/ops/run_v3_preset.sh http_compare probe
+```
+- 既存スクリプトに直接適用:
+```bash
+V3_OPS_PRESET=hft_best scripts/ops/check_v3_local_strict_gate.sh
+V3_OPS_PRESET=hft_diagnostic scripts/ops/run_v3_open_loop_probe.sh
+```
+- 代表プリセット:
+  - `hft_best`: 実務寄り strict（TCP, 10k, us+ns gate）
+  - `hft_capacity`: 能力確認（45k帯）
+  - `hft_diagnostic`: 切り分け用（gate強制OFF寄り）
+  - `http_compare`: HTTP経路比較
+- HFT向け追加オプション（Linux）:
+```bash
+# ACK経路をdurableガードから分離（レイテンシ優先）
+export V3_DURABLE_ACK_PATH_GUARD_ENABLED=false
+# TCP busy-poll（SO_BUSY_POLL, us）
+export V3_TCP_BUSY_POLL_US=50
+# 接続内同一JWTの認証コンテキストを固定（デフォルト true）
+export V3_TCP_AUTH_STICKY_CONTEXT=true
+# 負荷ワーカーをアカウント固定にして接続局所性を上げる（デフォルト true）
+export V3_TCP_STICKY_ACCOUNT_PER_WORKER=true
+# shard worker / durable worker / tcp ingress のスレッドCPU固定（Linux, 任意）
+export V3_SHARD_AFFINITY_CPUS=2-5
+export V3_DURABLE_AFFINITY_CPUS=6-9
+export V3_TCP_SERVER_AFFINITY_CPUS=10
+# rdtscp 二重計時（Phase 3）
+export V3_TSC_TIMING_ENABLE=true
+export V3_TSC_MISMATCH_THRESHOLD_PCT=20
+# worker実行モデル A/B（true=専用current-thread runtime, false=tokio::spawn）
+export V3_DEDICATED_WORKER_RUNTIME=false
+# ホットパス計測ヒストグラムのサンプリング間隔（1=全件）
+export V3_HOTPATH_HISTOGRAM_SAMPLE_RATE=8
+# プロセスのCPU固定（taskset）
+export V3_GATEWAY_TASKSET_CPUS=2-9
+scripts/ops/run_v3_open_loop_probe.sh
+```
+
 ## 主要メトリクス（v3）
+- `gateway_live_ack_accepted_p99_ns`
 - `gateway_live_ack_p99_us`
+- `gateway_live_ack_accepted_p99_us`
+- `gateway_v3_live_ack_accepted_p99_ns`
+- `gateway_v3_hotpath_accepted_p99_ns`
+- `gateway_v3_hotpath_accepted_tsc_p99_ns`
+- `gateway_v3_tsc_timing_enabled`
+- `gateway_v3_hotpath_histogram_sample_rate`
+- `gateway_v3_thread_affinity_apply_failure_total`
+- `gateway_v3_durable_ack_path_guard_enabled`
 - `gateway_v3_accepted_rate`
 - `gateway_v3_rejected_soft_total`
 - `gateway_v3_rejected_hard_total`
@@ -201,6 +259,7 @@ curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | grep -E '^(gateway_v
 ```bash
 export PORT="${GATEWAY_PORT}" DURATION=60 TARGET_RPS=10000 TARGET_COMPLETED_RPS=10000 \
   TARGET_ACK_ACCEPTED_P99_US=40 TARGET_ACCEPTED_RATE=0.99 \
+  TARGET_ACK_ACCEPTED_P99_NS=40000 V3_INGRESS_TRANSPORT=tcp \
   TARGET_DURABLE_CONFIRM_P99_US=120000000 WARN_DURABLE_CONFIRM_P99_US=120000000 \
   ENFORCE_GATE=1 V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS=0 \
   V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS=0 BUILD_RELEASE=0
@@ -223,6 +282,7 @@ curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increas
 - `gateway_v3_accepted_rate` は累積カウンタ比率（process start以降）なので、過去runの影響を受ける。
 - 「直近の受理状況」を見るときは `rate(gateway_v3_accepted_total[1m])` と reject系 `rate(...)` を併用する。
 - `run_v3_open_loop_probe.sh` は run 終了時に Gateway を停止するため、`up` は `0` に戻る。計測有無は `increase(...[15m])` で確認する。
+- `TARGET_ACK_ACCEPTED_P99_NS` は任意ゲート（default `0`=無効）。`40us` 相当は `40000ns`。
 
 ### Grafana で確認
 1. `http://localhost:3000` を開く
@@ -239,6 +299,7 @@ curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increas
      - `rate(gateway_v3_accepted_total[1m])`
      - `rate(gateway_v3_rejected_hard_total[1m])`
      - `increase(gateway_v3_accepted_total[15m])`
+     - `gateway_live_ack_accepted_p99_ns`
      - `gateway_live_ack_accepted_p99_us`
 
 ### トラブルシュート
@@ -249,6 +310,7 @@ curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increas
 curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="event-switchyard-gateway"}'
 curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_accepted_total[1m])'
 curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increase(gateway_v3_accepted_total[15m])'
+curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=gateway_live_ack_accepted_p99_ns'
 curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=gateway_live_ack_accepted_p99_us'
 ```
 - ここで値が返るなら、Grafana側の時間範囲/ダッシュボード選択の問題。
