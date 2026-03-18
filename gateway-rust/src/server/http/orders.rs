@@ -18,6 +18,8 @@ use axum::{
 };
 use gateway_core::{RdtscpStamp, now_nanos};
 use std::{
+    cell::RefCell,
+    ops::Deref,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -50,6 +52,8 @@ pub(super) const V3_TCP_REASON_AUTH_INVALID: u32 = 201;
 pub(super) const V3_TCP_REASON_AUTH_EXPIRED: u32 = 202;
 pub(super) const V3_TCP_REASON_AUTH_NOT_YET_VALID: u32 = 203;
 pub(super) const V3_TCP_REASON_AUTH_INTERNAL: u32 = 204;
+pub(super) const V3_TCP_REASON_AUTH_REQUIRED: u32 = 205;
+pub(super) const V3_TCP_REASON_AUTH_UNEXPECTED_TOKEN: u32 = 206;
 
 const V3_TCP_TOKEN_OFFSET: usize = 2;
 const V3_TCP_TOKEN_MAX_LEN: usize = 256;
@@ -61,12 +65,80 @@ const V3_TCP_QTY_OFFSET: usize = 280;
 const V3_TCP_PRICE_OFFSET: usize = 288;
 
 pub(super) struct V3TcpDecodedRequest<'a> {
-    pub(super) jwt_token: &'a str,
+    pub(super) jwt_token: Option<&'a str>,
     pub(super) symbol_key: [u8; 8],
     pub(super) side: u8,
     pub(super) order_type: crate::order::OrderType,
     pub(super) qty: u64,
     pub(super) price: u64,
+}
+
+pub(super) enum V3TcpDecodedFrame<'a> {
+    AuthInit { jwt_token: &'a str },
+    Order(V3TcpDecodedRequest<'a>),
+}
+
+#[derive(Clone, Copy)]
+struct V3HotPathOutcome {
+    status: StatusCode,
+    kind: u8,
+    reason_code: u32,
+    status_text: &'static str,
+    reason_text: Option<&'static str>,
+    session_seq: Option<u64>,
+    received_at_ns: u64,
+}
+
+impl V3HotPathOutcome {
+    #[inline]
+    fn accepted(session_seq: u64, received_at_ns: u64) -> Self {
+        Self {
+            status: StatusCode::ACCEPTED,
+            kind: V3_TCP_KIND_ACCEPT,
+            reason_code: V3_TCP_REASON_NONE,
+            status_text: "VOLATILE_ACCEPT",
+            reason_text: None,
+            session_seq: Some(session_seq),
+            received_at_ns,
+        }
+    }
+
+    #[inline]
+    fn rejected(
+        status: StatusCode,
+        kind: u8,
+        status_text: &'static str,
+        reason_text: &'static str,
+        received_at_ns: u64,
+    ) -> Self {
+        Self {
+            status,
+            kind,
+            reason_code: v3_tcp_reason_code_from_reason(Some(reason_text)),
+            status_text,
+            reason_text: Some(reason_text),
+            session_seq: None,
+            received_at_ns,
+        }
+    }
+
+    #[inline]
+    fn to_http(self, session_id: &str) -> VolatileOrderResponse {
+        VolatileOrderResponse::from_hotpath(session_id, self)
+    }
+
+    #[inline]
+    fn to_tcp(self) -> [u8; V3_TCP_RESPONSE_SIZE] {
+        let session_seq = self.session_seq.unwrap_or(0);
+        encode_v3_tcp_response_raw(
+            self.kind,
+            self.status,
+            self.reason_code,
+            session_seq,
+            session_seq,
+            self.received_at_ns,
+        )
+    }
 }
 
 // 注文系ハンドラ: 受付/取得/キャンセルとレスポンス変換を集約。
@@ -635,13 +707,14 @@ pub(super) fn process_order_v3_hot_path(
     req: OrderRequest,
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
-    process_order_v3_hot_path_with_input(
+    let outcome = process_order_v3_hot_path_with_input(
         state,
         account_id,
         session_id,
         V3HotRiskInput::from_order_request(&req),
         t0,
-    )
+    );
+    (outcome.status, outcome.to_http(session_id))
 }
 
 pub(super) fn process_order_v3_hot_path_tcp(
@@ -650,7 +723,7 @@ pub(super) fn process_order_v3_hot_path_tcp(
     session_id: &str,
     decoded: &V3TcpDecodedRequest<'_>,
     t0: u64,
-) -> (StatusCode, VolatileOrderResponse) {
+) -> [u8; V3_TCP_RESPONSE_SIZE] {
     process_order_v3_hot_path_with_input(
         state,
         account_id,
@@ -658,6 +731,7 @@ pub(super) fn process_order_v3_hot_path_tcp(
         V3HotRiskInput::from_tcp(decoded),
         t0,
     )
+    .to_tcp()
 }
 
 fn process_order_v3_hot_path_with_input(
@@ -666,7 +740,7 @@ fn process_order_v3_hot_path_with_input(
     session_id: &str,
     risk_input: V3HotRiskInput,
     t0: u64,
-) -> (StatusCode, VolatileOrderResponse) {
+) -> V3HotPathOutcome {
     let t0_tsc = state.capture_v3_tsc_stamp();
     let hotpath_sampled = state.v3_hotpath_sampled();
     let ingress = &state.v3_ingress;
@@ -693,25 +767,34 @@ fn process_order_v3_hot_path_with_input(
     if ingress.is_global_killed() {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_GLOBAL_KILLED"),
+            V3_TCP_KIND_KILLED,
+            "KILLED",
+            "V3_GLOBAL_KILLED",
+            now_nanos(),
         );
     }
     if ingress.is_session_killed(session_id) {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SESSION_KILLED"),
+            V3_TCP_KIND_KILLED,
+            "KILLED",
+            "V3_SESSION_KILLED",
+            now_nanos(),
         );
     }
     if ingress.is_shard_killed(shard_id) {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_SHARD_KILLED"),
+            V3_TCP_KIND_KILLED,
+            "KILLED",
+            "V3_SHARD_KILLED",
+            now_nanos(),
         );
     }
 
@@ -742,9 +825,12 @@ fn process_order_v3_hot_path_with_input(
                 }
             }
             record_v3_ack(&state, t0, hotpath_sampled);
-            return (
+            return V3HotPathOutcome::rejected(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                VolatileOrderResponse::rejected(session_id, "REJECTED", reason),
+                V3_TCP_KIND_REJECTED,
+                "REJECTED",
+                reason,
+                now_nanos(),
             );
         }
     };
@@ -858,13 +944,12 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
-                return (
+                return V3HotPathOutcome::rejected(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    VolatileOrderResponse::rejected(
-                        session_id,
-                        "REJECTED",
-                        "V3_DURABLE_CONFIRM_AGE_HARD",
-                    ),
+                    V3_TCP_KIND_REJECTED,
+                    "REJECTED",
+                    "V3_DURABLE_CONFIRM_AGE_HARD",
+                    now_nanos(),
                 );
             } else if !hard_guard_admission_enabled {
                 state
@@ -896,13 +981,12 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
-                return (
+                return V3HotPathOutcome::rejected(
                     StatusCode::TOO_MANY_REQUESTS,
-                    VolatileOrderResponse::rejected(
-                        session_id,
-                        "REJECTED",
-                        "V3_DURABLE_CONFIRM_AGE_SOFT",
-                    ),
+                    V3_TCP_KIND_REJECTED,
+                    "REJECTED",
+                    "V3_DURABLE_CONFIRM_AGE_SOFT",
+                    now_nanos(),
                 );
             } else if !soft_guard_admission_enabled {
                 state
@@ -928,13 +1012,12 @@ fn process_order_v3_hot_path_with_input(
                 .v3_durable_backpressure_hard_total
                 .fetch_add(1, Ordering::Relaxed);
             record_v3_ack(&state, t0, hotpath_sampled);
-            return (
+            return V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(
-                    session_id,
-                    "REJECTED",
-                    "V3_DURABLE_BACKPRESSURE_FAILSAFE",
-                ),
+                V3_TCP_KIND_REJECTED,
+                "REJECTED",
+                "V3_DURABLE_BACKPRESSURE_FAILSAFE",
+                now_nanos(),
             );
         }
         if state.v3_durable_admission_controller_enabled {
@@ -952,13 +1035,12 @@ fn process_order_v3_hot_path_with_input(
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                     record_v3_ack(&state, t0, hotpath_sampled);
-                    return (
+                    return V3HotPathOutcome::rejected(
                         StatusCode::SERVICE_UNAVAILABLE,
-                        VolatileOrderResponse::rejected(
-                            session_id,
-                            "REJECTED",
-                            "V3_DURABLE_CONTROLLER_HARD",
-                        ),
+                        V3_TCP_KIND_REJECTED,
+                        "REJECTED",
+                        "V3_DURABLE_CONTROLLER_HARD",
+                        now_nanos(),
                     );
                 }
                 1 => {
@@ -973,13 +1055,12 @@ fn process_order_v3_hot_path_with_input(
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                     record_v3_ack(&state, t0, hotpath_sampled);
-                    return (
+                    return V3HotPathOutcome::rejected(
                         StatusCode::TOO_MANY_REQUESTS,
-                        VolatileOrderResponse::rejected(
-                            session_id,
-                            "REJECTED",
-                            "V3_DURABLE_CONTROLLER_SOFT",
-                        ),
+                        V3_TCP_KIND_REJECTED,
+                        "REJECTED",
+                        "V3_DURABLE_CONTROLLER_SOFT",
+                        now_nanos(),
                     );
                 }
                 _ => {}
@@ -1001,13 +1082,12 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
-                return (
+                return V3HotPathOutcome::rejected(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    VolatileOrderResponse::rejected(
-                        session_id,
-                        "REJECTED",
-                        "V3_DURABLE_BACKPRESSURE_HARD",
-                    ),
+                    V3_TCP_KIND_REJECTED,
+                    "REJECTED",
+                    "V3_DURABLE_BACKPRESSURE_HARD",
+                    now_nanos(),
                 );
             }
             if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
@@ -1026,13 +1106,12 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
-                return (
+                return V3HotPathOutcome::rejected(
                     StatusCode::TOO_MANY_REQUESTS,
-                    VolatileOrderResponse::rejected(
-                        session_id,
-                        "REJECTED",
-                        "V3_DURABLE_BACKPRESSURE_SOFT",
-                    ),
+                    V3_TCP_KIND_REJECTED,
+                    "REJECTED",
+                    "V3_DURABLE_BACKPRESSURE_SOFT",
+                    now_nanos(),
                 );
             }
         }
@@ -1046,26 +1125,35 @@ fn process_order_v3_hot_path_with_input(
         }
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_KILLED"),
+            V3_TCP_KIND_KILLED,
+            "KILLED",
+            "V3_QUEUE_KILLED",
+            now_nanos(),
         );
     }
     if queue_pct >= state.v3_hard_reject_pct {
         state.increment_v3_rejected_hard_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
-            VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_HARD"),
+            V3_TCP_KIND_REJECTED,
+            "REJECTED",
+            "V3_BACKPRESSURE_HARD",
+            now_nanos(),
         );
     }
 
     if queue_pct >= state.v3_soft_reject_pct {
         state.increment_v3_rejected_soft_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
-        return (
+        return V3HotPathOutcome::rejected(
             StatusCode::TOO_MANY_REQUESTS,
-            VolatileOrderResponse::rejected(session_id, "REJECTED", "V3_BACKPRESSURE_SOFT"),
+            V3_TCP_KIND_REJECTED,
+            "REJECTED",
+            "V3_BACKPRESSURE_SOFT",
+            now_nanos(),
         );
     }
 
@@ -1091,18 +1179,14 @@ fn process_order_v3_hot_path_with_input(
             }
             state.increment_v3_accepted_total(shard_id);
             let serialize_t0 = now_nanos();
-            let body = VolatileOrderResponse::accepted(
-                session_id_ref.to_string(),
-                session_seq,
-                received_at_ns,
-            );
+            let body = V3HotPathOutcome::accepted(session_seq, received_at_ns);
             if hotpath_sampled {
                 let serialize_elapsed = now_nanos().saturating_sub(serialize_t0) / 1_000;
                 state.v3_stage_serialize_hist.record(serialize_elapsed);
             }
             record_v3_ack(&state, t0, hotpath_sampled);
             record_v3_ack_accepted(&state, t0, t0_tsc, hotpath_sampled);
-            (StatusCode::ACCEPTED, body)
+            body
         }
         Err(tokio::sync::mpsc::error::TrySendError::Full(task)) => {
             if hotpath_sampled {
@@ -1121,9 +1205,12 @@ fn process_order_v3_hot_path_with_input(
             );
             state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0, hotpath_sampled);
-            (
+            V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(session_id, "KILLED", "V3_QUEUE_FULL"),
+                V3_TCP_KIND_KILLED,
+                "KILLED",
+                "V3_QUEUE_FULL",
+                now_nanos(),
             )
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
@@ -1143,25 +1230,54 @@ fn process_order_v3_hot_path_with_input(
             );
             state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0, hotpath_sampled);
-            (
+            V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
-                VolatileOrderResponse::rejected(session_id, "KILLED", "V3_INGRESS_CLOSED"),
+                V3_TCP_KIND_KILLED,
+                "KILLED",
+                "V3_INGRESS_CLOSED",
+                now_nanos(),
             )
         }
     }
 }
 
-pub(super) fn decode_v3_tcp_request<'a>(
+pub(super) fn decode_v3_tcp_frame<'a>(
     frame: &'a [u8; V3_TCP_REQUEST_SIZE],
-) -> Result<V3TcpDecodedRequest<'a>, u32> {
+) -> Result<V3TcpDecodedFrame<'a>, u32> {
     let token_len =
         u16::from_le_bytes(frame[0..2].try_into().expect("token length bytes")) as usize;
-    if token_len == 0 || token_len > V3_TCP_TOKEN_MAX_LEN {
+    if token_len > V3_TCP_TOKEN_MAX_LEN {
         return Err(V3_TCP_REASON_BAD_TOKEN_LEN);
     }
-    let token_end = V3_TCP_TOKEN_OFFSET + token_len;
-    let jwt_token = std::str::from_utf8(&frame[V3_TCP_TOKEN_OFFSET..token_end])
-        .map_err(|_| V3_TCP_REASON_BAD_TOKEN_UTF8)?;
+    let jwt_token = if token_len == 0 {
+        None
+    } else {
+        let token_end = V3_TCP_TOKEN_OFFSET + token_len;
+        let token = std::str::from_utf8(&frame[V3_TCP_TOKEN_OFFSET..token_end])
+            .map_err(|_| V3_TCP_REASON_BAD_TOKEN_UTF8)?;
+        Some(token)
+    };
+
+    let side_raw = frame[V3_TCP_SIDE_OFFSET];
+    let order_type_raw = frame[V3_TCP_TYPE_OFFSET];
+    let qty = u64::from_le_bytes(
+        frame[V3_TCP_QTY_OFFSET..(V3_TCP_QTY_OFFSET + 8)]
+            .try_into()
+            .expect("qty bytes"),
+    );
+    let price_or_reserved = u64::from_le_bytes(
+        frame[V3_TCP_PRICE_OFFSET..(V3_TCP_PRICE_OFFSET + 8)]
+            .try_into()
+            .expect("price bytes"),
+    );
+
+    // AuthInit frame marker:
+    // side/type/qty/price are all 0, and JWT is present.
+    let is_auth_init = side_raw == 0 && order_type_raw == 0 && qty == 0 && price_or_reserved == 0;
+    if is_auth_init {
+        let jwt_token = jwt_token.ok_or(V3_TCP_REASON_AUTH_REQUIRED)?;
+        return Ok(V3TcpDecodedFrame::AuthInit { jwt_token });
+    }
 
     let symbol_raw = &frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + V3_TCP_SYMBOL_LEN)];
     let symbol_len = symbol_raw
@@ -1173,40 +1289,39 @@ pub(super) fn decode_v3_tcp_request<'a>(
     }
     let symbol =
         std::str::from_utf8(&symbol_raw[..symbol_len]).map_err(|_| V3_TCP_REASON_BAD_SYMBOL)?;
-    let side = match frame[V3_TCP_SIDE_OFFSET] {
-        1 | 2 => frame[V3_TCP_SIDE_OFFSET],
+    let side = match side_raw {
+        1 | 2 => side_raw,
         _ => return Err(V3_TCP_REASON_BAD_SIDE),
     };
-    let order_type = match frame[V3_TCP_TYPE_OFFSET] {
+    let order_type = match order_type_raw {
         1 => crate::order::OrderType::Limit,
         2 => crate::order::OrderType::Market,
         _ => return Err(V3_TCP_REASON_BAD_TYPE),
     };
-    let qty = u64::from_le_bytes(
-        frame[V3_TCP_QTY_OFFSET..(V3_TCP_QTY_OFFSET + 8)]
-            .try_into()
-            .expect("qty bytes"),
-    );
-    let raw_price = u64::from_le_bytes(
-        frame[V3_TCP_PRICE_OFFSET..(V3_TCP_PRICE_OFFSET + 8)]
-            .try_into()
-            .expect("price bytes"),
-    );
     let price = if order_type == crate::order::OrderType::Market {
         0
     } else {
-        raw_price
+        price_or_reserved
     };
     let symbol_key = parse_v3_symbol_key(symbol).ok_or(V3_TCP_REASON_BAD_SYMBOL)?;
 
-    Ok(V3TcpDecodedRequest {
+    Ok(V3TcpDecodedFrame::Order(V3TcpDecodedRequest {
         jwt_token,
         symbol_key,
         side,
         order_type,
         qty,
         price,
-    })
+    }))
+}
+
+pub(super) fn decode_v3_tcp_request<'a>(
+    frame: &'a [u8; V3_TCP_REQUEST_SIZE],
+) -> Result<V3TcpDecodedRequest<'a>, u32> {
+    match decode_v3_tcp_frame(frame)? {
+        V3TcpDecodedFrame::Order(decoded) => Ok(decoded),
+        V3TcpDecodedFrame::AuthInit { .. } => Err(V3_TCP_REASON_BAD_TYPE),
+    }
 }
 
 pub(super) fn authenticate_v3_tcp_token(
@@ -1247,6 +1362,17 @@ pub(super) fn encode_v3_tcp_decode_error(
     )
 }
 
+pub(super) fn encode_v3_tcp_auth_ok(received_at_ns: u64) -> [u8; V3_TCP_RESPONSE_SIZE] {
+    encode_v3_tcp_response_raw(
+        V3_TCP_KIND_ACCEPT,
+        StatusCode::ACCEPTED,
+        V3_TCP_REASON_NONE,
+        0,
+        0,
+        received_at_ns,
+    )
+}
+
 pub(super) fn encode_v3_tcp_response(
     status: StatusCode,
     resp: &VolatileOrderResponse,
@@ -1254,7 +1380,7 @@ pub(super) fn encode_v3_tcp_response(
     encode_v3_tcp_response_raw(
         v3_tcp_kind(resp),
         status,
-        v3_tcp_reason_code(resp),
+        v3_tcp_reason_code_from_reason(resp.reason.as_deref()),
         resp.session_seq.unwrap_or(0),
         resp.session_seq.unwrap_or(0),
         resp.received_at_ns,
@@ -1281,15 +1407,15 @@ fn encode_v3_tcp_response_raw(
 }
 
 fn v3_tcp_kind(resp: &VolatileOrderResponse) -> u8 {
-    match resp.status.as_str() {
+    match resp.status {
         "VOLATILE_ACCEPT" => V3_TCP_KIND_ACCEPT,
         "KILLED" => V3_TCP_KIND_KILLED,
         _ => V3_TCP_KIND_REJECTED,
     }
 }
 
-fn v3_tcp_reason_code(resp: &VolatileOrderResponse) -> u32 {
-    match resp.reason.as_deref() {
+fn v3_tcp_reason_code_from_reason(reason: Option<&str>) -> u32 {
+    match reason {
         None => V3_TCP_REASON_NONE,
         Some("INVALID_QTY") => 1_001,
         Some("INVALID_SIDE") => 1_002,
@@ -1305,6 +1431,8 @@ fn v3_tcp_reason_code(resp: &VolatileOrderResponse) -> u32 {
         Some("AUTH_EXPIRED") => V3_TCP_REASON_AUTH_EXPIRED,
         Some("AUTH_NOT_YET_VALID") => V3_TCP_REASON_AUTH_NOT_YET_VALID,
         Some("AUTH_INTERNAL") => V3_TCP_REASON_AUTH_INTERNAL,
+        Some("AUTH_REQUIRED") => V3_TCP_REASON_AUTH_REQUIRED,
+        Some("AUTH_UNEXPECTED_TOKEN") => V3_TCP_REASON_AUTH_UNEXPECTED_TOKEN,
         Some("V3_DURABLE_BACKPRESSURE_SOFT") => 2_001,
         Some("V3_DURABLE_BACKPRESSURE_HARD") => 2_002,
         Some("V3_BACKPRESSURE_SOFT") => 2_101,
@@ -2222,37 +2350,168 @@ pub(super) struct AmendResponse {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct VolatileOrderResponse {
-    session_id: String,
+    session_id: PooledJsonString,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    attempt_id: Option<String>,
+    attempt_id: Option<PooledJsonString>,
     received_at_ns: u64,
-    status: String,
+    status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
+    reason: Option<PooledJsonString>,
+}
+
+const V3_JSON_STRING_POOL_MAX_ITEMS: usize = 4096;
+const V3_JSON_STRING_POOL_MAX_CAPACITY: usize = 256;
+
+thread_local! {
+    static V3_JSON_STRING_POOL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+fn v3_pool_take_string(min_capacity: usize) -> String {
+    V3_JSON_STRING_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if let Some(mut cached) = pool.pop() {
+            if cached.capacity() < min_capacity {
+                cached.reserve(min_capacity - cached.capacity());
+            }
+            cached
+        } else {
+            String::with_capacity(min_capacity.max(32))
+        }
+    })
+}
+
+fn v3_pool_put_string(mut value: String) {
+    if value.capacity() > V3_JSON_STRING_POOL_MAX_CAPACITY {
+        return;
+    }
+    value.clear();
+    V3_JSON_STRING_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < V3_JSON_STRING_POOL_MAX_ITEMS {
+            pool.push(value);
+        }
+    });
+}
+
+#[derive(Debug)]
+struct PooledJsonString {
+    inner: Option<String>,
+}
+
+impl PooledJsonString {
+    fn from_str(value: &str) -> Self {
+        let mut inner = v3_pool_take_string(value.len());
+        inner.push_str(value);
+        Self { inner: Some(inner) }
+    }
+
+    fn with_prefix_u64(prefix: &str, value: u64) -> Self {
+        let mut inner = v3_pool_take_string(prefix.len() + 20);
+        inner.push_str(prefix);
+        append_u64_decimal(&mut inner, value);
+        Self { inner: Some(inner) }
+    }
+
+    fn as_str(&self) -> &str {
+        self.inner.as_deref().unwrap_or("")
+    }
+}
+
+impl Clone for PooledJsonString {
+    fn clone(&self) -> Self {
+        Self::from_str(self.as_str())
+    }
+}
+
+impl Deref for PooledJsonString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl serde::Serialize for PooledJsonString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl Drop for PooledJsonString {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            v3_pool_put_string(inner);
+        }
+    }
+}
+
+fn build_attempt_id(session_seq: u64) -> PooledJsonString {
+    PooledJsonString::with_prefix_u64("att_", session_seq)
+}
+
+fn append_u64_decimal(out: &mut String, mut value: u64) {
+    if value == 0 {
+        out.push('0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut pos = buf.len();
+    while value > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    for b in &buf[pos..] {
+        out.push(*b as char);
+    }
 }
 
 impl VolatileOrderResponse {
+    fn from_hotpath(session_id: &str, outcome: V3HotPathOutcome) -> Self {
+        match outcome.session_seq {
+            Some(session_seq) => Self {
+                session_id: PooledJsonString::from_str(session_id),
+                session_seq: Some(session_seq),
+                attempt_id: Some(build_attempt_id(session_seq)),
+                received_at_ns: outcome.received_at_ns,
+                status: outcome.status_text,
+                reason: None,
+            },
+            None => Self {
+                session_id: PooledJsonString::from_str(session_id),
+                session_seq: None,
+                attempt_id: None,
+                received_at_ns: outcome.received_at_ns,
+                status: outcome.status_text,
+                reason: outcome.reason_text.map(PooledJsonString::from_str),
+            },
+        }
+    }
+
     fn accepted(session_id: String, session_seq: u64, received_at_ns: u64) -> Self {
         Self {
-            session_id,
+            session_id: PooledJsonString::from_str(&session_id),
             session_seq: Some(session_seq),
-            attempt_id: Some(format!("att_{}", session_seq)),
+            attempt_id: Some(build_attempt_id(session_seq)),
             received_at_ns,
-            status: "VOLATILE_ACCEPT".into(),
+            status: "VOLATILE_ACCEPT",
             reason: None,
         }
     }
 
-    fn rejected(session_id: &str, status: &str, reason: &str) -> Self {
+    fn rejected(session_id: &str, status: &'static str, reason: &str) -> Self {
         Self {
-            session_id: session_id.to_string(),
+            session_id: PooledJsonString::from_str(session_id),
             session_seq: None,
             attempt_id: None,
             received_at_ns: now_nanos(),
-            status: status.into(),
-            reason: Some(reason.into()),
+            status,
+            reason: Some(PooledJsonString::from_str(reason)),
         }
     }
 }
@@ -2776,6 +3035,16 @@ mod tests {
         frame
     }
 
+    fn v3_tcp_auth_init_frame(jwt_token: &str) -> [u8; V3_TCP_REQUEST_SIZE] {
+        let mut frame = [0u8; V3_TCP_REQUEST_SIZE];
+        let token_bytes = jwt_token.as_bytes();
+        let token_len = token_bytes.len().min(V3_TCP_TOKEN_MAX_LEN);
+        frame[0..2].copy_from_slice(&(token_len as u16).to_le_bytes());
+        frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + token_len)]
+            .copy_from_slice(&token_bytes[..token_len]);
+        frame
+    }
+
     fn put_order(
         state: &AppState,
         order_id: &str,
@@ -3082,7 +3351,7 @@ mod tests {
 
         for case in fixture.reasons {
             let resp = VolatileOrderResponse::rejected("fixture", "REJECTED", &case.reason);
-            let actual = v3_tcp_reason_code(&resp);
+            let actual = v3_tcp_reason_code_from_reason(resp.reason.as_deref());
             if actual != case.tcp_reason_code {
                 mismatches.push(format!(
                     "{} expected={} actual={}",
@@ -3092,7 +3361,10 @@ mod tests {
         }
 
         let unknown = VolatileOrderResponse::rejected("fixture", "REJECTED", "UNKNOWN_REASON");
-        assert_eq!(v3_tcp_reason_code(&unknown), 9_999);
+        assert_eq!(
+            v3_tcp_reason_code_from_reason(unknown.reason.as_deref()),
+            9_999
+        );
         assert!(
             mismatches.is_empty(),
             "reject reason fixture mismatches: {:?}",
@@ -4010,7 +4282,32 @@ mod tests {
         let token = make_token("42");
         let frame = v3_tcp_request(&token, "AAPL", 1, 1, 100, 15_000);
         let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
-        assert_eq!(decoded.jwt_token, token);
+        assert_eq!(decoded.jwt_token, Some(token.as_str()));
+        assert_eq!(
+            decoded.symbol_key,
+            parse_v3_symbol_key("AAPL").expect("symbol key")
+        );
+        assert_eq!(decoded.side, 1);
+        assert_eq!(decoded.order_type, OrderType::Limit);
+        assert_eq!(decoded.qty, 100);
+        assert_eq!(decoded.price, 15_000);
+    }
+
+    #[test]
+    fn v3_tcp_frame_parser_accepts_auth_init_frame() {
+        let token = make_token("auth_init_1");
+        let frame = v3_tcp_auth_init_frame(&token);
+        match decode_v3_tcp_frame(&frame).expect("auth init parse") {
+            V3TcpDecodedFrame::AuthInit { jwt_token } => assert_eq!(jwt_token, token),
+            V3TcpDecodedFrame::Order(_) => panic!("expected auth init frame"),
+        }
+    }
+
+    #[test]
+    fn v3_tcp_request_parser_accepts_tokenless_frame() {
+        let frame = v3_tcp_request("", "AAPL", 1, 1, 100, 15_000);
+        let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
+        assert_eq!(decoded.jwt_token, None);
         assert_eq!(
             decoded.symbol_key,
             parse_v3_symbol_key("AAPL").expect("symbol key")

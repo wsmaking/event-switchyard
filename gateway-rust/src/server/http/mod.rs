@@ -66,11 +66,11 @@ use std::path::{Path, PathBuf};
 use audit::{handle_account_events, handle_audit_anchor, handle_audit_verify, handle_order_events};
 use metrics::{handle_health, handle_metrics};
 use orders::{
-    V3_TCP_REQUEST_SIZE, authenticate_v3_tcp_token, decode_v3_tcp_request,
-    encode_v3_tcp_decode_error, encode_v3_tcp_response, handle_amend_order, handle_cancel_order,
-    handle_get_order, handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3,
-    handle_order, handle_order_v2, handle_order_v3, handle_replace_order,
-    process_order_v3_hot_path_tcp,
+    V3_TCP_REASON_AUTH_REQUIRED, V3_TCP_REASON_AUTH_UNEXPECTED_TOKEN, V3_TCP_REQUEST_SIZE,
+    V3TcpDecodedFrame, authenticate_v3_tcp_token, decode_v3_tcp_frame, encode_v3_tcp_auth_ok,
+    encode_v3_tcp_decode_error, handle_amend_order, handle_cancel_order, handle_get_order,
+    handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3, handle_order,
+    handle_order_v2, handle_order_v3, handle_replace_order, process_order_v3_hot_path_tcp,
 };
 use sse::{handle_account_stream, handle_order_stream};
 
@@ -1709,7 +1709,9 @@ impl AppState {
         if rate <= 1 {
             return true;
         }
-        let seq = self.v3_hotpath_sample_cursor.fetch_add(1, Ordering::Relaxed);
+        let seq = self
+            .v3_hotpath_sample_cursor
+            .fetch_add(1, Ordering::Relaxed);
         seq % rate == 0
     }
 
@@ -2157,9 +2159,11 @@ fn rebuild_v3_runtime_state_from_reader<R: BufRead>(
     for ((session_id, session_seq), record) in records {
         match record.status {
             V3ConfirmStatus::DurableAccepted => {
-                state
-                    .v3_confirm_store
-                    .mark_durable_accepted(&session_id, session_seq, record.at_ns);
+                state.v3_confirm_store.mark_durable_accepted(
+                    &session_id,
+                    session_seq,
+                    record.at_ns,
+                );
                 stats.confirm_restored = stats.confirm_restored.saturating_add(1);
                 if let (Some(symbol_key), Some(delta_qty)) =
                     (record.position_symbol_key, record.position_delta_qty)
@@ -2461,8 +2465,7 @@ pub async fn run(
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(1);
-    let v3_dedicated_worker_runtime =
-        parse_bool_env("V3_DEDICATED_WORKER_RUNTIME").unwrap_or(true);
+    let v3_dedicated_worker_runtime = parse_bool_env("V3_DEDICATED_WORKER_RUNTIME").unwrap_or(true);
     let v3_tsc_clock = if v3_tsc_timing_enable {
         match RdtscpClock::detect() {
             Some(clock) => Some(Arc::new(clock)),
@@ -3119,10 +3122,7 @@ pub async fn run(
             .as_ref()
             .map(|clock| clock.invariant_tsc())
             .unwrap_or(false),
-        v3_tsc_hz: v3_tsc_clock
-            .as_ref()
-            .map(|clock| clock.hz())
-            .unwrap_or(0),
+        v3_tsc_hz: v3_tsc_clock.as_ref().map(|clock| clock.hz()).unwrap_or(0),
         v3_tsc_mismatch_threshold_pct,
         v3_tsc_fallback_total: Arc::new(AtomicU64::new(0)),
         v3_tsc_cross_core_total: Arc::new(AtomicU64::new(0)),
@@ -3583,6 +3583,7 @@ async fn handle_v3_tcp_connection(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(256);
+    let auth_init_required = parse_bool_env("V3_TCP_AUTH_INIT_REQUIRED").unwrap_or(false);
     let mut auth_cache: HashMap<String, crate::auth::Principal> = if auth_cache_enabled {
         HashMap::with_capacity(auth_cache_capacity.min(1024))
     } else {
@@ -3590,6 +3591,7 @@ async fn handle_v3_tcp_connection(
     };
     let mut sticky_token = String::new();
     let mut sticky_principal: Option<crate::auth::Principal> = None;
+    let mut auth_init_principal: Option<crate::auth::Principal> = None;
     let mut req = [0u8; V3_TCP_REQUEST_SIZE];
     loop {
         match socket.read_exact(&mut req).await {
@@ -3598,72 +3600,156 @@ async fn handle_v3_tcp_connection(
             Err(e) => return Err(e.into()),
         }
         let t0 = gateway_core::now_nanos();
-        let resp = match decode_v3_tcp_request(&req) {
-            Ok(decoded) => {
-                let principal = if sticky_auth_context
-                    && sticky_principal.is_some()
-                    && sticky_token == decoded.jwt_token
-                {
-                    // 接続内で同一トークンが継続する場合は JWT 検証/HashMap 探索を避ける。
-                    Ok(sticky_principal.as_ref().expect("checked is_some"))
-                } else if auth_cache_enabled {
-                    let mut auth_error: Option<(StatusCode, u32)> = None;
-                    if !auth_cache.contains_key(decoded.jwt_token) {
-                        match authenticate_v3_tcp_token(&state, decoded.jwt_token) {
+        let resp = match decode_v3_tcp_frame(&req) {
+            Ok(V3TcpDecodedFrame::AuthInit { jwt_token }) => {
+                let principal = if auth_cache_enabled {
+                    if let Some(cached) = auth_cache.get(jwt_token) {
+                        Ok(cached.clone())
+                    } else {
+                        match authenticate_v3_tcp_token(&state, jwt_token) {
                             Ok(principal) => {
                                 if auth_cache.len() >= auth_cache_capacity {
                                     auth_cache.clear();
                                 }
-                                auth_cache.insert(decoded.jwt_token.to_string(), principal);
+                                auth_cache.insert(jwt_token.to_string(), principal.clone());
+                                Ok(principal)
                             }
-                            Err(err) => {
-                                if sticky_auth_context {
-                                    sticky_principal = None;
-                                    sticky_token.clear();
-                                }
-                                auth_error = Some(err);
-                            }
-                        }
-                    }
-                    if let Some(err) = auth_error {
-                        Err(err)
-                    } else {
-                        match auth_cache.get(decoded.jwt_token) {
-                            Some(cached) => Ok(cached),
-                            None => {
-                                Err((StatusCode::UNAUTHORIZED, orders::V3_TCP_REASON_AUTH_INVALID))
-                            }
+                            Err(err) => Err(err),
                         }
                     }
                 } else {
-                    match authenticate_v3_tcp_token(&state, decoded.jwt_token) {
-                        Ok(principal) => {
-                            sticky_principal = Some(principal);
-                            Ok(sticky_principal.as_ref().expect("set above"))
-                        }
-                        Err(err) => Err(err),
-                    }
+                    authenticate_v3_tcp_token(&state, jwt_token)
                 };
                 match principal {
                     Ok(principal) => {
-                        let (status, body) = process_order_v3_hot_path_tcp(
-                            &state,
-                            &principal.account_id,
-                            &principal.session_id,
-                            &decoded,
-                            t0,
-                        );
-                        if sticky_auth_context
-                            && (sticky_principal.is_none() || sticky_token != decoded.jwt_token)
-                        {
+                        auth_init_principal = Some(principal.clone());
+                        if sticky_auth_context {
                             sticky_token.clear();
-                            sticky_token.push_str(decoded.jwt_token);
-                            sticky_principal = Some(principal.clone());
+                            sticky_token.push_str(jwt_token);
+                            sticky_principal = Some(principal);
                         }
-                        encode_v3_tcp_response(status, &body)
+                        encode_v3_tcp_auth_ok(t0)
                     }
                     Err((status, reason_code)) => {
+                        auth_init_principal = None;
+                        if sticky_auth_context {
+                            sticky_principal = None;
+                            sticky_token.clear();
+                        }
                         encode_v3_tcp_decode_error(status, reason_code, t0)
+                    }
+                }
+            }
+            Ok(V3TcpDecodedFrame::Order(decoded)) => {
+                if auth_init_required {
+                    if decoded.jwt_token.is_some() {
+                        encode_v3_tcp_decode_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            V3_TCP_REASON_AUTH_UNEXPECTED_TOKEN,
+                            t0,
+                        )
+                    } else {
+                        match auth_init_principal.as_ref() {
+                            Some(principal) => process_order_v3_hot_path_tcp(
+                                &state,
+                                &principal.account_id,
+                                &principal.session_id,
+                                &decoded,
+                                t0,
+                            ),
+                            None => encode_v3_tcp_decode_error(
+                                StatusCode::UNAUTHORIZED,
+                                V3_TCP_REASON_AUTH_REQUIRED,
+                                t0,
+                            ),
+                        }
+                    }
+                } else {
+                    let principal = match decoded.jwt_token {
+                        Some(jwt_token) => {
+                            if sticky_auth_context
+                                && sticky_principal.is_some()
+                                && sticky_token == jwt_token
+                            {
+                                // 接続内で同一トークンが継続する場合は JWT 検証/HashMap 探索を避ける。
+                                Ok(sticky_principal.as_ref().expect("checked is_some"))
+                            } else if auth_cache_enabled {
+                                let mut auth_error: Option<(StatusCode, u32)> = None;
+                                if !auth_cache.contains_key(jwt_token) {
+                                    match authenticate_v3_tcp_token(&state, jwt_token) {
+                                        Ok(principal) => {
+                                            if auth_cache.len() >= auth_cache_capacity {
+                                                auth_cache.clear();
+                                            }
+                                            auth_cache.insert(jwt_token.to_string(), principal);
+                                        }
+                                        Err(err) => {
+                                            if sticky_auth_context {
+                                                sticky_principal = None;
+                                                sticky_token.clear();
+                                            }
+                                            auth_error = Some(err);
+                                        }
+                                    }
+                                }
+                                if let Some(err) = auth_error {
+                                    Err(err)
+                                } else {
+                                    match auth_cache.get(jwt_token) {
+                                        Some(cached) => Ok(cached),
+                                        None => Err((
+                                            StatusCode::UNAUTHORIZED,
+                                            orders::V3_TCP_REASON_AUTH_INVALID,
+                                        )),
+                                    }
+                                }
+                            } else {
+                                match authenticate_v3_tcp_token(&state, jwt_token) {
+                                    Ok(principal) => {
+                                        sticky_principal = Some(principal);
+                                        Ok(sticky_principal.as_ref().expect("set above"))
+                                    }
+                                    Err(err) => Err(err),
+                                }
+                            }
+                        }
+                        None => {
+                            if sticky_auth_context {
+                                match sticky_principal.as_ref() {
+                                    Some(principal) => Ok(principal),
+                                    None => Err((
+                                        StatusCode::UNAUTHORIZED,
+                                        orders::V3_TCP_REASON_AUTH_INVALID,
+                                    )),
+                                }
+                            } else {
+                                Err((StatusCode::UNAUTHORIZED, orders::V3_TCP_REASON_AUTH_INVALID))
+                            }
+                        }
+                    };
+                    match principal {
+                        Ok(principal) => {
+                            let resp = process_order_v3_hot_path_tcp(
+                                &state,
+                                &principal.account_id,
+                                &principal.session_id,
+                                &decoded,
+                                t0,
+                            );
+                            if sticky_auth_context {
+                                if let Some(jwt_token) = decoded.jwt_token {
+                                    if sticky_principal.is_none() || sticky_token != jwt_token {
+                                        sticky_token.clear();
+                                        sticky_token.push_str(jwt_token);
+                                        sticky_principal = Some(principal.clone());
+                                    }
+                                }
+                            }
+                            resp
+                        }
+                        Err((status, reason_code)) => {
+                            encode_v3_tcp_decode_error(status, reason_code, t0)
+                        }
                     }
                 }
             }
@@ -4350,8 +4436,9 @@ async fn run_v3_durable_worker(
 
     #[inline]
     fn build_v3_durable_accepted_line(task: &V3DurableTask, event_at_ms: u64) -> Vec<u8> {
-        let mut out =
-            Vec::with_capacity(160 + task.session_id.len() + task.account_id.len().saturating_mul(2));
+        let mut out = Vec::with_capacity(
+            160 + task.session_id.len() + task.account_id.len().saturating_mul(2),
+        );
         let symbol_key = u64::from_le_bytes(task.position_symbol_key);
         out.extend_from_slice(b"{\"type\":\"V3DurableAccepted\",\"at\":");
         push_u64_decimal(&mut out, event_at_ms);
@@ -5880,13 +5967,7 @@ mod tests {
         let store = V3ConfirmStore::new(4, 500, 60_000);
         let far_future_ns = 10_000_000_000u64;
         for seq in 0..128 {
-            let task = test_task(
-                &format!("sess-{}", seq),
-                "acc-wheel",
-                seq,
-                far_future_ns,
-                0,
-            );
+            let task = test_task(&format!("sess-{}", seq), "acc-wheel", seq, far_future_ns, 0);
             store.record_volatile(&task, far_future_ns);
         }
         let pre_scan = store.collect_timed_out(1_000_000, 256);
