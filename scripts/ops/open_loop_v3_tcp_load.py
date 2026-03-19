@@ -61,15 +61,16 @@ def percentile(values: list[float], p: float) -> float:
     return ordered[idx]
 
 
-def encode_v3_tcp_frame(jwt_token: str) -> bytes:
-    token_bytes = jwt_token.encode("utf-8")
+def encode_v3_tcp_frame(jwt_token: str | None) -> bytes:
+    token_bytes = jwt_token.encode("utf-8") if jwt_token else b""
     token_len = len(token_bytes)
-    if token_len == 0 or token_len > V3_TCP_TOKEN_MAX_LEN:
+    if token_len > V3_TCP_TOKEN_MAX_LEN:
         raise ValueError("invalid token length for v3 tcp frame")
 
     out = bytearray(V3_TCP_REQUEST_SIZE)
     out[0:2] = token_len.to_bytes(2, "little")
-    out[V3_TCP_TOKEN_OFFSET : V3_TCP_TOKEN_OFFSET + token_len] = token_bytes
+    if token_len > 0:
+        out[V3_TCP_TOKEN_OFFSET : V3_TCP_TOKEN_OFFSET + token_len] = token_bytes
 
     # symbol: "AAPL"
     symbol_bytes = b"AAPL"
@@ -80,6 +81,18 @@ def encode_v3_tcp_frame(jwt_token: str) -> bytes:
     out[V3_TCP_TYPE_OFFSET] = 1
     out[V3_TCP_QTY_OFFSET : V3_TCP_QTY_OFFSET + 8] = (100).to_bytes(8, "little")
     out[V3_TCP_PRICE_OFFSET : V3_TCP_PRICE_OFFSET + 8] = (15000).to_bytes(8, "little")
+    return bytes(out)
+
+
+def encode_v3_tcp_auth_init_frame(jwt_token: str) -> bytes:
+    token_bytes = jwt_token.encode("utf-8")
+    token_len = len(token_bytes)
+    if token_len > V3_TCP_TOKEN_MAX_LEN:
+        raise ValueError("invalid token length for v3 tcp auth-init frame")
+    out = bytearray(V3_TCP_REQUEST_SIZE)
+    out[0:2] = token_len.to_bytes(2, "little")
+    out[V3_TCP_TOKEN_OFFSET : V3_TCP_TOKEN_OFFSET + token_len] = token_bytes
+    # auth-init marker: side/type/qty/price are all 0
     return bytes(out)
 
 
@@ -109,16 +122,19 @@ def worker_loop(
     host: str,
     tcp_port: int,
     request_timeout_sec: float,
-    frames_by_account: dict[str, bytes],
+    frames_by_account: dict[str, tuple[bytes, bytes, bytes]],
     account_ids: list[str],
     q: queue.Queue,
     scheduler_done: threading.Event,
     stop_now: threading.Event,
     sticky_account_per_worker: bool,
+    jwt_once_per_connection: bool,
+    auth_init_required: bool,
     worker_account_idx: int,
     stats: WorkerStats,
 ) -> None:
     conn: socket.socket | None = None
+    conn_authenticated_account_id: str | None = None
 
     while True:
         if stop_now.is_set():
@@ -133,7 +149,7 @@ def worker_loop(
         if sticky_account_per_worker:
             account_idx = worker_account_idx
         account_id = account_ids[account_idx]
-        frame = frames_by_account[account_id]
+        auth_init_frame, frame_with_token, frame_without_token = frames_by_account[account_id]
         stats.attempted += 1
         t0 = time.perf_counter()
         try:
@@ -141,6 +157,28 @@ def worker_loop(
                 conn = socket.create_connection((host, tcp_port), timeout=request_timeout_sec)
                 conn.settimeout(request_timeout_sec)
                 conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                conn_authenticated_account_id = None
+
+            if auth_init_required and conn_authenticated_account_id != account_id:
+                conn.sendall(auth_init_frame)
+                auth_resp = recv_exact(conn, V3_TCP_RESPONSE_SIZE)
+                auth_status = int.from_bytes(auth_resp[2:4], "little")
+                if auth_status != 202:
+                    stats.latencies_us.append((time.perf_counter() - t0) * 1_000_000.0)
+                    stats.completed += 1
+                    stats.rejected += 1
+                    stats.status_counts[auth_status] += 1
+                    conn_authenticated_account_id = None
+                    continue
+                conn_authenticated_account_id = account_id
+
+            use_tokenless_frame = (
+                jwt_once_per_connection and conn_authenticated_account_id == account_id
+            )
+            if auth_init_required:
+                frame = frame_without_token
+            else:
+                frame = frame_without_token if use_tokenless_frame else frame_with_token
             conn.sendall(frame)
             resp = recv_exact(conn, V3_TCP_RESPONSE_SIZE)
             status = int.from_bytes(resp[2:4], "little")
@@ -151,8 +189,16 @@ def worker_loop(
             if status == 202:
                 stats.accepted += 1
                 stats.accepted_latencies_us.append(elapsed_us)
+                if auth_init_required:
+                    conn_authenticated_account_id = account_id
+                elif jwt_once_per_connection and not use_tokenless_frame:
+                    conn_authenticated_account_id = account_id
             else:
                 stats.rejected += 1
+                if auth_init_required:
+                    conn_authenticated_account_id = None
+                elif jwt_once_per_connection:
+                    conn_authenticated_account_id = None
         except Exception:
             stats.errors += 1
             if conn is not None:
@@ -161,6 +207,7 @@ def worker_loop(
                 except Exception:
                     pass
                 conn = None
+            conn_authenticated_account_id = None
         finally:
             q.task_done()
 
@@ -201,6 +248,16 @@ def main() -> None:
         action="store_true",
         help="Backfill remaining target offers after duration",
     )
+    parser.add_argument(
+        "--jwt-once-per-connection",
+        action="store_true",
+        help="Send JWT once per account/connection, then send token_len=0 frames while account is unchanged",
+    )
+    parser.add_argument(
+        "--auth-init-required",
+        action="store_true",
+        help="Use explicit AuthInit frame (JWT once per connection) then send tokenless order frames",
+    )
     args = parser.parse_args()
 
     if args.duration_sec <= 0:
@@ -223,10 +280,14 @@ def main() -> None:
         raise SystemExit("--tcp-port must be > 0")
 
     account_ids = [f"{args.account_prefix}_{i+1}" for i in range(args.accounts)]
-    frames_by_account = {
-        account_id: encode_v3_tcp_frame(generate_jwt(args.jwt_secret, account_id))
-        for account_id in account_ids
-    }
+    frames_by_account = {}
+    for account_id in account_ids:
+        token = generate_jwt(args.jwt_secret, account_id)
+        frames_by_account[account_id] = (
+            encode_v3_tcp_auth_init_frame(token),
+            encode_v3_tcp_frame(token),
+            encode_v3_tcp_frame(None),
+        )
 
     offered_total_target = int(round(args.duration_sec * args.target_rps))
     q: queue.Queue = queue.Queue(maxsize=args.queue_capacity)
@@ -248,6 +309,8 @@ def main() -> None:
                 scheduler_done,
                 stop_now,
                 args.sticky_account_per_worker,
+                args.jwt_once_per_connection,
+                args.auth_init_required,
                 wid % args.accounts,
                 worker_stats[wid],
             ),
@@ -344,6 +407,8 @@ def main() -> None:
     print(f"accounts={args.accounts}")
     print(f"queue_capacity={args.queue_capacity}")
     print(f"sticky_account_per_worker={int(args.sticky_account_per_worker)}")
+    print(f"jwt_once_per_connection={int(args.jwt_once_per_connection)}")
+    print(f"auth_init_required={int(args.auth_init_required)}")
     print(f"max_burst_per_tick={args.max_burst_per_tick}")
     print(f"final_catchup={int(args.final_catchup)}")
     print(f"offered_total_target={offered_total_target}")

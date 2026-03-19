@@ -123,7 +123,9 @@ V3_CONFIRM_REBUILD_MAX_LINES="${V3_CONFIRM_REBUILD_MAX_LINES:-500000}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
 V3_TCP_BUSY_POLL_US="${V3_TCP_BUSY_POLL_US:-0}"
 V3_TCP_AUTH_STICKY_CONTEXT="${V3_TCP_AUTH_STICKY_CONTEXT:-true}"
+V3_TCP_AUTH_INIT_REQUIRED="${V3_TCP_AUTH_INIT_REQUIRED:-false}"
 V3_TCP_STICKY_ACCOUNT_PER_WORKER="${V3_TCP_STICKY_ACCOUNT_PER_WORKER:-true}"
+V3_TCP_JWT_ONCE_PER_CONNECTION="${V3_TCP_JWT_ONCE_PER_CONNECTION:-true}"
 V3_SHARD_AFFINITY_CPUS="${V3_SHARD_AFFINITY_CPUS:-}"
 V3_DURABLE_AFFINITY_CPUS="${V3_DURABLE_AFFINITY_CPUS:-}"
 V3_TCP_SERVER_AFFINITY_CPUS="${V3_TCP_SERVER_AFFINITY_CPUS:-}"
@@ -368,6 +370,7 @@ V3_TCP_ENABLE="$V3_TCP_ENABLE" \
 V3_TCP_PORT="$V3_TCP_PORT" \
 V3_TCP_BUSY_POLL_US="$V3_TCP_BUSY_POLL_US" \
 V3_TCP_AUTH_STICKY_CONTEXT="$V3_TCP_AUTH_STICKY_CONTEXT" \
+V3_TCP_AUTH_INIT_REQUIRED="$V3_TCP_AUTH_INIT_REQUIRED" \
 V3_SHARD_AFFINITY_CPUS="$V3_SHARD_AFFINITY_CPUS" \
 V3_DURABLE_AFFINITY_CPUS="$V3_DURABLE_AFFINITY_CPUS" \
 V3_TCP_SERVER_AFFINITY_CPUS="$V3_TCP_SERVER_AFFINITY_CPUS" \
@@ -420,6 +423,14 @@ load_sticky_account_flag=()
 if [[ "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "1" || "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "true" || "${V3_TCP_STICKY_ACCOUNT_PER_WORKER}" == "TRUE" ]]; then
   load_sticky_account_flag+=(--sticky-account-per-worker)
 fi
+load_jwt_once_flag=()
+if [[ "${V3_TCP_JWT_ONCE_PER_CONNECTION}" == "1" || "${V3_TCP_JWT_ONCE_PER_CONNECTION}" == "true" || "${V3_TCP_JWT_ONCE_PER_CONNECTION}" == "TRUE" ]]; then
+  load_jwt_once_flag+=(--jwt-once-per-connection)
+fi
+load_auth_init_flag=()
+if [[ "${V3_TCP_AUTH_INIT_REQUIRED}" == "1" || "${V3_TCP_AUTH_INIT_REQUIRED}" == "true" || "${V3_TCP_AUTH_INIT_REQUIRED}" == "TRUE" ]]; then
+  load_auth_init_flag+=(--auth-init-required)
+fi
 if [[ "$V3_INGRESS_TRANSPORT" == "tcp" ]]; then
   python3 scripts/ops/open_loop_v3_tcp_load.py \
     --host "$HOST" \
@@ -436,6 +447,8 @@ if [[ "$V3_INGRESS_TRANSPORT" == "tcp" ]]; then
     --request-timeout-sec "$REQUEST_TIMEOUT_SEC" \
     --drain-timeout-sec "$DRAIN_TIMEOUT_SEC" \
     "${load_sticky_account_flag[@]}" \
+    "${load_jwt_once_flag[@]}" \
+    "${load_auth_init_flag[@]}" \
     "${load_final_catchup_flag[@]}" >"$LOAD_OUT"
 else
   python3 scripts/ops/open_loop_v3_load.py \
@@ -701,6 +714,7 @@ v3_tcp_enable=${V3_TCP_ENABLE}
 v3_tcp_port=${V3_TCP_PORT}
 v3_tcp_busy_poll_us=${V3_TCP_BUSY_POLL_US}
 v3_tcp_auth_sticky_context=${V3_TCP_AUTH_STICKY_CONTEXT}
+v3_tcp_auth_init_required=${V3_TCP_AUTH_INIT_REQUIRED}
 v3_shard_affinity_cpus=${V3_SHARD_AFFINITY_CPUS}
 v3_durable_affinity_cpus=${V3_DURABLE_AFFINITY_CPUS}
 v3_tcp_server_affinity_cpus=${V3_TCP_SERVER_AFFINITY_CPUS}
@@ -713,6 +727,8 @@ load_workers=${LOAD_WORKERS}
 load_accounts=${LOAD_ACCOUNTS}
 load_queue_capacity=${LOAD_QUEUE_CAPACITY}
 load_sticky_account_per_worker=${V3_TCP_STICKY_ACCOUNT_PER_WORKER}
+load_jwt_once_per_connection=${V3_TCP_JWT_ONCE_PER_CONNECTION}
+load_auth_init_required=${V3_TCP_AUTH_INIT_REQUIRED}
 load_max_burst_per_tick=${LOAD_MAX_BURST_PER_TICK}
 load_final_catchup=${LOAD_FINAL_CATCHUP}
 v3_soft_reject_pct=${V3_SOFT_REJECT_PCT}
