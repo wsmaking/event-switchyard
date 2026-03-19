@@ -9,6 +9,8 @@
 
 mod id_map;
 mod sharded;
+pub mod strategy_shadow_store;
+pub mod strategy_snapshot;
 
 pub use id_map::OrderIdMap;
 pub use sharded::{IdempotencyOutcome, ShardedOrderStore};

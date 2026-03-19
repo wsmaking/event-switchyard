@@ -34,6 +34,7 @@ mod rate_limit;
 mod server;
 mod sse;
 mod store;
+mod strategy;
 
 use std::sync::Arc;
 use tracing::info;

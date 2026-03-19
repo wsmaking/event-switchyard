@@ -33,7 +33,7 @@ impl Default for TimeInForce {
 ///
 /// Kotlin Gateway の CreateOrderRequest と互換。
 /// account_id は JWT トークンから取得するため、リクエストボディには含めない。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderRequest {
     /// 銘柄コード
@@ -57,6 +57,12 @@ pub struct OrderRequest {
     /// クライアント注文ID
     #[serde(default)]
     pub client_order_id: Option<String>,
+    /// strategy 側の intent ID
+    #[serde(default)]
+    pub intent_id: Option<String>,
+    /// strategy 側の model ID
+    #[serde(default)]
+    pub model_id: Option<String>,
 }
 
 impl OrderRequest {
