@@ -118,6 +118,18 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_durable_backlog_growth_per_sec
         .load(Ordering::Relaxed);
     let v3_durable_write_error_total = state.v3_durable_write_error_total.load(Ordering::Relaxed);
+    let v3_durable_replica_enabled = if state.v3_durable_replica_enabled { 1 } else { 0 };
+    let v3_durable_replica_required = if state.v3_durable_replica_required { 1 } else { 0 };
+    let v3_durable_replica_receipt_timeout_us = state.v3_durable_replica_receipt_timeout_us;
+    let v3_durable_replica_append_total = state
+        .v3_durable_replica_append_total
+        .load(Ordering::Relaxed);
+    let v3_durable_replica_write_error_total = state
+        .v3_durable_replica_write_error_total
+        .load(Ordering::Relaxed);
+    let v3_durable_replica_receipt_timeout_total = state
+        .v3_durable_replica_receipt_timeout_total
+        .load(Ordering::Relaxed);
     let v3_durable_receipt_timeout_total = state
         .v3_durable_receipt_timeout_total
         .load(Ordering::Relaxed);
@@ -392,6 +404,13 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_confirm_rebuild_restored_total
         .load(Ordering::Relaxed);
     let v3_confirm_rebuild_elapsed_ms = state.v3_confirm_rebuild_elapsed_ms.load(Ordering::Relaxed);
+    let v3_replay_position_applied_total = state.v3_replay_position_applied_total.load(Ordering::Relaxed);
+    let v3_replay_session_seq_seeded_total = state
+        .v3_replay_session_seq_seeded_total
+        .load(Ordering::Relaxed);
+    let v3_replay_session_shard_seeded_total = state
+        .v3_replay_session_shard_seeded_total
+        .load(Ordering::Relaxed);
     let v3_durable_confirm_soft_reject_age_us = state.v3_durable_confirm_soft_reject_age_us;
     let v3_durable_confirm_hard_reject_age_us = state.v3_durable_confirm_hard_reject_age_us;
     let v3_durable_confirm_guard_soft_slack_pct = state.v3_durable_confirm_guard_soft_slack_pct;
@@ -1107,6 +1126,24 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         "# HELP gateway_v3_durable_write_error_total Total /v3 durable write/receipt errors\n\
          # TYPE gateway_v3_durable_write_error_total counter\n\
          gateway_v3_durable_write_error_total {}\n\
+         # HELP gateway_v3_durable_replica_enabled /v3 durable replica WAL enabled (1/0)\n\
+         # TYPE gateway_v3_durable_replica_enabled gauge\n\
+         gateway_v3_durable_replica_enabled {}\n\
+         # HELP gateway_v3_durable_replica_required /v3 durable replica WAL required for acceptance (1/0)\n\
+         # TYPE gateway_v3_durable_replica_required gauge\n\
+         gateway_v3_durable_replica_required {}\n\
+         # HELP gateway_v3_durable_replica_receipt_timeout_us Configured /v3 durable replica receipt timeout in durable worker (microseconds)\n\
+         # TYPE gateway_v3_durable_replica_receipt_timeout_us gauge\n\
+         gateway_v3_durable_replica_receipt_timeout_us {}\n\
+         # HELP gateway_v3_durable_replica_append_total Total /v3 replica append attempts\n\
+         # TYPE gateway_v3_durable_replica_append_total counter\n\
+         gateway_v3_durable_replica_append_total {}\n\
+         # HELP gateway_v3_durable_replica_write_error_total Total /v3 replica write/receipt errors\n\
+         # TYPE gateway_v3_durable_replica_write_error_total counter\n\
+         gateway_v3_durable_replica_write_error_total {}\n\
+         # HELP gateway_v3_durable_replica_receipt_timeout_total Total /v3 replica receipt timeout events inside durable worker\n\
+         # TYPE gateway_v3_durable_replica_receipt_timeout_total counter\n\
+         gateway_v3_durable_replica_receipt_timeout_total {}\n\
          # HELP gateway_v3_durable_receipt_timeout_total Total /v3 durable receipt timeout events inside durable worker\n\
          # TYPE gateway_v3_durable_receipt_timeout_total counter\n\
          gateway_v3_durable_receipt_timeout_total {}\n\
@@ -1258,6 +1295,12 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          # TYPE gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total counter\n\
          gateway_v3_durable_confirm_age_hard_reject_skipped_low_load_total {}\n",
         v3_durable_write_error_total,
+        v3_durable_replica_enabled,
+        v3_durable_replica_required,
+        v3_durable_replica_receipt_timeout_us,
+        v3_durable_replica_append_total,
+        v3_durable_replica_write_error_total,
+        v3_durable_replica_receipt_timeout_total,
         v3_durable_receipt_timeout_total,
         v3_durable_worker_receipt_timeout_us,
         v3_durable_worker_max_inflight_receipts,
@@ -1733,7 +1776,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          gateway_v3_confirm_rebuild_restored_total {}\n\
          # HELP gateway_v3_confirm_rebuild_elapsed_ms Elapsed milliseconds for /v3 confirm WAL rebuild at startup\n\
          # TYPE gateway_v3_confirm_rebuild_elapsed_ms gauge\n\
-         gateway_v3_confirm_rebuild_elapsed_ms {}\n",
+         gateway_v3_confirm_rebuild_elapsed_ms {}\n\
+         # HELP gateway_v3_replay_position_applied_total Total /v3 position deltas applied from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_position_applied_total counter\n\
+         gateway_v3_replay_position_applied_total {}\n\
+         # HELP gateway_v3_replay_session_seq_seeded_total Total /v3 session sequence floors seeded from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_session_seq_seeded_total counter\n\
+         gateway_v3_replay_session_seq_seeded_total {}\n\
+         # HELP gateway_v3_replay_session_shard_seeded_total Total /v3 session shard bindings seeded from WAL replay at startup\n\
+         # TYPE gateway_v3_replay_session_shard_seeded_total counter\n\
+         gateway_v3_replay_session_shard_seeded_total {}\n",
         v3_confirm_store_size,
         v3_confirm_store_lanes,
         v3_confirm_lane_skew_pct,
@@ -1743,6 +1795,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_confirm_gc_removed_total,
         v3_confirm_rebuild_restored_total,
         v3_confirm_rebuild_elapsed_ms,
+        v3_replay_position_applied_total,
+        v3_replay_session_seq_seeded_total,
+        v3_replay_session_shard_seeded_total,
     ));
     snapshot.push_str(
         "# HELP gateway_v3_confirm_oldest_inflight_us_per_lane Oldest /v3 inflight confirm age per lane in microseconds\n\
