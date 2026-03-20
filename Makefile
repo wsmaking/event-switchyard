@@ -1,4 +1,4 @@
-.PHONY: help rust-check rust-test rust-run v3-build-release v3-local-gate v3-stable-gate v3-capability-gate v3-absolute-gate v3-absolute-gate-loop v3-phase2-compare v3-phase2-compare-quiet v3-open-loop v3-capacity-sweep quant-eval-gate quant-policy-runtime-gate preset-switch-gate bench gate check check-lite check-full bless perf-gate-rust perf-gate-rust-ci perf-gate-rust-nightly perf-gate-rust-bless
+.PHONY: help rust-check rust-test rust-run v3-build-release v3-local-gate v3-stable-gate v3-capability-gate v3-absolute-gate v3-absolute-gate-loop v3-phase2-compare v3-phase2-compare-quiet v3-open-loop v3-capacity-sweep quant-eval-gate quant-policy-runtime-gate quant-policy-durable-gate preset-switch-gate bench gate check check-lite check-full bless perf-gate-rust perf-gate-rust-ci perf-gate-rust-nightly perf-gate-rust-bless
 
 .DEFAULT_GOAL := help
 
@@ -26,6 +26,7 @@ help:
 	@echo "  make v3-capacity-sweep     - capacity sweep"
 	@echo "  make quant-eval-gate       - quant evaluation gate with self-started gateway"
 	@echo "  make quant-policy-runtime-gate - quant policy runtime admission gate"
+	@echo "  make quant-policy-durable-gate - quant policy durable admission gate"
 	@echo ""
 	@echo "Compatibility aliases:"
 	@echo "  make check / check-lite / check-full"
@@ -76,6 +77,9 @@ quant-eval-gate:
 
 quant-policy-runtime-gate:
 	@scripts/ops/check_quant_policy_runtime_gate.sh
+
+quant-policy-durable-gate:
+	@scripts/ops/check_quant_policy_durable_gate.sh
 
 # Compatibility aliases for existing workflows
 bench: v3-phase2-compare
