@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -57,6 +58,8 @@ struct ReaderConfig {
     proposal_decision_key: Option<String>,
     proposal_created_at_ns: Option<u64>,
     proposal_expires_at_ns: Option<u64>,
+    adapt_proposal: bool,
+    submit_proposal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +80,8 @@ struct ReaderOutput {
     recovery_plan: Option<StrategyExecutionRecoveryPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fresh_intent_proposal: Option<StrategyExecutionFreshIntentProposal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposal_execution: Option<ReaderProposalExecution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +89,28 @@ struct ParsedHttpBaseUrl {
     host: String,
     port: u16,
     base_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ReaderProposalExecution {
+    adapt_http_status: u16,
+    adapt_ok: bool,
+    adapt_response: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submit_http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submit_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submit_response: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SimpleHttpResponse {
+    status_code: u16,
+    body: Vec<u8>,
 }
 
 #[tokio::main]
@@ -160,6 +187,19 @@ async fn run() -> Result<(), String> {
         )),
         _ => None,
     };
+    let proposal_execution = if config.adapt_proposal {
+        match fresh_intent_proposal.as_ref() {
+            Some(proposal) if proposal.proposed => match proposal.intent.as_ref() {
+                Some(intent) => Some(
+                    execute_proposal_flow(&config.base_url, intent, config.submit_proposal).await?,
+                ),
+                None => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
     let output = ReaderOutput {
         scope_kind: match &config.scope {
             ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
@@ -169,6 +209,7 @@ async fn run() -> Result<(), String> {
         snapshot,
         recovery_plan,
         fresh_intent_proposal,
+        proposal_execution,
     };
     let raw = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
     println!("{raw}");
@@ -191,6 +232,8 @@ fn parse_args() -> Result<ReaderConfig, String> {
     let mut proposal_decision_key = None;
     let mut proposal_created_at_ns = None;
     let mut proposal_expires_at_ns = None;
+    let mut adapt_proposal = false;
+    let mut submit_proposal = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -234,6 +277,13 @@ fn parse_args() -> Result<ReaderConfig, String> {
                 proposal_expires_at_ns =
                     Some(parse_u64_arg(&mut args, "--proposal-expires-at-ns")?);
             }
+            "--adapt-proposal" => {
+                adapt_proposal = true;
+            }
+            "--submit-proposal" => {
+                submit_proposal = true;
+                adapt_proposal = true;
+            }
             "--unconfirmed-policy" => {
                 unconfirmed =
                     parse_unknown_qty_policy(&next_arg(&mut args, "--unconfirmed-policy")?)?;
@@ -257,6 +307,10 @@ fn parse_args() -> Result<ReaderConfig, String> {
         }
     };
 
+    if adapt_proposal && template_intent_path.is_none() {
+        return Err("--adapt-proposal requires --template-intent".to_string());
+    }
+
     Ok(ReaderConfig {
         base_url,
         scope,
@@ -274,6 +328,8 @@ fn parse_args() -> Result<ReaderConfig, String> {
         proposal_decision_key,
         proposal_created_at_ns,
         proposal_expires_at_ns,
+        adapt_proposal,
+        submit_proposal,
     })
 }
 
@@ -329,6 +385,7 @@ fn print_usage() {
         "    [--proposal-intent-id fresh-intent-1] [--proposal-decision-key fresh-decision-1] \\"
     );
     println!("    [--proposal-created-at-ns 1000] [--proposal-expires-at-ns 2000] \\");
+    println!("    [--adapt-proposal] [--submit-proposal] \\");
     println!("    [--loss-suspect-policy hold|retry|ignore]");
 }
 
@@ -431,6 +488,81 @@ async fn fetch_catchup_page(
         .map_err(|err| format!("decode catch-up page failed: {err}"))
 }
 
+async fn execute_proposal_flow(
+    base_url: &str,
+    intent: &StrategyIntent,
+    submit_proposal: bool,
+) -> Result<ReaderProposalExecution, String> {
+    let parsed = parse_http_base_url(base_url)?;
+    let adapt_response = post_strategy_intent_adapt(&parsed, intent).await?;
+    let adapt_ok = (200..300).contains(&adapt_response.status_code);
+    let adapt_body = decode_json_or_string(&adapt_response.body);
+
+    if !submit_proposal {
+        return Ok(ReaderProposalExecution {
+            adapt_http_status: adapt_response.status_code,
+            adapt_ok,
+            adapt_response: adapt_body,
+            submit_http_status: None,
+            submit_ok: None,
+            submit_response: None,
+            skipped_reason: None,
+        });
+    }
+
+    if !adapt_ok {
+        return Ok(ReaderProposalExecution {
+            adapt_http_status: adapt_response.status_code,
+            adapt_ok,
+            adapt_response: adapt_body,
+            submit_http_status: None,
+            submit_ok: None,
+            submit_response: None,
+            skipped_reason: Some("ADAPT_NOT_SUCCESS".to_string()),
+        });
+    }
+
+    let submit_response = post_strategy_intent_submit(&parsed, intent).await?;
+    let submit_ok = (200..300).contains(&submit_response.status_code);
+    let submit_body = decode_json_or_string(&submit_response.body);
+
+    Ok(ReaderProposalExecution {
+        adapt_http_status: adapt_response.status_code,
+        adapt_ok,
+        adapt_response: adapt_body,
+        submit_http_status: Some(submit_response.status_code),
+        submit_ok: Some(submit_ok),
+        submit_response: Some(submit_body),
+        skipped_reason: None,
+    })
+}
+
+async fn post_strategy_intent_adapt(
+    base: &ParsedHttpBaseUrl,
+    intent: &StrategyIntent,
+) -> Result<SimpleHttpResponse, String> {
+    let path = format!("{}{}", base.base_path, "/strategy/intent/adapt");
+    let body =
+        serde_json::to_vec(intent).map_err(|err| format!("encode adapt request failed: {err}"))?;
+    http_request(base, "POST", &path, Some(&body)).await
+}
+
+async fn post_strategy_intent_submit(
+    base: &ParsedHttpBaseUrl,
+    intent: &StrategyIntent,
+) -> Result<SimpleHttpResponse, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SubmitRequest<'a> {
+        intent: &'a StrategyIntent,
+    }
+
+    let path = format!("{}{}", base.base_path, "/strategy/intent/submit");
+    let body = serde_json::to_vec(&SubmitRequest { intent })
+        .map_err(|err| format!("encode submit request failed: {err}"))?;
+    http_request(base, "POST", &path, Some(&body)).await
+}
+
 fn parse_http_base_url(raw: &str) -> Result<ParsedHttpBaseUrl, String> {
     let trimmed = raw.trim();
     let rest = trimmed
@@ -469,17 +601,42 @@ fn parse_http_base_url(raw: &str) -> Result<ParsedHttpBaseUrl, String> {
 }
 
 async fn http_get_body(base: &ParsedHttpBaseUrl, path: &str) -> Result<Vec<u8>, String> {
+    let response = http_request(base, "GET", path, None).await?;
+    if response.status_code != 200 {
+        let message = String::from_utf8_lossy(&response.body);
+        return Err(format!("HTTP {}: {}", response.status_code, message));
+    }
+    Ok(response.body)
+}
+
+async fn http_request(
+    base: &ParsedHttpBaseUrl,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<SimpleHttpResponse, String> {
     let mut stream = TcpStream::connect((base.host.as_str(), base.port))
         .await
         .map_err(|err| format!("connect failed: {err}"))?;
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n",
         host = base.host
     );
+    if let Some(body) = body {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
     stream
         .write_all(request.as_bytes())
         .await
         .map_err(|err| format!("write request failed: {err}"))?;
+    if let Some(body) = body {
+        stream
+            .write_all(body)
+            .await
+            .map_err(|err| format!("write request body failed: {err}"))?;
+    }
     let mut raw = Vec::new();
     stream
         .read_to_end(&mut raw)
@@ -488,7 +645,7 @@ async fn http_get_body(base: &ParsedHttpBaseUrl, path: &str) -> Result<Vec<u8>, 
     parse_http_response(&raw)
 }
 
-fn parse_http_response(raw: &[u8]) -> Result<Vec<u8>, String> {
+fn parse_http_response(raw: &[u8]) -> Result<SimpleHttpResponse, String> {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -523,12 +680,16 @@ fn parse_http_response(raw: &[u8]) -> Result<Vec<u8>, String> {
         body.to_vec()
     };
 
-    if status_code != 200 {
-        let message = String::from_utf8_lossy(&body);
-        return Err(format!("HTTP {status_code}: {message}"));
-    }
+    Ok(SimpleHttpResponse { status_code, body })
+}
 
-    Ok(body)
+fn decode_json_or_string(body: &[u8]) -> Value {
+    if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).to_string()))
+    }
 }
 
 fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -570,7 +731,7 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::{
         ReaderCursorState, ReaderScope, build_fresh_intent_params, decode_chunked_body,
-        parse_http_base_url, parse_http_response, persist_cursor_state,
+        decode_json_or_string, parse_http_base_url, parse_http_response, persist_cursor_state,
     };
     use crate::order::{OrderType, TimeInForce};
     use crate::strategy::catchup::StrategyExecutionRecoveryPlan;
@@ -578,6 +739,7 @@ mod tests {
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
         StrategyRecoveryPolicy,
     };
+    use serde_json::Value;
     use std::fs;
 
     fn template_intent() -> StrategyIntent {
@@ -624,8 +786,9 @@ mod tests {
     #[test]
     fn parse_http_response_handles_chunked_json() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{\"ok\"\r\n3\r\n:1}\r\n0\r\n\r\n";
-        let body = parse_http_response(raw).expect("parse response");
-        assert_eq!(body, br#"{"ok":1}"#);
+        let response = parse_http_response(raw).expect("parse response");
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, br#"{"ok":1}"#);
     }
 
     #[test]
@@ -676,5 +839,11 @@ mod tests {
         assert_eq!(params.decision_attempt_seq, 1);
         assert_eq!(params.created_at_ns, 1_000);
         assert_eq!(params.expires_at_ns, 2_000);
+    }
+
+    #[test]
+    fn decode_json_or_string_falls_back_to_plain_text() {
+        let value = decode_json_or_string(b"not-json");
+        assert_eq!(value, Value::String("not-json".to_string()));
     }
 }
