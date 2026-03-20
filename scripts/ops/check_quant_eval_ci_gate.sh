@@ -8,7 +8,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 PORT=18081
 MANIFEST_PATH="contracts/fixtures/quant_eval_gate_scenarios.json"
 OUTPUT_ROOT="var/results/quant_eval_gate_ci_${STAMP}"
-WAIT_SECONDS=60
+WAIT_SECONDS=180
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,6 +73,9 @@ GATEWAY_PID=$!
 
 started=0
 for _ in $(seq 1 "$WAIT_SECONDS"); do
+  if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+    break
+  fi
   if curl -fsS "${BASE_URL}/metrics" >/dev/null 2>&1; then
     started=1
     break
