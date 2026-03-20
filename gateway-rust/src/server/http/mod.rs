@@ -26,6 +26,7 @@ mod audit;
 mod metrics;
 mod orders;
 mod sse;
+mod strategy;
 
 use axum::{
     Router,
@@ -59,7 +60,10 @@ use crate::engine::FastPathEngine;
 use crate::inflight::InflightControllerHandle;
 use crate::rate_limit::AccountRateLimiter;
 use crate::sse::SseHub;
+use crate::store::strategy_shadow_store::StrategyShadowStore;
+use crate::store::strategy_snapshot::StrategySnapshotStore;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
+use crate::strategy::{feedback::FeedbackEvent, shadow::ShadowPolicyView, sink::FeedbackExporter};
 use gateway_core::{LatencyHistogram, RdtscpClock, RdtscpStamp};
 use std::path::{Path, PathBuf};
 
@@ -71,14 +75,25 @@ use orders::{
     encode_v3_tcp_decode_error, handle_amend_order, handle_cancel_order, handle_get_order,
     handle_get_order_by_client_id, handle_get_order_v2, handle_get_order_v3, handle_order,
     handle_order_v2, handle_order_v3, handle_replace_order, process_order_v3_hot_path_tcp,
+    render_v3_symbol_key,
 };
 use sse::{handle_account_stream, handle_order_stream};
+use strategy::{
+    handle_get_shadow_record, handle_get_shadow_run_summary, handle_get_strategy_config,
+    handle_post_shadow_record,
+    handle_post_strategy_intent_adapt, handle_post_strategy_intent_shadow,
+    handle_post_strategy_intent_submit, handle_put_strategy_config,
+};
 
 /// /v3/orders の single-writer に流す最小タスク。
 #[derive(Debug)]
 pub(super) struct V3OrderTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
+    pub(super) intent_id: Option<Arc<str>>,
+    pub(super) model_id: Option<Arc<str>>,
+    pub(super) effective_risk_budget_ref: Option<Arc<str>>,
+    pub(super) actual_policy: Option<Arc<ShadowPolicyView>>,
     pub(super) position_symbol_key: [u8; 8],
     pub(super) position_delta_qty: i64,
     pub(super) session_seq: u64,
@@ -107,6 +122,10 @@ impl V3AccountSymbolKey {
 pub(super) struct V3DurableTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
+    pub(super) intent_id: Option<Arc<str>>,
+    pub(super) model_id: Option<Arc<str>>,
+    pub(super) effective_risk_budget_ref: Option<Arc<str>>,
+    pub(super) actual_policy: Option<Arc<ShadowPolicyView>>,
     pub(super) position_symbol_key: [u8; 8],
     pub(super) position_delta_qty: i64,
     pub(super) session_seq: u64,
@@ -120,6 +139,10 @@ impl From<V3OrderTask> for V3DurableTask {
         Self {
             session_id: task.session_id,
             account_id: task.account_id,
+            intent_id: task.intent_id,
+            model_id: task.model_id,
+            effective_risk_budget_ref: task.effective_risk_budget_ref,
+            actual_policy: task.actual_policy,
             position_symbol_key: task.position_symbol_key,
             position_delta_qty: task.position_delta_qty,
             session_seq: task.session_seq,
@@ -128,6 +151,23 @@ impl From<V3OrderTask> for V3DurableTask {
             shard_id: task.shard_id,
         }
     }
+}
+
+pub(super) fn publish_quant_feedback(state: &AppState, event: FeedbackEvent) {
+    let mut event = event;
+    let shadow_enabled = state.strategy_snapshot_store.snapshot().shadow_enabled;
+    let shadow_run_ids = event
+        .intent_id
+        .as_deref()
+        .map(|intent_id| state.strategy_shadow_store.run_ids_for_intent(intent_id))
+        .unwrap_or_default();
+    if !shadow_run_ids.is_empty() {
+        event = event.with_shadow_run_ids(shadow_run_ids.clone());
+    }
+    if shadow_enabled && !shadow_run_ids.is_empty() {
+        let _ = state.strategy_shadow_store.apply_feedback(&event);
+    }
+    let _ = state.quant_feedback_exporter.submit(event);
 }
 
 #[derive(Clone)]
@@ -1304,6 +1344,9 @@ pub(super) struct AppState {
     pub(super) backpressure: BackpressureConfig,
     pub(super) inflight_controller: InflightControllerHandle,
     pub(super) rate_limiter: Option<Arc<AccountRateLimiter>>,
+    pub(super) strategy_snapshot_store: Arc<StrategySnapshotStore>,
+    pub(super) strategy_shadow_store: Arc<StrategyShadowStore>,
+    pub(super) quant_feedback_exporter: Arc<FeedbackExporter>,
     pub(super) ack_hist: Arc<LatencyHistogram>,
     pub(super) wal_enqueue_hist: Arc<LatencyHistogram>,
     pub(super) durable_ack_hist: Arc<LatencyHistogram>,
@@ -3070,6 +3113,9 @@ pub async fn run(
         backpressure,
         inflight_controller,
         rate_limiter,
+        strategy_snapshot_store: Arc::new(StrategySnapshotStore::default()),
+        strategy_shadow_store: Arc::new(StrategyShadowStore::default()),
+        quant_feedback_exporter: Arc::new(FeedbackExporter::from_env()),
         ack_hist: Arc::new(LatencyHistogram::new()),
         wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
         durable_ack_hist: Arc::new(LatencyHistogram::new()),
@@ -3483,6 +3529,31 @@ pub async fn run(
         .route("/stream", get(handle_account_stream))
         .route("/audit/verify", get(handle_audit_verify))
         .route("/audit/anchor", get(handle_audit_anchor))
+        .route(
+            "/strategy/config",
+            get(handle_get_strategy_config).put(handle_put_strategy_config),
+        )
+        .route(
+            "/strategy/intent/adapt",
+            post(handle_post_strategy_intent_adapt),
+        )
+        .route(
+            "/strategy/intent/submit",
+            post(handle_post_strategy_intent_submit),
+        )
+        .route(
+            "/strategy/intent/shadow",
+            post(handle_post_strategy_intent_shadow),
+        )
+        .route("/strategy/shadow", post(handle_post_shadow_record))
+        .route(
+            "/strategy/shadow/{shadow_run_id}/summary",
+            get(handle_get_shadow_run_summary),
+        )
+        .route(
+            "/strategy/shadow/{shadow_run_id}/{intent_id}",
+            get(handle_get_shadow_record),
+        )
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics));
     let mut app = app_base;
@@ -4484,10 +4555,57 @@ async fn run_v3_durable_worker(
         let now_ns = gateway_core::now_nanos();
         let V3DurableTask {
             session_id,
+            account_id,
+            intent_id,
+            model_id,
+            effective_risk_budget_ref,
+            actual_policy,
+            position_symbol_key,
             session_seq,
             received_at_ns,
             ..
         } = task;
+        if state.quant_feedback_exporter.is_enabled() {
+            let symbol = render_v3_symbol_key(position_symbol_key);
+            let event = FeedbackEvent::accepted(
+                session_id.as_ref(),
+                session_seq,
+                account_id.as_ref(),
+                symbol,
+                received_at_ns,
+            )
+            .push_path_tag("v3")
+            .push_path_tag("durable")
+            .push_path_tag("feedback");
+            let event = if let Some(intent_id) = intent_id.as_deref() {
+                event.with_intent_id(intent_id)
+            } else {
+                event
+            };
+            let event = if let Some(model_id) = model_id.as_deref() {
+                event.with_model_id(model_id)
+            } else {
+                event
+            };
+            let event = if let Some(effective_risk_budget_ref) =
+                effective_risk_budget_ref.as_deref()
+            {
+                event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+            } else {
+                event
+            };
+            let event = if let Some(actual_policy) = actual_policy.as_deref() {
+                event.with_actual_policy(actual_policy.clone())
+            } else {
+                event
+            };
+            let event = if outcome.durable_done_ns > 0 {
+                event.durable_accepted(outcome.durable_done_ns)
+            } else {
+                event.durable_rejected(now_ns, outcome.reject_reason)
+            };
+            publish_quant_feedback(&state, event);
+        }
         if outcome.durable_done_ns > 0 {
             state.v3_confirm_store.mark_durable_accepted_in_lane(
                 lane_id,
@@ -5884,6 +6002,10 @@ mod tests {
         V3OrderTask {
             session_id: Arc::<str>::from(session_id),
             account_id: Arc::<str>::from(account_id),
+            intent_id: None,
+            model_id: None,
+            effective_risk_budget_ref: None,
+            actual_policy: None,
             position_symbol_key: FastPathEngine::symbol_to_bytes("AAPL"),
             position_delta_qty: 1,
             session_seq,
@@ -5908,6 +6030,10 @@ mod tests {
             let task = V3DurableTask {
                 session_id: Arc::<str>::from(format!("sess-{}", shard_id)),
                 account_id: Arc::<str>::from(format!("acc-{}", shard_id)),
+                intent_id: None,
+                model_id: None,
+                effective_risk_budget_ref: None,
+                actual_policy: None,
                 position_symbol_key: FastPathEngine::symbol_to_bytes("AAPL"),
                 position_delta_qty: 1,
                 session_seq: shard_id as u64,

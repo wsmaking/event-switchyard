@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "intentId": "quant-intent-buy-1",
+  "accountId": "acc-1",
+  "sessionId": "sess-1",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "type": "LIMIT",
+  "qty": 100,
+  "limitPrice": 102,
+  "timeInForce": "IOC",
+  "urgency": "HIGH",
+  "executionPolicy": "AGGRESSIVE",
+  "riskBudgetRef": {
+    "budgetId": "budget-1",
+    "version": 1
+  },
+  "modelId": "model-1",
+  "createdAtNs": 5,
+  "expiresAtNs": 100,
+  "sliceCount": 4,
+  "vwapWeights": [1, 2, 3, 4],
+  "participationBps": 2500
+}

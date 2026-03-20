@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "intentId": "batch-default-sell",
+  "accountId": "acc-batch-2",
+  "sessionId": "sess-batch-2",
+  "symbol": "AAPL",
+  "side": "SELL",
+  "type": "LIMIT",
+  "qty": 90,
+  "limitPrice": 99,
+  "timeInForce": "IOC",
+  "urgency": "HIGH",
+  "executionPolicy": "DEFAULT",
+  "riskBudgetRef": {
+    "budgetId": "budget-batch-2",
+    "version": 2
+  },
+  "modelId": "model-batch-2",
+  "createdAtNs": 20,
+  "expiresAtNs": 1200
+}

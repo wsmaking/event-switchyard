@@ -10,6 +10,8 @@ use crate::bus::BusEvent;
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{OrderRequest, OrderResponse};
 use crate::store::OrderSnapshot;
+use crate::strategy::feedback::FeedbackEvent;
+use crate::strategy::shadow::ShadowPolicyView;
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -24,7 +26,7 @@ use std::{
     time::Duration,
 };
 
-use super::{AppState, AuthErrorResponse, V3OrderTask};
+use super::{AppState, AuthErrorResponse, V3OrderTask, publish_quant_feedback};
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
 type OrderResponseResult =
@@ -48,6 +50,10 @@ pub(super) const V3_TCP_REASON_BAD_SYMBOL: u32 = 102;
 pub(super) const V3_TCP_REASON_BAD_SIDE: u32 = 103;
 pub(super) const V3_TCP_REASON_BAD_TYPE: u32 = 104;
 pub(super) const V3_TCP_REASON_BAD_TOKEN_UTF8: u32 = 105;
+pub(super) const V3_TCP_REASON_BAD_INTENT_LEN: u32 = 106;
+pub(super) const V3_TCP_REASON_BAD_MODEL_LEN: u32 = 107;
+pub(super) const V3_TCP_REASON_BAD_METADATA_UTF8: u32 = 108;
+pub(super) const V3_TCP_REASON_METADATA_WITH_INLINE_TOKEN: u32 = 109;
 pub(super) const V3_TCP_REASON_AUTH_INVALID: u32 = 201;
 pub(super) const V3_TCP_REASON_AUTH_EXPIRED: u32 = 202;
 pub(super) const V3_TCP_REASON_AUTH_NOT_YET_VALID: u32 = 203;
@@ -61,11 +67,16 @@ const V3_TCP_SYMBOL_OFFSET: usize = 258;
 const V3_TCP_SYMBOL_LEN: usize = 16;
 const V3_TCP_SIDE_OFFSET: usize = 274;
 const V3_TCP_TYPE_OFFSET: usize = 275;
+const V3_TCP_INTENT_LEN_OFFSET: usize = 276;
+const V3_TCP_MODEL_LEN_OFFSET: usize = 278;
 const V3_TCP_QTY_OFFSET: usize = 280;
 const V3_TCP_PRICE_OFFSET: usize = 288;
 
+#[derive(Debug)]
 pub(super) struct V3TcpDecodedRequest<'a> {
     pub(super) jwt_token: Option<&'a str>,
+    pub(super) intent_id: Option<&'a str>,
+    pub(super) model_id: Option<&'a str>,
     pub(super) symbol_key: [u8; 8],
     pub(super) side: u8,
     pub(super) order_type: crate::order::OrderType,
@@ -522,6 +533,29 @@ fn parse_v3_symbol_key(raw: &str) -> Option<[u8; 8]> {
     Some(key)
 }
 
+pub(super) fn render_v3_symbol_key(symbol_key: [u8; 8]) -> String {
+    let len = symbol_key
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(symbol_key.len());
+    std::str::from_utf8(&symbol_key[..len])
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn exceeds_strategy_notional_limit(qty: u64, price: u64, max_notional: u64) -> bool {
+    price > 0 && max_notional > 0 && qty.saturating_mul(price) > max_notional
+}
+
+fn feedback_metadata<'a>(
+    intent_id: Option<&'a str>,
+    model_id: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let intent_id = intent_id.map(str::trim).filter(|value| !value.is_empty());
+    let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
+    (intent_id, model_id)
+}
+
 fn validate_order_request(req: &OrderRequest) -> Option<&'static str> {
     if req.symbol.trim().is_empty() {
         return Some("INVALID_SYMBOL");
@@ -572,6 +606,57 @@ impl V3HotRiskInput {
             price: decoded.price,
         }
     }
+}
+
+fn evaluate_strategy_snapshot_policy(
+    state: &AppState,
+    account_id: &str,
+    input: &V3HotRiskInput,
+    now_ns: u64,
+) -> Result<(), (StatusCode, &'static str)> {
+    let snapshot = state.strategy_snapshot_store.snapshot();
+    if snapshot.is_stale_at(now_ns) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "V3_STRATEGY_SNAPSHOT_STALE",
+        ));
+    }
+
+    if snapshot.symbol_limits.is_empty() && snapshot.risk_budget_by_account.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(symbol_key) = input.symbol_key {
+        let symbol = render_v3_symbol_key(symbol_key);
+        if let Some(override_cfg) = snapshot.symbol_override(&symbol) {
+            if let Some(max_order_qty) = override_cfg.max_order_qty {
+                if input.qty > max_order_qty {
+                    return Err((
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "V3_STRATEGY_MAX_ORDER_QTY",
+                    ));
+                }
+            }
+            if let Some(max_notional) = override_cfg.max_notional {
+                if exceeds_strategy_notional_limit(input.qty, input.price, max_notional) {
+                    return Err((StatusCode::UNPROCESSABLE_ENTITY, "V3_STRATEGY_MAX_NOTIONAL"));
+                }
+            }
+        }
+    }
+
+    if let Some(account_budget) = snapshot.account_risk_budget(account_id) {
+        if let Some(max_notional) = account_budget.max_notional {
+            if exceeds_strategy_notional_limit(input.qty, input.price, max_notional) {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "V3_STRATEGY_ACCOUNT_MAX_NOTIONAL",
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn projected_position_qty(
@@ -707,11 +792,30 @@ pub(super) fn process_order_v3_hot_path(
     req: OrderRequest,
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
+    process_order_v3_hot_path_with_strategy_context(
+        state, account_id, session_id, req, None, None, t0,
+    )
+}
+
+pub(super) fn process_order_v3_hot_path_with_strategy_context(
+    state: &AppState,
+    account_id: &str,
+    session_id: &str,
+    req: OrderRequest,
+    actual_policy: Option<Arc<ShadowPolicyView>>,
+    effective_risk_budget_ref: Option<Arc<str>>,
+    t0: u64,
+) -> (StatusCode, VolatileOrderResponse) {
     let outcome = process_order_v3_hot_path_with_input(
         state,
         account_id,
         session_id,
         V3HotRiskInput::from_order_request(&req),
+        req.intent_id.as_deref(),
+        req.model_id.as_deref(),
+        actual_policy,
+        effective_risk_budget_ref,
+        "http_v3",
         t0,
     );
     (outcome.status, outcome.to_http(session_id))
@@ -729,6 +833,11 @@ pub(super) fn process_order_v3_hot_path_tcp(
         account_id,
         session_id,
         V3HotRiskInput::from_tcp(decoded),
+        decoded.intent_id,
+        decoded.model_id,
+        None,
+        None,
+        "tcp_v3",
         t0,
     )
     .to_tcp()
@@ -739,6 +848,11 @@ fn process_order_v3_hot_path_with_input(
     account_id: &str,
     session_id: &str,
     risk_input: V3HotRiskInput,
+    intent_id: Option<&str>,
+    model_id: Option<&str>,
+    actual_policy: Option<Arc<ShadowPolicyView>>,
+    effective_risk_budget_ref: Option<Arc<str>>,
+    path_tag: &'static str,
     t0: u64,
 ) -> V3HotPathOutcome {
     let t0_tsc = state.capture_v3_tsc_stamp();
@@ -763,38 +877,125 @@ fn process_order_v3_hot_path_with_input(
         let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
         state.v3_stage_parse_hist.record(parse_elapsed);
     }
+    let (intent_id, model_id) = feedback_metadata(intent_id, model_id);
+    let rejected_feedback_context = state.quant_feedback_exporter.is_enabled().then(|| {
+        (
+            session_id.to_string(),
+            account_id.to_string(),
+            risk_input
+                .symbol_key
+                .map(render_v3_symbol_key)
+                .unwrap_or_default(),
+            intent_id.map(str::to_string),
+            model_id.map(str::to_string),
+            effective_risk_budget_ref.as_deref().map(str::to_string),
+            actual_policy.as_deref().cloned(),
+        )
+    });
+    let emit_rejected_feedback = |session_seq: u64, reason: &'static str, received_at_ns: u64| {
+        if let Some((
+            session_id,
+            account_id,
+            symbol,
+            intent_id,
+            model_id,
+            effective_risk_budget_ref,
+            actual_policy,
+        )) = &rejected_feedback_context
+        {
+            let event = FeedbackEvent::rejected(
+                session_id.as_str(),
+                session_seq,
+                account_id.as_str(),
+                symbol.as_str(),
+                received_at_ns,
+                reason,
+            );
+            let event = if let Some(intent_id) = intent_id.as_deref() {
+                event.with_intent_id(intent_id)
+            } else {
+                event
+            };
+            let event = if let Some(model_id) = model_id.as_deref() {
+                event.with_model_id(model_id)
+            } else {
+                event
+            };
+            let event =
+                if let Some(effective_risk_budget_ref) = effective_risk_budget_ref.as_deref() {
+                    event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+                } else {
+                    event
+                };
+            let event = if let Some(actual_policy) = actual_policy.as_ref() {
+                event.with_actual_policy(actual_policy.clone())
+            } else {
+                event
+            }
+            .push_path_tag("v3")
+            .push_path_tag(path_tag)
+            .push_path_tag("feedback");
+            publish_quant_feedback(state, event);
+        }
+    };
 
     if ingress.is_global_killed() {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_GLOBAL_KILLED", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             V3_TCP_KIND_KILLED,
             "KILLED",
             "V3_GLOBAL_KILLED",
-            now_nanos(),
+            rejected_at_ns,
         );
     }
     if ingress.is_session_killed(session_id) {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_SESSION_KILLED", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             V3_TCP_KIND_KILLED,
             "KILLED",
             "V3_SESSION_KILLED",
-            now_nanos(),
+            rejected_at_ns,
         );
     }
     if ingress.is_shard_killed(shard_id) {
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_SHARD_KILLED", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             V3_TCP_KIND_KILLED,
             "KILLED",
             "V3_SHARD_KILLED",
-            now_nanos(),
+            rejected_at_ns,
+        );
+    }
+
+    let strategy_policy_now_ns = now_nanos();
+    if let Err((status, reason)) =
+        evaluate_strategy_snapshot_policy(state, account_id, &risk_input, strategy_policy_now_ns)
+    {
+        if reason == "V3_STRATEGY_SNAPSHOT_STALE" {
+            state.increment_v3_rejected_hard_total(shard_id);
+        } else {
+            state.reject_risk.fetch_add(1, Ordering::Relaxed);
+        }
+        record_v3_ack(&state, t0, hotpath_sampled);
+        emit_rejected_feedback(0, reason, strategy_policy_now_ns);
+        return V3HotPathOutcome::rejected(
+            status,
+            V3_TCP_KIND_REJECTED,
+            "REJECTED",
+            reason,
+            strategy_policy_now_ns,
         );
     }
 
@@ -825,12 +1026,14 @@ fn process_order_v3_hot_path_with_input(
                 }
             }
             record_v3_ack(&state, t0, hotpath_sampled);
+            let rejected_at_ns = now_nanos();
+            emit_rejected_feedback(0, reason, rejected_at_ns);
             return V3HotPathOutcome::rejected(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 V3_TCP_KIND_REJECTED,
                 "REJECTED",
                 reason,
-                now_nanos(),
+                rejected_at_ns,
             );
         }
     };
@@ -944,12 +1147,14 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
+                let rejected_at_ns = now_nanos();
+                emit_rejected_feedback(0, "V3_DURABLE_CONFIRM_AGE_HARD", rejected_at_ns);
                 return V3HotPathOutcome::rejected(
                     StatusCode::SERVICE_UNAVAILABLE,
                     V3_TCP_KIND_REJECTED,
                     "REJECTED",
                     "V3_DURABLE_CONFIRM_AGE_HARD",
-                    now_nanos(),
+                    rejected_at_ns,
                 );
             } else if !hard_guard_admission_enabled {
                 state
@@ -981,12 +1186,14 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
+                let rejected_at_ns = now_nanos();
+                emit_rejected_feedback(0, "V3_DURABLE_CONFIRM_AGE_SOFT", rejected_at_ns);
                 return V3HotPathOutcome::rejected(
                     StatusCode::TOO_MANY_REQUESTS,
                     V3_TCP_KIND_REJECTED,
                     "REJECTED",
                     "V3_DURABLE_CONFIRM_AGE_SOFT",
-                    now_nanos(),
+                    rejected_at_ns,
                 );
             } else if !soft_guard_admission_enabled {
                 state
@@ -1012,12 +1219,14 @@ fn process_order_v3_hot_path_with_input(
                 .v3_durable_backpressure_hard_total
                 .fetch_add(1, Ordering::Relaxed);
             record_v3_ack(&state, t0, hotpath_sampled);
+            let rejected_at_ns = now_nanos();
+            emit_rejected_feedback(0, "V3_DURABLE_BACKPRESSURE_FAILSAFE", rejected_at_ns);
             return V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
                 V3_TCP_KIND_REJECTED,
                 "REJECTED",
                 "V3_DURABLE_BACKPRESSURE_FAILSAFE",
-                now_nanos(),
+                rejected_at_ns,
             );
         }
         if state.v3_durable_admission_controller_enabled {
@@ -1035,12 +1244,14 @@ fn process_order_v3_hot_path_with_input(
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                     record_v3_ack(&state, t0, hotpath_sampled);
+                    let rejected_at_ns = now_nanos();
+                    emit_rejected_feedback(0, "V3_DURABLE_CONTROLLER_HARD", rejected_at_ns);
                     return V3HotPathOutcome::rejected(
                         StatusCode::SERVICE_UNAVAILABLE,
                         V3_TCP_KIND_REJECTED,
                         "REJECTED",
                         "V3_DURABLE_CONTROLLER_HARD",
-                        now_nanos(),
+                        rejected_at_ns,
                     );
                 }
                 1 => {
@@ -1055,12 +1266,14 @@ fn process_order_v3_hot_path_with_input(
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                     record_v3_ack(&state, t0, hotpath_sampled);
+                    let rejected_at_ns = now_nanos();
+                    emit_rejected_feedback(0, "V3_DURABLE_CONTROLLER_SOFT", rejected_at_ns);
                     return V3HotPathOutcome::rejected(
                         StatusCode::TOO_MANY_REQUESTS,
                         V3_TCP_KIND_REJECTED,
                         "REJECTED",
                         "V3_DURABLE_CONTROLLER_SOFT",
-                        now_nanos(),
+                        rejected_at_ns,
                     );
                 }
                 _ => {}
@@ -1082,12 +1295,14 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
+                let rejected_at_ns = now_nanos();
+                emit_rejected_feedback(0, "V3_DURABLE_BACKPRESSURE_HARD", rejected_at_ns);
                 return V3HotPathOutcome::rejected(
                     StatusCode::SERVICE_UNAVAILABLE,
                     V3_TCP_KIND_REJECTED,
                     "REJECTED",
                     "V3_DURABLE_BACKPRESSURE_HARD",
-                    now_nanos(),
+                    rejected_at_ns,
                 );
             }
             if durable_queue_pct >= state.v3_durable_soft_reject_pct as f64
@@ -1106,12 +1321,14 @@ fn process_order_v3_hot_path_with_input(
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
                 record_v3_ack(&state, t0, hotpath_sampled);
+                let rejected_at_ns = now_nanos();
+                emit_rejected_feedback(0, "V3_DURABLE_BACKPRESSURE_SOFT", rejected_at_ns);
                 return V3HotPathOutcome::rejected(
                     StatusCode::TOO_MANY_REQUESTS,
                     V3_TCP_KIND_REJECTED,
                     "REJECTED",
                     "V3_DURABLE_BACKPRESSURE_SOFT",
-                    now_nanos(),
+                    rejected_at_ns,
                 );
             }
         }
@@ -1125,35 +1342,41 @@ fn process_order_v3_hot_path_with_input(
         }
         state.increment_v3_rejected_killed_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_QUEUE_KILLED", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             V3_TCP_KIND_KILLED,
             "KILLED",
             "V3_QUEUE_KILLED",
-            now_nanos(),
+            rejected_at_ns,
         );
     }
     if queue_pct >= state.v3_hard_reject_pct {
         state.increment_v3_rejected_hard_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_BACKPRESSURE_HARD", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::SERVICE_UNAVAILABLE,
             V3_TCP_KIND_REJECTED,
             "REJECTED",
             "V3_BACKPRESSURE_HARD",
-            now_nanos(),
+            rejected_at_ns,
         );
     }
 
     if queue_pct >= state.v3_soft_reject_pct {
         state.increment_v3_rejected_soft_total(shard_id);
         record_v3_ack(&state, t0, hotpath_sampled);
+        let rejected_at_ns = now_nanos();
+        emit_rejected_feedback(0, "V3_BACKPRESSURE_SOFT", rejected_at_ns);
         return V3HotPathOutcome::rejected(
             StatusCode::TOO_MANY_REQUESTS,
             V3_TCP_KIND_REJECTED,
             "REJECTED",
             "V3_BACKPRESSURE_SOFT",
-            now_nanos(),
+            rejected_at_ns,
         );
     }
 
@@ -1162,6 +1385,10 @@ fn process_order_v3_hot_path_with_input(
     let task = V3OrderTask {
         session_id: Arc::clone(&session_id_ref),
         account_id: Arc::clone(&account_id_ref),
+        intent_id: intent_id.map(Arc::<str>::from),
+        model_id: model_id.map(Arc::<str>::from),
+        effective_risk_budget_ref: effective_risk_budget_ref.clone(),
+        actual_policy: actual_policy.clone(),
         position_symbol_key: position_projection.symbol_key,
         position_delta_qty: position_projection.delta_qty,
         session_seq,
@@ -1169,6 +1396,19 @@ fn process_order_v3_hot_path_with_input(
         received_at_ns,
         shard_id,
     };
+    let feedback_context = state.quant_feedback_exporter.is_enabled().then(|| {
+        (
+            Arc::clone(&task.session_id),
+            Arc::clone(&task.account_id),
+            task.intent_id.clone(),
+            task.model_id.clone(),
+            task.effective_risk_budget_ref.clone(),
+            task.actual_policy.clone(),
+            task.position_symbol_key,
+            task.session_seq,
+            task.received_at_ns,
+        )
+    });
 
     let enqueue_t0 = now_nanos();
     match ingress.try_enqueue(shard_id, task) {
@@ -1178,6 +1418,51 @@ fn process_order_v3_hot_path_with_input(
                 state.v3_stage_enqueue_hist.record(enqueue_elapsed);
             }
             state.increment_v3_accepted_total(shard_id);
+            if let Some((
+                session_id,
+                account_id,
+                intent_id,
+                model_id,
+                effective_risk_budget_ref,
+                actual_policy,
+                symbol_key,
+                session_seq,
+                received_at_ns,
+            )) = feedback_context
+            {
+                let event = FeedbackEvent::accepted(
+                    session_id.as_ref(),
+                    session_seq,
+                    account_id.as_ref(),
+                    render_v3_symbol_key(symbol_key),
+                    received_at_ns,
+                )
+                .push_path_tag("v3")
+                .push_path_tag(path_tag)
+                .push_path_tag("feedback");
+                let event = if let Some(intent_id) = intent_id.as_deref() {
+                    event.with_intent_id(intent_id)
+                } else {
+                    event
+                };
+                let event = if let Some(model_id) = model_id.as_deref() {
+                    event.with_model_id(model_id)
+                } else {
+                    event
+                };
+                let event =
+                    if let Some(effective_risk_budget_ref) = effective_risk_budget_ref.as_deref() {
+                        event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+                    } else {
+                        event
+                    };
+                let event = if let Some(actual_policy) = actual_policy.as_deref() {
+                    event.with_actual_policy(actual_policy.clone())
+                } else {
+                    event
+                };
+                publish_quant_feedback(state, event);
+            }
             let serialize_t0 = now_nanos();
             let body = V3HotPathOutcome::accepted(session_seq, received_at_ns);
             if hotpath_sampled {
@@ -1205,12 +1490,14 @@ fn process_order_v3_hot_path_with_input(
             );
             state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0, hotpath_sampled);
+            let rejected_at_ns = now_nanos();
+            emit_rejected_feedback(task.session_seq, "V3_QUEUE_FULL", rejected_at_ns);
             V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
                 V3_TCP_KIND_KILLED,
                 "KILLED",
                 "V3_QUEUE_FULL",
-                now_nanos(),
+                rejected_at_ns,
             )
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(task)) => {
@@ -1230,12 +1517,14 @@ fn process_order_v3_hot_path_with_input(
             );
             state.increment_v3_rejected_killed_total(shard_id);
             record_v3_ack(&state, t0, hotpath_sampled);
+            let rejected_at_ns = now_nanos();
+            emit_rejected_feedback(task.session_seq, "V3_INGRESS_CLOSED", rejected_at_ns);
             V3HotPathOutcome::rejected(
                 StatusCode::SERVICE_UNAVAILABLE,
                 V3_TCP_KIND_KILLED,
                 "KILLED",
                 "V3_INGRESS_CLOSED",
-                now_nanos(),
+                rejected_at_ns,
             )
         }
     }
@@ -1257,6 +1546,16 @@ pub(super) fn decode_v3_tcp_frame<'a>(
             .map_err(|_| V3_TCP_REASON_BAD_TOKEN_UTF8)?;
         Some(token)
     };
+    let intent_len = u16::from_le_bytes(
+        frame[V3_TCP_INTENT_LEN_OFFSET..(V3_TCP_INTENT_LEN_OFFSET + 2)]
+            .try_into()
+            .expect("intent length bytes"),
+    ) as usize;
+    let model_len = u16::from_le_bytes(
+        frame[V3_TCP_MODEL_LEN_OFFSET..(V3_TCP_MODEL_LEN_OFFSET + 2)]
+            .try_into()
+            .expect("model length bytes"),
+    ) as usize;
 
     let side_raw = frame[V3_TCP_SIDE_OFFSET];
     let order_type_raw = frame[V3_TCP_TYPE_OFFSET];
@@ -1278,6 +1577,40 @@ pub(super) fn decode_v3_tcp_frame<'a>(
         let jwt_token = jwt_token.ok_or(V3_TCP_REASON_AUTH_REQUIRED)?;
         return Ok(V3TcpDecodedFrame::AuthInit { jwt_token });
     }
+
+    let (intent_id, model_id) = if token_len > 0 {
+        if intent_len > 0 || model_len > 0 {
+            return Err(V3_TCP_REASON_METADATA_WITH_INLINE_TOKEN);
+        }
+        (None, None)
+    } else {
+        if intent_len > V3_TCP_TOKEN_MAX_LEN {
+            return Err(V3_TCP_REASON_BAD_INTENT_LEN);
+        }
+        let model_offset = V3_TCP_TOKEN_OFFSET + intent_len;
+        if model_len > V3_TCP_TOKEN_MAX_LEN.saturating_sub(intent_len) {
+            return Err(V3_TCP_REASON_BAD_MODEL_LEN);
+        }
+        let intent_id = if intent_len == 0 {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(
+                    &frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + intent_len)],
+                )
+                .map_err(|_| V3_TCP_REASON_BAD_METADATA_UTF8)?,
+            )
+        };
+        let model_id = if model_len == 0 {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(&frame[model_offset..(model_offset + model_len)])
+                    .map_err(|_| V3_TCP_REASON_BAD_METADATA_UTF8)?,
+            )
+        };
+        (intent_id, model_id)
+    };
 
     let symbol_raw = &frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + V3_TCP_SYMBOL_LEN)];
     let symbol_len = symbol_raw
@@ -1307,6 +1640,8 @@ pub(super) fn decode_v3_tcp_frame<'a>(
 
     Ok(V3TcpDecodedFrame::Order(V3TcpDecodedRequest {
         jwt_token,
+        intent_id,
+        model_id,
         symbol_key,
         side,
         order_type,
@@ -1443,6 +1778,10 @@ fn v3_tcp_reason_code_from_reason(reason: Option<&str>) -> u32 {
         Some("V3_GLOBAL_KILLED") => 2_301,
         Some("V3_SESSION_KILLED") => 2_302,
         Some("V3_SHARD_KILLED") => 2_303,
+        Some("V3_STRATEGY_SNAPSHOT_STALE") => 2_401,
+        Some("V3_STRATEGY_MAX_ORDER_QTY") => 2_402,
+        Some("V3_STRATEGY_MAX_NOTIONAL") => 2_403,
+        Some("V3_STRATEGY_ACCOUNT_MAX_NOTIONAL") => 2_404,
         Some(_) => 9_999,
     }
 }
@@ -2606,6 +2945,18 @@ mod tests {
     use crate::order::{OrderType, TimeInForce};
     use crate::sse::SseHub;
     use crate::store::{OrderIdMap, OrderStatus, OrderStore, ShardedOrderStore};
+    use crate::strategy::config::{
+        AccountRiskBudget, ExecutionConfigSnapshot, ExecutionPolicyConfig, KillSwitchPolicy,
+        SymbolExecutionOverride, UrgencyOverride, VenuePreference,
+    };
+    use crate::strategy::intent::{
+        ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
+    };
+    use crate::strategy::shadow::ShadowScoreComponent;
+    use crate::strategy::shadow::{
+        SHADOW_RECORD_SCHEMA_VERSION, ShadowComparisonStatus, ShadowOutcomeView, ShadowPolicyView,
+        ShadowRecord,
+    };
     use axum::http::HeaderValue;
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use gateway_core::LatencyHistogram;
@@ -2683,6 +3034,13 @@ mod tests {
             },
             inflight_controller: crate::inflight::InflightController::spawn_from_env(),
             rate_limiter: None,
+            strategy_snapshot_store: Arc::new(
+                crate::store::strategy_snapshot::StrategySnapshotStore::default(),
+            ),
+            strategy_shadow_store: Arc::new(
+                crate::store::strategy_shadow_store::StrategyShadowStore::default(),
+            ),
+            quant_feedback_exporter: Arc::new(crate::strategy::sink::FeedbackExporter::disabled()),
             ack_hist: Arc::new(LatencyHistogram::new()),
             wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
             durable_ack_hist: Arc::new(LatencyHistogram::new()),
@@ -3007,7 +3365,45 @@ mod tests {
             time_in_force: TimeInForce::Gtc,
             expire_at: None,
             client_order_id: Some(client_order_id.to_string()),
+            intent_id: None,
+            model_id: None,
         }
+    }
+
+    fn strategy_intent_fixture() -> StrategyIntent {
+        StrategyIntent {
+            schema_version: STRATEGY_INTENT_SCHEMA_VERSION,
+            intent_id: "intent-1".to_string(),
+            account_id: "acc-1".to_string(),
+            session_id: "sess-1".to_string(),
+            symbol: "AAPL".to_string(),
+            side: "buy".to_string(),
+            order_type: OrderType::Limit,
+            qty: 100,
+            limit_price: Some(15_000),
+            time_in_force: TimeInForce::Gtd,
+            urgency: IntentUrgency::Normal,
+            execution_policy: ExecutionPolicyKind::Aggressive,
+            risk_budget_ref: Some(crate::strategy::intent::RiskBudgetRef {
+                budget_id: "budget-42".to_string(),
+                version: 3,
+            }),
+            model_id: Some("model-1".to_string()),
+            created_at_ns: 10,
+            expires_at_ns: 123_000_000,
+        }
+    }
+
+    fn wait_for_feedback_lines(path: &PathBuf, min_lines: usize) -> String {
+        for _ in 0..100 {
+            if let Ok(raw) = fs::read_to_string(path) {
+                if raw.lines().count() >= min_lines {
+                    return raw;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("feedback lines not written in time");
     }
 
     fn v3_tcp_request(
@@ -3018,12 +3414,42 @@ mod tests {
         qty: u64,
         price: u64,
     ) -> [u8; V3_TCP_REQUEST_SIZE] {
+        v3_tcp_request_with_metadata(jwt_token, symbol, side, order_type, qty, price, None, None)
+    }
+
+    fn v3_tcp_request_with_metadata(
+        jwt_token: &str,
+        symbol: &str,
+        side: u8,
+        order_type: u8,
+        qty: u64,
+        price: u64,
+        intent_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> [u8; V3_TCP_REQUEST_SIZE] {
         let mut frame = [0u8; V3_TCP_REQUEST_SIZE];
         let token_bytes = jwt_token.as_bytes();
         let token_len = token_bytes.len().min(V3_TCP_TOKEN_MAX_LEN);
         frame[0..2].copy_from_slice(&(token_len as u16).to_le_bytes());
         frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + token_len)]
             .copy_from_slice(&token_bytes[..token_len]);
+        if token_len == 0 {
+            let intent_bytes = intent_id.unwrap_or_default().as_bytes();
+            let model_bytes = model_id.unwrap_or_default().as_bytes();
+            let intent_len = intent_bytes.len().min(V3_TCP_TOKEN_MAX_LEN);
+            let model_len = model_bytes
+                .len()
+                .min(V3_TCP_TOKEN_MAX_LEN.saturating_sub(intent_len));
+            frame[V3_TCP_INTENT_LEN_OFFSET..(V3_TCP_INTENT_LEN_OFFSET + 2)]
+                .copy_from_slice(&(intent_len as u16).to_le_bytes());
+            frame[V3_TCP_MODEL_LEN_OFFSET..(V3_TCP_MODEL_LEN_OFFSET + 2)]
+                .copy_from_slice(&(model_len as u16).to_le_bytes());
+            frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + intent_len)]
+                .copy_from_slice(&intent_bytes[..intent_len]);
+            let model_offset = V3_TCP_TOKEN_OFFSET + intent_len;
+            frame[model_offset..(model_offset + model_len)]
+                .copy_from_slice(&model_bytes[..model_len]);
+        }
         let symbol_bytes = symbol.as_bytes();
         let copy_len = symbol_bytes.len().min(V3_TCP_SYMBOL_LEN);
         frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + copy_len)]
@@ -3307,6 +3733,8 @@ mod tests {
                 time_in_force: TimeInForce::Gtc,
                 expire_at: None,
                 client_order_id: None,
+                intent_id: None,
+                model_id: None,
             };
             let account_ref = state.intern_v3_account_id("fixture-risk");
 
@@ -3489,6 +3917,8 @@ mod tests {
                 time_in_force: fixture_time_in_force(&case.input.time_in_force),
                 expire_at: None,
                 client_order_id: Some(format!("cid_tif_{}", case.id)),
+                intent_id: None,
+                model_id: None,
             };
             let (status, Json(resp)) = handle_order(
                 State(state.clone()),
@@ -3606,6 +4036,8 @@ mod tests {
                 time_in_force: TimeInForce::Gtc,
                 expire_at: None,
                 client_order_id: None,
+                intent_id: None,
+                model_id: None,
             };
 
             let (allowed, reason, http_status, projected_position_qty) =
@@ -4283,6 +4715,8 @@ mod tests {
         let frame = v3_tcp_request(&token, "AAPL", 1, 1, 100, 15_000);
         let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
         assert_eq!(decoded.jwt_token, Some(token.as_str()));
+        assert_eq!(decoded.intent_id, None);
+        assert_eq!(decoded.model_id, None);
         assert_eq!(
             decoded.symbol_key,
             parse_v3_symbol_key("AAPL").expect("symbol key")
@@ -4308,6 +4742,8 @@ mod tests {
         let frame = v3_tcp_request("", "AAPL", 1, 1, 100, 15_000);
         let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
         assert_eq!(decoded.jwt_token, None);
+        assert_eq!(decoded.intent_id, None);
+        assert_eq!(decoded.model_id, None);
         assert_eq!(
             decoded.symbol_key,
             parse_v3_symbol_key("AAPL").expect("symbol key")
@@ -4316,6 +4752,38 @@ mod tests {
         assert_eq!(decoded.order_type, OrderType::Limit);
         assert_eq!(decoded.qty, 100);
         assert_eq!(decoded.price, 15_000);
+    }
+
+    #[test]
+    fn v3_tcp_request_parser_accepts_tokenless_metadata_frame() {
+        let frame = v3_tcp_request_with_metadata(
+            "",
+            "AAPL",
+            1,
+            1,
+            100,
+            15_000,
+            Some("intent-tcp-1"),
+            Some("model-tcp-1"),
+        );
+        let decoded = decode_v3_tcp_request(&frame).expect("tcp parse");
+        assert_eq!(decoded.jwt_token, None);
+        assert_eq!(decoded.intent_id, Some("intent-tcp-1"));
+        assert_eq!(decoded.model_id, Some("model-tcp-1"));
+        assert_eq!(
+            decoded.symbol_key,
+            parse_v3_symbol_key("AAPL").expect("symbol key")
+        );
+    }
+
+    #[test]
+    fn v3_tcp_request_parser_rejects_inline_token_with_metadata() {
+        let mut frame = v3_tcp_request(&make_token("tcp-metadata-bad"), "AAPL", 1, 1, 100, 15_000);
+        frame[V3_TCP_INTENT_LEN_OFFSET..(V3_TCP_INTENT_LEN_OFFSET + 2)]
+            .copy_from_slice(&(5u16).to_le_bytes());
+
+        let reason = decode_v3_tcp_request(&frame).expect_err("must reject mixed token/metadata");
+        assert_eq!(reason, V3_TCP_REASON_METADATA_WITH_INLINE_TOKEN);
     }
 
     #[tokio::test]
@@ -4338,6 +4806,80 @@ mod tests {
             u64::from_le_bytes(bytes[8..16].try_into().expect("seq bytes")) > 0,
             "session seq must be set"
         );
+    }
+
+    #[tokio::test]
+    async fn v3_tcp_metadata_flows_into_feedback_export() {
+        let (mut state, ingress_rx, mut durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        let feedback_path =
+            std::env::temp_dir().join(format!("gateway-rust-tcp-feedback-{}.jsonl", now_nanos()));
+        state.quant_feedback_exporter = Arc::new(crate::strategy::sink::FeedbackExporter::new(
+            crate::strategy::sink::FeedbackExportConfig {
+                enabled: true,
+                path: feedback_path.clone(),
+                queue_capacity: 32,
+                drop_policy: crate::strategy::sink::FeedbackDropPolicy::DropNewest,
+            },
+        ));
+
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let durable_handle = tokio::spawn(super::super::run_v3_durable_worker(
+            0,
+            durable_rxs.remove(0),
+            state.clone(),
+            state.v3_durable_worker_batch_max,
+            state.v3_durable_worker_batch_wait_us,
+            super::super::V3DurableWorkerBatchAdaptiveConfig {
+                enabled: state.v3_durable_worker_batch_adaptive,
+                batch_min: state.v3_durable_worker_batch_min,
+                batch_max: state.v3_durable_worker_batch_max,
+                wait_min: Duration::from_micros(state.v3_durable_worker_batch_wait_min_us.max(1)),
+                wait_max: Duration::from_micros(state.v3_durable_worker_batch_wait_us.max(1)),
+                low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
+                high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
+            },
+            super::super::V3DurableWorkerPressureConfig::from_env(
+                state.v3_durable_worker_inflight_hard_cap_pct,
+            ),
+        ));
+
+        let frame = v3_tcp_request_with_metadata(
+            "",
+            "AAPL",
+            1,
+            1,
+            100,
+            15_000,
+            Some("intent-tcp-1"),
+            Some("model-tcp-1"),
+        );
+        let decoded = decode_v3_tcp_request(&frame).expect("decode tcp metadata frame");
+        let resp =
+            process_order_v3_hot_path_tcp(&state, "acc-tcp-1", "sess-tcp-1", &decoded, now_nanos());
+
+        assert_eq!(resp[0], V3_TCP_KIND_ACCEPT);
+        assert_eq!(u16::from_le_bytes([resp[2], resp[3]]), 202);
+
+        for _ in 0..100 {
+            if state.quant_feedback_exporter.metrics().written_total >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(state.quant_feedback_exporter.metrics().written_total >= 2);
+
+        let raw = wait_for_feedback_lines(&feedback_path, 2);
+        assert!(raw.contains("\"intentId\":\"intent-tcp-1\""));
+        assert!(raw.contains("\"modelId\":\"model-tcp-1\""));
+        assert!(raw.contains("\"pathTags\":[\"v3\",\"tcp_v3\",\"feedback\"]"));
+
+        writer_handle.abort();
+        durable_handle.abort();
     }
 
     #[tokio::test]
@@ -4985,6 +5527,866 @@ mod tests {
         assert!(state.v3_durable_ingress.queue_closed_total() > 0);
 
         writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn strategy_config_endpoint_updates_and_rejects_stale_versions() {
+        let state = build_test_state();
+
+        let Json(initial) =
+            super::super::strategy::handle_get_strategy_config(State(state.clone())).await;
+        assert_eq!(initial.snapshot_id, "default");
+        assert_eq!(initial.version, 0);
+
+        let snapshot = ExecutionConfigSnapshot {
+            snapshot_id: "snapshot-1".to_string(),
+            version: 3,
+            applied_at_ns: 123,
+            shadow_enabled: true,
+            ..ExecutionConfigSnapshot::default()
+        };
+        let Json(updated) = super::super::strategy::handle_put_strategy_config(
+            State(state.clone()),
+            Json(snapshot.clone()),
+        )
+        .await
+        .expect("update snapshot");
+        assert_eq!(updated.snapshot_id, "snapshot-1");
+        assert_eq!(updated.previous_version, 0);
+
+        let Json(current) =
+            super::super::strategy::handle_get_strategy_config(State(state.clone())).await;
+        assert_eq!(current.snapshot_id, "snapshot-1");
+        assert_eq!(current.version, 3);
+        assert!(current.shadow_enabled);
+
+        let stale = ExecutionConfigSnapshot {
+            snapshot_id: "snapshot-0".to_string(),
+            version: 2,
+            applied_at_ns: 222,
+            ..ExecutionConfigSnapshot::default()
+        };
+        let err =
+            super::super::strategy::handle_put_strategy_config(State(state.clone()), Json(stale))
+                .await
+                .expect_err("stale snapshot must fail");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1.0.reason, "SNAPSHOT_VERSION_STALE");
+        assert_eq!(err.1.0.current_version, 3);
+    }
+
+    #[tokio::test]
+    async fn strategy_shadow_endpoint_round_trips_record() {
+        let state = build_test_state();
+        let record = ShadowRecord {
+            schema_version: SHADOW_RECORD_SCHEMA_VERSION,
+            shadow_run_id: "shadow-1".to_string(),
+            model_id: "model-1".to_string(),
+            intent_id: "intent-1".to_string(),
+            session_id: "sess-1".to_string(),
+            session_seq: 7,
+            predicted_policy: None,
+            actual_policy: None,
+            predicted_outcome: None,
+            actual_outcome: None,
+            score_components: Vec::new(),
+            evaluated_at_ns: 100,
+            comparison_status: ShadowComparisonStatus::Pending,
+        };
+
+        let Json(upserted) = super::super::strategy::handle_post_shadow_record(
+            State(state.clone()),
+            Json(record.clone()),
+        )
+        .await
+        .expect("upsert shadow");
+        assert_eq!(upserted.shadow_run_id, "shadow-1");
+        assert_eq!(upserted.intent_id, "intent-1");
+        assert!(!upserted.replaced);
+
+        let Json(fetched) = super::super::strategy::handle_get_shadow_record(
+            State(state.clone()),
+            Path(("shadow-1".to_string(), "intent-1".to_string())),
+        )
+        .await
+        .expect("fetch shadow");
+        assert_eq!(fetched.model_id, "model-1");
+        assert_eq!(fetched.session_seq, 7);
+    }
+
+    #[tokio::test]
+    async fn strategy_shadow_summary_endpoint_reports_run_rollup() {
+        let state = build_test_state();
+        state
+            .strategy_shadow_store
+            .upsert(ShadowRecord {
+                schema_version: SHADOW_RECORD_SCHEMA_VERSION,
+                shadow_run_id: "shadow-2".to_string(),
+                model_id: "model-1".to_string(),
+                intent_id: "intent-1".to_string(),
+                session_id: "sess-1".to_string(),
+                session_seq: 1,
+                predicted_policy: None,
+                actual_policy: None,
+                predicted_outcome: None,
+                actual_outcome: None,
+                score_components: vec![ShadowScoreComponent {
+                    name: "score-a".to_string(),
+                    score_bps: 50,
+                    detail: None,
+                }],
+                evaluated_at_ns: 100,
+                comparison_status: ShadowComparisonStatus::Matched,
+            })
+            .expect("upsert matched shadow");
+        state
+            .strategy_shadow_store
+            .upsert(ShadowRecord {
+                schema_version: SHADOW_RECORD_SCHEMA_VERSION,
+                shadow_run_id: "shadow-2".to_string(),
+                model_id: "model-2".to_string(),
+                intent_id: "intent-2".to_string(),
+                session_id: "sess-2".to_string(),
+                session_seq: 2,
+                predicted_policy: None,
+                actual_policy: None,
+                predicted_outcome: None,
+                actual_outcome: None,
+                score_components: vec![ShadowScoreComponent {
+                    name: "score-b".to_string(),
+                    score_bps: -10,
+                    detail: None,
+                }],
+                evaluated_at_ns: 200,
+                comparison_status: ShadowComparisonStatus::Pending,
+            })
+            .expect("upsert pending shadow");
+
+        let Json(summary) = super::super::strategy::handle_get_shadow_run_summary(
+            State(state.clone()),
+            Path("shadow-2".to_string()),
+        )
+        .await
+        .expect("fetch shadow summary");
+
+        assert_eq!(summary.shadow_run_id, "shadow-2");
+        assert_eq!(summary.record_count, 2);
+        assert_eq!(summary.pending_count, 1);
+        assert_eq!(summary.matched_count, 1);
+        assert_eq!(summary.negative_score_count, 1);
+        assert_eq!(summary.positive_score_count, 1);
+        assert_eq!(summary.total_score_bps, 40);
+        assert_eq!(summary.average_score_bps, 20.0);
+        assert_eq!(summary.min_score_bps, -10);
+        assert_eq!(summary.max_score_bps, 50);
+        assert_eq!(summary.last_evaluated_at_ns, 200);
+        assert_eq!(summary.top_positive.len(), 1);
+        assert_eq!(summary.top_positive[0].intent_id, "intent-1");
+        assert_eq!(summary.top_negative.len(), 1);
+        assert_eq!(summary.top_negative[0].intent_id, "intent-2");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_adapter_returns_adapted_order_and_effective_policy() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-adapt".to_string(),
+                version: 7,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: false,
+                    max_slippage_bps: Some(9),
+                    participation_rate_bps: Some(1200),
+                },
+                symbol_limits: vec![SymbolExecutionOverride {
+                    symbol: "AAPL".to_string(),
+                    execution_policy: Some(ExecutionPolicyConfig {
+                        policy: ExecutionPolicyKind::Passive,
+                        prefer_passive: false,
+                        post_only: true,
+                        max_slippage_bps: Some(4),
+                        participation_rate_bps: Some(800),
+                    }),
+                    urgency_override: Some(IntentUrgency::High),
+                    max_order_qty: Some(200),
+                    max_notional: Some(2_000_000),
+                }],
+                risk_budget_by_account: vec![AccountRiskBudget {
+                    account_id: "acc-1".to_string(),
+                    budget_ref: Some("budget-1".to_string()),
+                    max_notional: Some(3_000_000),
+                    max_abs_position_qty: None,
+                    order_rate_limit_per_sec: None,
+                }],
+                urgency_overrides: vec![UrgencyOverride {
+                    account_id: "acc-1".to_string(),
+                    urgency: IntentUrgency::Critical,
+                }],
+                venue_preference: vec![VenuePreference {
+                    symbol: "AAPL".to_string(),
+                    venue: "NASDAQ".to_string(),
+                    rank: 1,
+                }],
+                shadow_enabled: true,
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let Json(resp) = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(strategy_intent_fixture()),
+        )
+        .await
+        .expect("adapt intent");
+
+        assert_eq!(resp.snapshot_id, "snapshot-adapt");
+        assert_eq!(resp.version, 7);
+        assert_eq!(resp.order_request.symbol, "AAPL");
+        assert_eq!(resp.order_request.side, "BUY");
+        assert_eq!(resp.order_request.intent_id.as_deref(), Some("intent-1"));
+        assert_eq!(resp.order_request.model_id.as_deref(), Some("model-1"));
+        assert_eq!(resp.order_request.expire_at, Some(123));
+        assert!(resp.policy_adjustments.is_empty());
+        assert_eq!(resp.effective_risk_budget_ref.as_deref(), Some("budget-42"));
+        assert!(resp.shadow_enabled);
+        let policy = resp
+            .effective_policy
+            .execution_policy
+            .expect("effective policy");
+        assert_eq!(policy.policy, ExecutionPolicyKind::Aggressive);
+        assert!(!policy.prefer_passive);
+        assert!(policy.post_only);
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("CRITICAL"));
+        assert_eq!(resp.effective_policy.venue.as_deref(), Some("NASDAQ"));
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_adapter_rejects_stale_snapshot() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-stale".to_string(),
+                version: 5,
+                applied_at_ns: 1,
+                kill_switch_policy: KillSwitchPolicy {
+                    reject_when_snapshot_stale: true,
+                    reject_when_shadow_stale: false,
+                    snapshot_stale_after_ns: 1,
+                },
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let err = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(strategy_intent_fixture()),
+        )
+        .await
+        .expect_err("stale snapshot must fail");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.reason, "STRATEGY_SNAPSHOT_STALE");
+        assert_eq!(err.1.0.current_snapshot_id, "snapshot-stale");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_adapter_normalizes_passive_ioc_to_gtc() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-passive".to_string(),
+                version: 6,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: false,
+                    max_slippage_bps: Some(6),
+                    participation_rate_bps: Some(900),
+                },
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = ExecutionPolicyKind::Passive;
+        intent.time_in_force = TimeInForce::Ioc;
+
+        let Json(resp) = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(intent),
+        )
+        .await
+        .expect("adapt passive intent");
+
+        assert_eq!(resp.order_request.time_in_force, TimeInForce::Gtc);
+        assert_eq!(resp.order_request.expire_at, None);
+        assert_eq!(resp.policy_adjustments, vec!["PASSIVE_NORMALIZED_TO_GTC"]);
+        assert_eq!(
+            resp.effective_policy
+                .execution_policy
+                .as_ref()
+                .map(|policy| policy.policy),
+            Some(ExecutionPolicyKind::Passive)
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_rejects_unimplemented_algo_policy() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-algo".to_string(),
+                version: 10,
+                applied_at_ns: now_nanos(),
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = ExecutionPolicyKind::Twap;
+
+        let err = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("algo policy must reject");
+
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.1.0.reason, "STRATEGY_POLICY_NOT_IMPLEMENTED");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_shadow_seed_creates_shadow_record_from_intent() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-shadow".to_string(),
+                version: 4,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: true,
+                    max_slippage_bps: Some(6),
+                    participation_rate_bps: Some(1500),
+                },
+                venue_preference: vec![VenuePreference {
+                    symbol: "AAPL".to_string(),
+                    venue: "NASDAQ".to_string(),
+                    rank: 1,
+                }],
+                shadow_enabled: true,
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let Json(resp) = super::super::strategy::handle_post_strategy_intent_shadow(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentShadowSeedRequest {
+                shadow_run_id: "shadow-seed-1".to_string(),
+                intent: strategy_intent_fixture(),
+                predicted_policy: Some(ShadowPolicyView {
+                    execution_policy: Some(ExecutionPolicyConfig {
+                        policy: ExecutionPolicyKind::Passive,
+                        prefer_passive: true,
+                        post_only: false,
+                        max_slippage_bps: Some(9),
+                        participation_rate_bps: Some(1000),
+                    }),
+                    urgency: Some("HIGH".to_string()),
+                    venue: Some("BATS".to_string()),
+                }),
+                predicted_outcome: Some(ShadowOutcomeView {
+                    final_status: Some("VOLATILE_ACCEPT".to_string()),
+                    reject_reason: None,
+                    accepted_at_ns: Some(100),
+                    durable_at_ns: None,
+                }),
+            }),
+        )
+        .await
+        .expect("seed shadow from intent");
+
+        assert_eq!(resp.shadow_run_id, "shadow-seed-1");
+        assert_eq!(resp.intent_id, "intent-1");
+        assert!(!resp.replaced);
+
+        let record = state
+            .strategy_shadow_store
+            .get("shadow-seed-1", "intent-1")
+            .expect("shadow record");
+        assert_eq!(record.model_id, "model-1");
+        assert_eq!(record.session_id, "sess-1");
+        assert_eq!(record.session_seq, 0);
+        assert_eq!(
+            record
+                .predicted_policy
+                .as_ref()
+                .and_then(|policy| policy.venue.as_deref()),
+            Some("BATS")
+        );
+        assert_eq!(
+            record
+                .actual_policy
+                .as_ref()
+                .and_then(|policy| policy.venue.as_deref()),
+            Some("NASDAQ")
+        );
+        assert_eq!(
+            record
+                .predicted_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.final_status.as_deref()),
+            Some("VOLATILE_ACCEPT")
+        );
+        assert_eq!(record.total_score_bps(), -20);
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_returns_volatile_accept_and_seeds_shadow() {
+        let (state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-submit".to_string(),
+                version: 8,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: true,
+                    max_slippage_bps: Some(4),
+                    participation_rate_bps: Some(900),
+                },
+                venue_preference: vec![VenuePreference {
+                    symbol: "AAPL".to_string(),
+                    venue: "NASDAQ".to_string(),
+                    rank: 1,
+                }],
+                shadow_enabled: true,
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent: strategy_intent_fixture(),
+                shadow_run_id: Some("shadow-submit-1".to_string()),
+                predicted_policy: Some(ShadowPolicyView {
+                    execution_policy: Some(ExecutionPolicyConfig {
+                        policy: ExecutionPolicyKind::Passive,
+                        prefer_passive: false,
+                        post_only: false,
+                        max_slippage_bps: Some(7),
+                        participation_rate_bps: None,
+                    }),
+                    urgency: Some("LOW".to_string()),
+                    venue: Some("BATS".to_string()),
+                }),
+                predicted_outcome: Some(ShadowOutcomeView {
+                    final_status: Some("VOLATILE_ACCEPT".to_string()),
+                    reject_reason: None,
+                    accepted_at_ns: Some(100),
+                    durable_at_ns: None,
+                }),
+            }),
+        )
+        .await
+        .expect("submit intent");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.snapshot_id, "snapshot-submit");
+        assert_eq!(resp.version, 8);
+        assert!(resp.shadow_enabled);
+        assert!(resp.shadow_seeded);
+        assert!(resp.policy_adjustments.is_empty());
+        assert_eq!(resp.shadow_run_id.as_deref(), Some("shadow-submit-1"));
+        assert_eq!(resp.order_request.intent_id.as_deref(), Some("intent-1"));
+        assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");
+        assert!(resp.volatile_order.session_seq.is_some());
+        assert_eq!(state.v3_accepted_total_current(), 1);
+
+        let record = state
+            .strategy_shadow_store
+            .get("shadow-submit-1", "intent-1")
+            .expect("shadow record");
+        assert_eq!(
+            record
+                .actual_policy
+                .as_ref()
+                .and_then(|policy| policy.venue.as_deref()),
+            Some("NASDAQ")
+        );
+        assert_eq!(
+            record
+                .predicted_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.final_status.as_deref()),
+            Some("VOLATILE_ACCEPT")
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_exports_actual_policy_into_feedback_and_metrics() {
+        let (mut state, ingress_rx, mut durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        let feedback_path =
+            std::env::temp_dir().join(format!("gateway-rust-quant-submit-{}.jsonl", now_nanos()));
+        state.quant_feedback_exporter = Arc::new(crate::strategy::sink::FeedbackExporter::new(
+            crate::strategy::sink::FeedbackExportConfig {
+                enabled: true,
+                path: feedback_path.clone(),
+                queue_capacity: 32,
+                drop_policy: crate::strategy::sink::FeedbackDropPolicy::DropNewest,
+            },
+        ));
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-submit-feedback".to_string(),
+                version: 9,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: true,
+                    max_slippage_bps: Some(4),
+                    participation_rate_bps: Some(900),
+                },
+                venue_preference: vec![VenuePreference {
+                    symbol: "AAPL".to_string(),
+                    venue: "NASDAQ".to_string(),
+                    rank: 1,
+                }],
+                shadow_enabled: true,
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let durable_handle = tokio::spawn(super::super::run_v3_durable_worker(
+            0,
+            durable_rxs.remove(0),
+            state.clone(),
+            state.v3_durable_worker_batch_max,
+            state.v3_durable_worker_batch_wait_us,
+            super::super::V3DurableWorkerBatchAdaptiveConfig {
+                enabled: state.v3_durable_worker_batch_adaptive,
+                batch_min: state.v3_durable_worker_batch_min,
+                batch_max: state.v3_durable_worker_batch_max,
+                wait_min: Duration::from_micros(state.v3_durable_worker_batch_wait_min_us.max(1)),
+                wait_max: Duration::from_micros(state.v3_durable_worker_batch_wait_us.max(1)),
+                low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
+                high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
+            },
+            super::super::V3DurableWorkerPressureConfig::from_env(
+                state.v3_durable_worker_inflight_hard_cap_pct,
+            ),
+        ));
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent: strategy_intent_fixture(),
+                shadow_run_id: Some("shadow-submit-feedback".to_string()),
+                predicted_policy: Some(ShadowPolicyView {
+                    execution_policy: Some(ExecutionPolicyConfig {
+                        policy: ExecutionPolicyKind::Aggressive,
+                        prefer_passive: false,
+                        post_only: false,
+                        max_slippage_bps: Some(10),
+                        participation_rate_bps: None,
+                    }),
+                    urgency: Some("LOW".to_string()),
+                    venue: Some("BATS".to_string()),
+                }),
+                predicted_outcome: Some(ShadowOutcomeView {
+                    final_status: Some("VOLATILE_ACCEPT".to_string()),
+                    reject_reason: None,
+                    accepted_at_ns: Some(100),
+                    durable_at_ns: None,
+                }),
+            }),
+        )
+        .await
+        .expect("submit intent");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let _session_seq = resp.volatile_order.session_seq.expect("session seq");
+
+        let mut durable_seen = false;
+        for _ in 0..100 {
+            let shadow = state
+                .strategy_shadow_store
+                .get("shadow-submit-feedback", "intent-1");
+            let shadow_durable = shadow
+                .as_ref()
+                .and_then(|record| record.actual_outcome.as_ref())
+                .and_then(|outcome| outcome.final_status.as_deref())
+                == Some("DURABLE_ACCEPTED");
+            if state.v3_durable_accepted_total_current() >= 1 && shadow_durable {
+                durable_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            durable_seen,
+            "expected durable accept reflected in counters and shadow"
+        );
+
+        for _ in 0..100 {
+            if state.quant_feedback_exporter.metrics().written_total >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(state.quant_feedback_exporter.metrics().written_total >= 2);
+
+        let raw = wait_for_feedback_lines(&feedback_path, 2);
+        assert!(raw.contains("\"intentId\":\"intent-1\""));
+        assert!(raw.contains("\"shadowRunIds\":[\"shadow-submit-feedback\"]"));
+        assert!(raw.contains("\"actualPolicy\""));
+        assert!(raw.contains("\"effectiveRiskBudgetRef\":\"budget-42\""));
+        assert!(raw.contains("\"venue\":\"NASDAQ\""));
+        assert!(raw.contains("\"finalStatus\":\"DURABLE_ACCEPTED\""));
+
+        let shadow = state
+            .strategy_shadow_store
+            .get("shadow-submit-feedback", "intent-1")
+            .expect("shadow record");
+        assert_eq!(
+            shadow
+                .actual_policy
+                .as_ref()
+                .and_then(|policy| policy.venue.as_deref()),
+            Some("NASDAQ")
+        );
+        assert_eq!(shadow.comparison_status, ShadowComparisonStatus::Matched);
+
+        let metrics = super::super::metrics::handle_metrics(State(state.clone())).await;
+        assert!(metrics.contains("gateway_strategy_shadow_negative_score_count "));
+        assert!(metrics.contains("gateway_strategy_shadow_last_evaluated_at_ns "));
+
+        writer_handle.abort();
+        durable_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn v3_hot_path_rejects_stale_strategy_snapshot() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "stale".to_string(),
+                version: 1,
+                applied_at_ns: 1,
+                kill_switch_policy: KillSwitchPolicy {
+                    reject_when_snapshot_stale: true,
+                    reject_when_shadow_stale: false,
+                    snapshot_stale_after_ns: 1,
+                },
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store stale snapshot");
+
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers("acc-stale", Some("idem_v3_strategy_stale")),
+            Json(request_with_client_id("cid_v3_strategy_stale")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 response"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("V3_STRATEGY_SNAPSHOT_STALE"));
+    }
+
+    #[tokio::test]
+    async fn v3_hot_path_rejects_strategy_symbol_limit() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "limits".to_string(),
+                version: 1,
+                applied_at_ns: now_nanos(),
+                symbol_limits: vec![SymbolExecutionOverride {
+                    symbol: "AAPL".to_string(),
+                    execution_policy: None,
+                    urgency_override: None,
+                    max_order_qty: Some(10),
+                    max_notional: None,
+                }],
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let (status, Json(resp)) = handle_order_v3(
+            State(state.clone()),
+            headers("acc-limit", Some("idem_v3_strategy_symbol_limit")),
+            Json(request_with_client_id("cid_v3_strategy_symbol_limit")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 response"));
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, "REJECTED");
+        assert_eq!(resp.reason.as_deref(), Some("V3_STRATEGY_MAX_ORDER_QTY"));
+    }
+
+    #[tokio::test]
+    async fn v3_integration_feedback_export_and_shadow_match_durable_accept() {
+        let (mut state, ingress_rx, mut durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        let feedback_path =
+            std::env::temp_dir().join(format!("gateway-rust-quant-feedback-{}.jsonl", now_nanos()));
+        state.quant_feedback_exporter = Arc::new(crate::strategy::sink::FeedbackExporter::new(
+            crate::strategy::sink::FeedbackExportConfig {
+                enabled: true,
+                path: feedback_path.clone(),
+                queue_capacity: 32,
+                drop_policy: crate::strategy::sink::FeedbackDropPolicy::DropNewest,
+            },
+        ));
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "shadow-enabled".to_string(),
+                version: 1,
+                applied_at_ns: now_nanos(),
+                shadow_enabled: true,
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("enable shadow snapshot");
+        state
+            .strategy_shadow_store
+            .upsert(ShadowRecord {
+                schema_version: SHADOW_RECORD_SCHEMA_VERSION,
+                shadow_run_id: "shadow-run-1".to_string(),
+                model_id: "model-q".to_string(),
+                intent_id: "intent-q".to_string(),
+                session_id: "v3-int-acc-q".to_string(),
+                session_seq: 1,
+                predicted_policy: None,
+                actual_policy: None,
+                predicted_outcome: None,
+                actual_outcome: None,
+                score_components: Vec::new(),
+                evaluated_at_ns: 0,
+                comparison_status: ShadowComparisonStatus::Pending,
+            })
+            .expect("seed shadow");
+
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let durable_handle = tokio::spawn(super::super::run_v3_durable_worker(
+            0,
+            durable_rxs.remove(0),
+            state.clone(),
+            state.v3_durable_worker_batch_max,
+            state.v3_durable_worker_batch_wait_us,
+            super::super::V3DurableWorkerBatchAdaptiveConfig {
+                enabled: state.v3_durable_worker_batch_adaptive,
+                batch_min: state.v3_durable_worker_batch_min,
+                batch_max: state.v3_durable_worker_batch_max,
+                wait_min: Duration::from_micros(state.v3_durable_worker_batch_wait_min_us.max(1)),
+                wait_max: Duration::from_micros(state.v3_durable_worker_batch_wait_us.max(1)),
+                low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
+                high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
+            },
+            super::super::V3DurableWorkerPressureConfig::from_env(
+                state.v3_durable_worker_inflight_hard_cap_pct,
+            ),
+        ));
+
+        let account_id = "v3-int-acc-q";
+        let mut req = request_with_client_id("cid_v3_quant_feedback");
+        req.intent_id = Some("intent-q".to_string());
+        req.model_id = Some("model-q".to_string());
+        let (status, Json(accepted)) = handle_order_v3(
+            State(state.clone()),
+            headers(account_id, Some("idem_v3_quant_feedback")),
+            Json(req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let session_seq = accepted.session_seq.expect("session seq");
+
+        let mut durable_seen = false;
+        for _ in 0..100 {
+            let Json(status_resp) = handle_get_order_v3(
+                State(state.clone()),
+                headers(account_id, None),
+                Path((account_id.to_string(), session_seq)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("v3 durable lookup failed"));
+            if status_resp.status == "DURABLE_ACCEPTED" {
+                durable_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(durable_seen, "expected eventual DURABLE_ACCEPTED");
+
+        for _ in 0..100 {
+            if state.quant_feedback_exporter.metrics().written_total >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(state.quant_feedback_exporter.metrics().written_total >= 2);
+
+        let raw = wait_for_feedback_lines(&feedback_path, 2);
+        assert!(raw.contains("\"intentId\":\"intent-q\""));
+        assert!(raw.contains("\"modelId\":\"model-q\""));
+        assert!(raw.contains("\"shadowRunIds\":[\"shadow-run-1\"]"));
+        assert!(raw.contains("\"finalStatus\":\"VOLATILE_ACCEPT\""));
+        assert!(raw.contains("\"finalStatus\":\"DURABLE_ACCEPTED\""));
+
+        let shadow = state
+            .strategy_shadow_store
+            .get("shadow-run-1", "intent-q")
+            .expect("shadow record");
+        assert_eq!(
+            shadow
+                .actual_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.final_status.as_deref()),
+            Some("DURABLE_ACCEPTED")
+        );
+        assert_eq!(shadow.comparison_status, ShadowComparisonStatus::Matched);
+
+        writer_handle.abort();
+        durable_handle.abort();
     }
 
     #[tokio::test]

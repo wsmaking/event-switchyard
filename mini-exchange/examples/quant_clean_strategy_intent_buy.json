@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "intentId": "quant-clean-buy-1",
+  "accountId": "acc-bridge-1",
+  "sessionId": "sess-bridge-1",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "type": "LIMIT",
+  "qty": 100,
+  "limitPrice": 101,
+  "timeInForce": "IOC",
+  "urgency": "HIGH",
+  "executionPolicy": "AGGRESSIVE",
+  "riskBudgetRef": {
+    "budgetId": "budget-bridge-1",
+    "version": 3
+  },
+  "modelId": "model-bridge-1",
+  "createdAtNs": 100,
+  "expiresAtNs": 1000
+}

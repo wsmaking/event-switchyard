@@ -118,8 +118,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_durable_backlog_growth_per_sec
         .load(Ordering::Relaxed);
     let v3_durable_write_error_total = state.v3_durable_write_error_total.load(Ordering::Relaxed);
-    let v3_durable_replica_enabled = if state.v3_durable_replica_enabled { 1 } else { 0 };
-    let v3_durable_replica_required = if state.v3_durable_replica_required { 1 } else { 0 };
+    let v3_durable_replica_enabled = if state.v3_durable_replica_enabled {
+        1
+    } else {
+        0
+    };
+    let v3_durable_replica_required = if state.v3_durable_replica_required {
+        1
+    } else {
+        0
+    };
     let v3_durable_replica_receipt_timeout_us = state.v3_durable_replica_receipt_timeout_us;
     let v3_durable_replica_append_total = state
         .v3_durable_replica_append_total
@@ -404,7 +412,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .v3_confirm_rebuild_restored_total
         .load(Ordering::Relaxed);
     let v3_confirm_rebuild_elapsed_ms = state.v3_confirm_rebuild_elapsed_ms.load(Ordering::Relaxed);
-    let v3_replay_position_applied_total = state.v3_replay_position_applied_total.load(Ordering::Relaxed);
+    let v3_replay_position_applied_total = state
+        .v3_replay_position_applied_total
+        .load(Ordering::Relaxed);
     let v3_replay_session_seq_seeded_total = state
         .v3_replay_session_seq_seeded_total
         .load(Ordering::Relaxed);
@@ -557,6 +567,25 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let fast_path_processing_p50 = state.engine.processing_p50() / 1_000;
     let fast_path_processing_p99 = state.engine.processing_p99() / 1_000;
     let fast_path_processing_p999 = state.engine.processing_p999() / 1_000;
+    let quant_feedback_enabled = if state.quant_feedback_exporter.is_enabled() {
+        1
+    } else {
+        0
+    };
+    let quant_feedback_metrics = state.quant_feedback_exporter.metrics();
+    let strategy_snapshot = state.strategy_snapshot_store.snapshot();
+    let strategy_snapshot_shadow_enabled = if strategy_snapshot.shadow_enabled {
+        1
+    } else {
+        0
+    };
+    let strategy_snapshot_version = strategy_snapshot.version;
+    let strategy_snapshot_applied_total = state.strategy_snapshot_store.applied_total();
+    let strategy_snapshot_last_applied_at_ns = state.strategy_snapshot_store.last_applied_at_ns();
+    let strategy_snapshot_symbol_limit_count = strategy_snapshot.symbol_limits.len() as u64;
+    let strategy_snapshot_risk_budget_count = strategy_snapshot.risk_budget_by_account.len() as u64;
+    let strategy_snapshot_venue_preference_count = strategy_snapshot.venue_preference.len() as u64;
+    let strategy_shadow_metrics = state.strategy_shadow_store.metrics();
 
     let mut snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
@@ -860,6 +889,118 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         state.engine.latency_count(),
         state.engine.latency_max(),
     );
+    snapshot.push_str(&format!(
+        "# HELP gateway_strategy_snapshot_version Current execution config snapshot version\n\
+         # TYPE gateway_strategy_snapshot_version gauge\n\
+         gateway_strategy_snapshot_version {}\n\
+         # HELP gateway_strategy_snapshot_applied_total Total execution config snapshot replacements\n\
+         # TYPE gateway_strategy_snapshot_applied_total counter\n\
+         gateway_strategy_snapshot_applied_total {}\n\
+         # HELP gateway_strategy_snapshot_last_applied_at_ns Last execution config snapshot apply timestamp in nanoseconds\n\
+         # TYPE gateway_strategy_snapshot_last_applied_at_ns gauge\n\
+         gateway_strategy_snapshot_last_applied_at_ns {}\n\
+         # HELP gateway_strategy_snapshot_shadow_enabled Current execution config shadow-enabled flag (1/0)\n\
+         # TYPE gateway_strategy_snapshot_shadow_enabled gauge\n\
+         gateway_strategy_snapshot_shadow_enabled {}\n\
+         # HELP gateway_strategy_snapshot_symbol_limit_count Current execution config symbol override count\n\
+         # TYPE gateway_strategy_snapshot_symbol_limit_count gauge\n\
+         gateway_strategy_snapshot_symbol_limit_count {}\n\
+         # HELP gateway_strategy_snapshot_risk_budget_count Current execution config account risk budget count\n\
+         # TYPE gateway_strategy_snapshot_risk_budget_count gauge\n\
+         gateway_strategy_snapshot_risk_budget_count {}\n\
+         # HELP gateway_strategy_snapshot_venue_preference_count Current execution config venue preference count\n\
+         # TYPE gateway_strategy_snapshot_venue_preference_count gauge\n\
+         gateway_strategy_snapshot_venue_preference_count {}\n\
+         # HELP gateway_strategy_shadow_record_count Current in-memory shadow record count\n\
+         # TYPE gateway_strategy_shadow_record_count gauge\n\
+         gateway_strategy_shadow_record_count {}\n\
+         # HELP gateway_strategy_shadow_upsert_total Total shadow record upserts\n\
+         # TYPE gateway_strategy_shadow_upsert_total counter\n\
+         gateway_strategy_shadow_upsert_total {}\n\
+         # HELP gateway_strategy_shadow_feedback_apply_total Total shadow record updates applied from quant feedback\n\
+         # TYPE gateway_strategy_shadow_feedback_apply_total counter\n\
+         gateway_strategy_shadow_feedback_apply_total {}\n\
+         # HELP gateway_strategy_shadow_pending_count Current shadow records pending feedback comparison\n\
+         # TYPE gateway_strategy_shadow_pending_count gauge\n\
+         gateway_strategy_shadow_pending_count {}\n\
+         # HELP gateway_strategy_shadow_matched_count Current shadow records marked matched\n\
+         # TYPE gateway_strategy_shadow_matched_count gauge\n\
+         gateway_strategy_shadow_matched_count {}\n\
+         # HELP gateway_strategy_shadow_skipped_count Current shadow records marked skipped\n\
+         # TYPE gateway_strategy_shadow_skipped_count gauge\n\
+         gateway_strategy_shadow_skipped_count {}\n\
+         # HELP gateway_strategy_shadow_timed_out_count Current shadow records marked timed out\n\
+         # TYPE gateway_strategy_shadow_timed_out_count gauge\n\
+         gateway_strategy_shadow_timed_out_count {}\n\
+         # HELP gateway_strategy_shadow_negative_score_count Current shadow records with negative total score\n\
+         # TYPE gateway_strategy_shadow_negative_score_count gauge\n\
+         gateway_strategy_shadow_negative_score_count {}\n\
+         # HELP gateway_strategy_shadow_zero_score_count Current shadow records with zero total score\n\
+         # TYPE gateway_strategy_shadow_zero_score_count gauge\n\
+         gateway_strategy_shadow_zero_score_count {}\n\
+         # HELP gateway_strategy_shadow_positive_score_count Current shadow records with positive total score\n\
+         # TYPE gateway_strategy_shadow_positive_score_count gauge\n\
+         gateway_strategy_shadow_positive_score_count {}\n\
+         # HELP gateway_strategy_shadow_last_evaluated_at_ns Max evaluated_at_ns across shadow records\n\
+         # TYPE gateway_strategy_shadow_last_evaluated_at_ns gauge\n\
+         gateway_strategy_shadow_last_evaluated_at_ns {}\n",
+        strategy_snapshot_version,
+        strategy_snapshot_applied_total,
+        strategy_snapshot_last_applied_at_ns,
+        strategy_snapshot_shadow_enabled,
+        strategy_snapshot_symbol_limit_count,
+        strategy_snapshot_risk_budget_count,
+        strategy_snapshot_venue_preference_count,
+        strategy_shadow_metrics.record_count,
+        strategy_shadow_metrics.upsert_total,
+        strategy_shadow_metrics.feedback_apply_total,
+        strategy_shadow_metrics.pending_count,
+        strategy_shadow_metrics.matched_count,
+        strategy_shadow_metrics.skipped_count,
+        strategy_shadow_metrics.timed_out_count,
+        strategy_shadow_metrics.negative_score_count,
+        strategy_shadow_metrics.zero_score_count,
+        strategy_shadow_metrics.positive_score_count,
+        strategy_shadow_metrics.last_evaluated_at_ns,
+    ));
+    snapshot.push_str(&format!(
+        "# HELP gateway_quant_feedback_enabled Quant feedback export enabled (1/0)\n\
+         # TYPE gateway_quant_feedback_enabled gauge\n\
+         gateway_quant_feedback_enabled {}\n\
+         # HELP gateway_quant_feedback_submitted_total Total quant feedback events submitted to exporter\n\
+         # TYPE gateway_quant_feedback_submitted_total counter\n\
+         gateway_quant_feedback_submitted_total {}\n\
+         # HELP gateway_quant_feedback_written_total Total quant feedback events written to sink\n\
+         # TYPE gateway_quant_feedback_written_total counter\n\
+         gateway_quant_feedback_written_total {}\n\
+         # HELP gateway_quant_feedback_dropped_total Total quant feedback events dropped before write\n\
+         # TYPE gateway_quant_feedback_dropped_total counter\n\
+         gateway_quant_feedback_dropped_total {}\n\
+         # HELP gateway_quant_feedback_dropped_newest_total Total quant feedback events dropped as newest on overflow\n\
+         # TYPE gateway_quant_feedback_dropped_newest_total counter\n\
+         gateway_quant_feedback_dropped_newest_total {}\n\
+         # HELP gateway_quant_feedback_dropped_oldest_total Total quant feedback events dropped as oldest on overflow\n\
+         # TYPE gateway_quant_feedback_dropped_oldest_total counter\n\
+         gateway_quant_feedback_dropped_oldest_total {}\n\
+         # HELP gateway_quant_feedback_write_error_total Total quant feedback sink write errors\n\
+         # TYPE gateway_quant_feedback_write_error_total counter\n\
+         gateway_quant_feedback_write_error_total {}\n\
+         # HELP gateway_quant_feedback_queue_depth Current quant feedback exporter queue depth\n\
+         # TYPE gateway_quant_feedback_queue_depth gauge\n\
+         gateway_quant_feedback_queue_depth {}\n\
+         # HELP gateway_quant_feedback_queue_depth_peak Peak quant feedback exporter queue depth\n\
+         # TYPE gateway_quant_feedback_queue_depth_peak gauge\n\
+         gateway_quant_feedback_queue_depth_peak {}\n",
+        quant_feedback_enabled,
+        quant_feedback_metrics.submitted_total,
+        quant_feedback_metrics.written_total,
+        quant_feedback_metrics.dropped_total,
+        quant_feedback_metrics.dropped_newest_total,
+        quant_feedback_metrics.dropped_oldest_total,
+        quant_feedback_metrics.write_error_total,
+        quant_feedback_metrics.queue_depth,
+        quant_feedback_metrics.queue_depth_peak,
+    ));
     snapshot.push_str(&format!(
         "# HELP gateway_live_ack_p99_us Contract live ACK latency p99 in microseconds (/v3 hot path)\n\
          # TYPE gateway_live_ack_p99_us gauge\n\
