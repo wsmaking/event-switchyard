@@ -1,15 +1,27 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::Serialize;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::audit::{self, AuditEvent};
 use crate::order::{OrderRequest, OrderType, TimeInForce};
 use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
+use crate::strategy::algo::{AlgoExecutionPlan, build_algo_execution_plan};
 use crate::strategy::config::ExecutionConfigSnapshot;
-use crate::strategy::intent::{IntentUrgency, StrategyIntent};
+use crate::strategy::intent::{IntentUrgency, StrategyIntent, StrategyRecoveryPolicy};
+use crate::strategy::replay::{
+    STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput, StrategyExecutionFact,
+    StrategyExecutionReplayItem,
+};
+use crate::strategy::runtime::{
+    AlgoChildExecution, AlgoParentExecution, STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE,
+};
 use crate::strategy::shadow::{
     SHADOW_RECORD_SCHEMA_VERSION, ShadowOutcomeView, ShadowPolicyView, ShadowRecord,
 };
@@ -74,6 +86,8 @@ pub(super) struct StrategyIntentAdaptResponse {
     pub version: u64,
     pub adapted_at_ns: u64,
     pub order_request: OrderRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_plan: Option<AlgoExecutionPlan>,
     pub effective_policy: ShadowPolicyView,
     pub effective_risk_budget_ref: Option<String>,
     pub policy_adjustments: Vec<String>,
@@ -110,6 +124,10 @@ pub(super) struct StrategyIntentSubmitResponse {
     pub version: u64,
     pub submitted_at_ns: u64,
     pub order_request: OrderRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_plan: Option<AlgoExecutionPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_runtime: Option<AlgoParentExecution>,
     pub effective_policy: ShadowPolicyView,
     pub effective_risk_budget_ref: Option<String>,
     pub policy_adjustments: Vec<String>,
@@ -117,6 +135,30 @@ pub(super) struct StrategyIntentSubmitResponse {
     pub shadow_run_id: Option<String>,
     pub shadow_seeded: bool,
     pub volatile_order: VolatileOrderResponse,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StrategyReplayQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub after_cursor: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StrategyExecutionReplayResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
+    pub requested_after_cursor: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    pub has_more: bool,
+    pub fact_count: usize,
+    pub facts: Vec<StrategyExecutionReplayItem>,
 }
 
 #[derive(Debug)]
@@ -269,7 +311,26 @@ fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
         client_order_id: None,
         intent_id: Some(intent.intent_id.clone()),
         model_id: intent.model_id.clone(),
+        execution_run_id: intent.execution_run_id.clone(),
     }
+}
+
+fn effective_recovery_policy(
+    intent: &StrategyIntent,
+    algo_plan: &AlgoExecutionPlan,
+) -> StrategyRecoveryPolicy {
+    intent.recovery_policy.unwrap_or({
+        if matches!(
+            algo_plan.policy,
+            crate::strategy::intent::ExecutionPolicyKind::Twap
+                | crate::strategy::intent::ExecutionPolicyKind::Vwap
+                | crate::strategy::intent::ExecutionPolicyKind::Pov
+        ) {
+            StrategyRecoveryPolicy::GatewayManagedResume
+        } else {
+            StrategyRecoveryPolicy::NoAutoResume
+        }
+    })
 }
 
 fn normalize_resting_time_in_force(order_request: &mut OrderRequest) -> bool {
@@ -337,9 +398,7 @@ fn apply_execution_policy_to_order_request(
         }
         crate::strategy::intent::ExecutionPolicyKind::Twap
         | crate::strategy::intent::ExecutionPolicyKind::Vwap
-        | crate::strategy::intent::ExecutionPolicyKind::Pov => {
-            return Err("STRATEGY_POLICY_NOT_IMPLEMENTED");
-        }
+        | crate::strategy::intent::ExecutionPolicyKind::Pov => {}
     }
 
     Ok(AppliedExecutionPolicy {
@@ -404,6 +463,287 @@ fn upsert_shadow_record_for_intent(
         .map_err(|reason| snapshot_error(state, snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason))
 }
 
+fn build_algo_parent_execution(
+    request: &StrategyIntentSubmitRequest,
+    base_order_request: OrderRequest,
+    effective_policy: &ShadowPolicyView,
+    effective_risk_budget_ref: Option<String>,
+    algo_plan: &AlgoExecutionPlan,
+    now_ns: u64,
+) -> AlgoParentExecution {
+    AlgoParentExecution::from_plan(
+        algo_plan,
+        request.intent.account_id.clone(),
+        request.intent.session_id.clone(),
+        request.intent.symbol.clone(),
+        request.intent.model_id.clone(),
+        request.intent.execution_run_id.clone(),
+        effective_recovery_policy(&request.intent, algo_plan),
+        base_order_request,
+        effective_risk_budget_ref,
+        Some(effective_policy.clone()),
+        request.shadow_run_id.clone(),
+        now_ns,
+    )
+}
+
+fn build_algo_runtime_snapshot_event(execution: &AlgoParentExecution) -> Option<AuditEvent> {
+    let data = serde_json::to_value(execution).ok()?;
+    Some(AuditEvent {
+        event_type: STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE.to_string(),
+        at: audit::now_millis(),
+        account_id: execution.account_id.clone(),
+        order_id: None,
+        data,
+    })
+}
+
+fn collect_strategy_execution_facts_from_reader<R, F>(
+    reader: R,
+    after_cursor: u64,
+    limit: usize,
+    mut predicate: F,
+) -> (Vec<StrategyExecutionReplayItem>, bool)
+where
+    R: BufRead,
+    F: FnMut(&StrategyExecutionFact) -> bool,
+{
+    let limit = limit.clamp(1, 10_000);
+    let mut facts = Vec::with_capacity(limit.min(4_096));
+    let mut has_more = false;
+
+    for (line_no, line) in reader.lines().enumerate() {
+        let cursor = line_no as u64 + 1;
+        if cursor <= after_cursor {
+            continue;
+        }
+        let Ok(line) = line else {
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: AuditEvent = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if event.event_type != STRATEGY_EXECUTION_FACT_EVENT_TYPE {
+            continue;
+        }
+        let fact: StrategyExecutionFact = match serde_json::from_value(event.data) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !predicate(&fact) {
+            continue;
+        }
+        if facts.len() >= limit {
+            has_more = true;
+            break;
+        }
+        facts.push(StrategyExecutionReplayItem { cursor, fact });
+    }
+
+    (facts, has_more)
+}
+
+fn read_strategy_execution_facts<F>(
+    state: &AppState,
+    after_cursor: u64,
+    limit: usize,
+    predicate: F,
+) -> (Vec<StrategyExecutionReplayItem>, bool)
+where
+    F: FnMut(&StrategyExecutionFact) -> bool,
+{
+    let file = match File::open(state.audit_read_path.as_ref().as_path()) {
+        Ok(file) => file,
+        Err(_) => return (Vec::new(), false),
+    };
+    let reader = BufReader::new(file);
+    collect_strategy_execution_facts_from_reader(reader, after_cursor, limit, predicate)
+}
+
+pub(super) fn append_algo_runtime_snapshot(state: &AppState, execution: &AlgoParentExecution) {
+    if let Some(event) = build_algo_runtime_snapshot_event(execution) {
+        state.audit_log.append(event);
+    }
+}
+
+async fn append_algo_runtime_snapshot_durable(
+    state: &AppState,
+    execution: &AlgoParentExecution,
+    request_start_ns: u64,
+) -> Result<(), &'static str> {
+    let Some(event) = build_algo_runtime_snapshot_event(execution) else {
+        return Err("STRATEGY_ALGO_RUNTIME_WAL_SERIALIZE_FAILED");
+    };
+    let append = state
+        .audit_log
+        .append_with_durable_receipt(event, request_start_ns);
+    if append.timings.durable_done_ns > 0 {
+        return Ok(());
+    }
+    let Some(durable_rx) = append.durable_rx else {
+        return Err("STRATEGY_ALGO_RUNTIME_WAL_FAILED");
+    };
+    let timeout = Duration::from_millis(state.v2_durable_wait_timeout_ms.max(1));
+    match tokio::time::timeout(timeout, durable_rx).await {
+        Ok(Ok(receipt)) if receipt.durable_done_ns > 0 => Ok(()),
+        Ok(Ok(_)) => Err("STRATEGY_ALGO_RUNTIME_WAL_FAILED"),
+        Ok(Err(_)) => Err("STRATEGY_ALGO_RUNTIME_WAL_RECEIPT_CLOSED"),
+        Err(_) => Err("STRATEGY_ALGO_RUNTIME_WAL_TIMEOUT"),
+    }
+}
+
+fn publish_parent_runtime_feedback(
+    state: &AppState,
+    event: crate::strategy::feedback::FeedbackEvent,
+) {
+    super::publish_quant_feedback(
+        state,
+        event
+            .push_path_tag("strategy")
+            .push_path_tag("algo_parent")
+            .push_path_tag("feedback"),
+    );
+}
+
+async fn dispatch_algo_slice(
+    state: AppState,
+    account_id: String,
+    session_id: String,
+    base_order_request: OrderRequest,
+    actual_policy: Option<ShadowPolicyView>,
+    effective_risk_budget_ref: Option<String>,
+    slice: AlgoChildExecution,
+) {
+    let now_ns = gateway_core::now_nanos();
+    if slice.send_at_ns > now_ns {
+        tokio::time::sleep(Duration::from_nanos(slice.send_at_ns - now_ns)).await;
+    }
+
+    if !state
+        .strategy_runtime_store
+        .can_dispatch_child(&slice.child_intent_id)
+    {
+        let _ = state.strategy_runtime_store.mark_child_skipped(
+            &slice.child_intent_id,
+            gateway_core::now_nanos(),
+            "STRATEGY_PARENT_RUNTIME_TERMINAL",
+        );
+        if let Some(parent) = state
+            .strategy_runtime_store
+            .get_by_child(&slice.child_intent_id)
+        {
+            append_algo_runtime_snapshot(&state, &parent);
+        }
+        return;
+    }
+
+    let dispatch_started_at_ns = gateway_core::now_nanos();
+    if !state
+        .strategy_runtime_store
+        .record_child_dispatch_started(&slice.child_intent_id, dispatch_started_at_ns)
+    {
+        return;
+    }
+    let Some(parent_after_dispatch) = state
+        .strategy_runtime_store
+        .get_by_child(&slice.child_intent_id)
+    else {
+        return;
+    };
+    if let Err(reason) =
+        append_algo_runtime_snapshot_durable(&state, &parent_after_dispatch, dispatch_started_at_ns)
+            .await
+    {
+        let parent_event = state.strategy_runtime_store.record_child_rejected(
+            &slice.child_intent_id,
+            gateway_core::now_nanos(),
+            reason,
+        );
+        if let Some(parent) = state
+            .strategy_runtime_store
+            .get_by_child(&slice.child_intent_id)
+        {
+            append_algo_runtime_snapshot(&state, &parent);
+        }
+        if let Some(event) = parent_event {
+            publish_parent_runtime_feedback(&state, event);
+        }
+        return;
+    }
+
+    let mut child_request = base_order_request;
+    child_request.qty = slice.qty;
+    child_request.client_order_id = None;
+    child_request.intent_id = Some(slice.child_intent_id.clone());
+    let submitted_at_ns = gateway_core::now_nanos();
+    let (status, volatile_order) = super::orders::process_order_v3_hot_path_with_strategy_context(
+        &state,
+        &account_id,
+        &session_id,
+        child_request,
+        actual_policy.clone().map(Arc::new),
+        effective_risk_budget_ref.clone().map(Arc::<str>::from),
+        submitted_at_ns,
+    );
+
+    let parent_event =
+        if status == StatusCode::ACCEPTED && volatile_order.status_text() == "VOLATILE_ACCEPT" {
+            volatile_order.session_seq().and_then(|session_seq| {
+                state.strategy_runtime_store.record_child_volatile_accepted(
+                    &slice.child_intent_id,
+                    session_seq,
+                    submitted_at_ns,
+                )
+            })
+        } else {
+            state.strategy_runtime_store.record_child_rejected(
+                &slice.child_intent_id,
+                submitted_at_ns,
+                volatile_order
+                    .reason_text()
+                    .unwrap_or("STRATEGY_ALGO_CHILD_REJECTED"),
+            )
+        };
+
+    if let Some(parent) = state
+        .strategy_runtime_store
+        .get_by_child(&slice.child_intent_id)
+    {
+        append_algo_runtime_snapshot(&state, &parent);
+    }
+    if let Some(event) = parent_event {
+        publish_parent_runtime_feedback(&state, event);
+    }
+}
+
+pub(super) fn spawn_algo_runtime(state: AppState, runtime: &AlgoParentExecution) {
+    for slice in runtime
+        .slices
+        .iter()
+        .filter(|slice| {
+            matches!(
+                slice.status,
+                crate::strategy::runtime::AlgoChildStatus::Scheduled
+            )
+        })
+        .cloned()
+    {
+        tokio::spawn(dispatch_algo_slice(
+            state.clone(),
+            runtime.account_id.clone(),
+            runtime.session_id.clone(),
+            runtime.base_order_request.clone(),
+            runtime.actual_policy.clone(),
+            runtime.effective_risk_budget_ref.clone(),
+            slice,
+        ));
+    }
+}
+
 pub(super) async fn handle_post_strategy_intent_adapt(
     State(state): State<AppState>,
     Json(intent): Json<StrategyIntent>,
@@ -430,6 +770,11 @@ pub(super) async fn handle_post_strategy_intent_adapt(
         .map_err(|reason| {
             snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
         })?;
+    let algo_plan =
+        build_algo_execution_plan(&intent, effective_policy.execution_policy.as_ref(), now_ns)
+            .map_err(|reason| {
+                snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+            })?;
 
     let policy_adjustments = applied_policy.adjustment_strings();
     let order_request = applied_policy.order_request;
@@ -439,6 +784,7 @@ pub(super) async fn handle_post_strategy_intent_adapt(
         version: snapshot.version,
         adapted_at_ns: now_ns,
         order_request,
+        algo_plan,
         effective_policy,
         effective_risk_budget_ref,
         policy_adjustments,
@@ -475,6 +821,14 @@ pub(super) async fn handle_post_strategy_intent_submit(
         apply_execution_policy_to_order_request(&request.intent, &effective_policy).map_err(
             |reason| snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason),
         )?;
+    let algo_plan = build_algo_execution_plan(
+        &request.intent,
+        effective_policy.execution_policy.as_ref(),
+        now_ns,
+    )
+    .map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
     let order_request = applied_policy.order_request.clone();
     let policy_adjustments = applied_policy.adjustment_strings();
     let shadow_seeded = if let Some(shadow_run_id) = request.shadow_run_id.as_deref() {
@@ -492,6 +846,50 @@ pub(super) async fn handle_post_strategy_intent_submit(
     } else {
         false
     };
+    if let Some(algo_plan) = algo_plan.clone() {
+        let algo_runtime = build_algo_parent_execution(
+            &request,
+            order_request.clone(),
+            &effective_policy,
+            effective_risk_budget_ref.clone(),
+            &algo_plan,
+            now_ns,
+        );
+        append_algo_runtime_snapshot_durable(&state, &algo_runtime, now_ns)
+            .await
+            .map_err(|reason| {
+                snapshot_error(&state, &snapshot, StatusCode::SERVICE_UNAVAILABLE, reason)
+            })?;
+        state
+            .strategy_runtime_store
+            .insert(algo_runtime.clone())
+            .map_err(|reason| {
+                snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+            })?;
+        spawn_algo_runtime(state.clone(), &algo_runtime);
+
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(StrategyIntentSubmitResponse {
+                snapshot_id: snapshot.snapshot_id.clone(),
+                version: snapshot.version,
+                submitted_at_ns: now_ns,
+                order_request,
+                algo_plan: Some(algo_plan),
+                algo_runtime: Some(algo_runtime),
+                effective_policy,
+                effective_risk_budget_ref,
+                policy_adjustments,
+                shadow_enabled: snapshot.shadow_enabled,
+                shadow_run_id: request.shadow_run_id,
+                shadow_seeded,
+                volatile_order: VolatileOrderResponse::algo_runtime_scheduled(
+                    &request.intent.session_id,
+                    now_ns,
+                ),
+            }),
+        ));
+    }
     let (status, volatile_order) = super::orders::process_order_v3_hot_path_with_strategy_context(
         &state,
         &request.intent.account_id,
@@ -509,6 +907,8 @@ pub(super) async fn handle_post_strategy_intent_submit(
             version: snapshot.version,
             submitted_at_ns: now_ns,
             order_request,
+            algo_plan: None,
+            algo_runtime: None,
             effective_policy,
             effective_risk_budget_ref,
             policy_adjustments,
@@ -557,6 +957,111 @@ pub(super) async fn handle_post_strategy_intent_shadow(
         record_count: state.strategy_shadow_store.size(),
         upsert_total: state.strategy_shadow_store.upsert_total(),
     }))
+}
+
+pub(super) async fn handle_get_strategy_runtime(
+    State(state): State<AppState>,
+    Path(parent_intent_id): Path<String>,
+) -> Result<Json<AlgoParentExecution>, StatusCode> {
+    state
+        .strategy_runtime_store
+        .get(&parent_intent_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+pub(super) async fn handle_get_strategy_replay_by_execution_run_id(
+    State(state): State<AppState>,
+    Path(execution_run_id): Path<String>,
+    Query(query): Query<StrategyReplayQuery>,
+) -> Json<StrategyExecutionReplayResponse> {
+    let requested_after_cursor = query.after_cursor.unwrap_or(0);
+    let (facts, has_more) = read_strategy_execution_facts(
+        &state,
+        requested_after_cursor,
+        query.limit.unwrap_or(500),
+        |fact| fact.execution_run_id.as_deref() == Some(execution_run_id.as_str()),
+    );
+    let next_cursor = facts.last().map(|item| item.cursor);
+    Json(StrategyExecutionReplayResponse {
+        execution_run_id: Some(execution_run_id),
+        intent_id: None,
+        requested_after_cursor,
+        next_cursor,
+        has_more,
+        fact_count: facts.len(),
+        facts,
+    })
+}
+
+pub(super) async fn handle_get_strategy_catchup_by_execution_run_id(
+    State(state): State<AppState>,
+    Path(execution_run_id): Path<String>,
+    Query(query): Query<StrategyReplayQuery>,
+) -> Json<StrategyExecutionCatchupInput> {
+    let requested_after_cursor = query.after_cursor.unwrap_or(0);
+    let (facts, has_more) = read_strategy_execution_facts(
+        &state,
+        requested_after_cursor,
+        query.limit.unwrap_or(500),
+        |fact| fact.execution_run_id.as_deref() == Some(execution_run_id.as_str()),
+    );
+    let next_cursor = facts.last().map(|item| item.cursor);
+    Json(StrategyExecutionCatchupInput::from_replay_items(
+        Some(execution_run_id),
+        None,
+        requested_after_cursor,
+        next_cursor,
+        has_more,
+        facts,
+    ))
+}
+
+pub(super) async fn handle_get_strategy_replay_by_intent_id(
+    State(state): State<AppState>,
+    Path(intent_id): Path<String>,
+    Query(query): Query<StrategyReplayQuery>,
+) -> Json<StrategyExecutionReplayResponse> {
+    let requested_after_cursor = query.after_cursor.unwrap_or(0);
+    let (facts, has_more) = read_strategy_execution_facts(
+        &state,
+        requested_after_cursor,
+        query.limit.unwrap_or(500),
+        |fact| fact.intent_id.as_deref() == Some(intent_id.as_str()),
+    );
+    let next_cursor = facts.last().map(|item| item.cursor);
+    Json(StrategyExecutionReplayResponse {
+        execution_run_id: None,
+        intent_id: Some(intent_id),
+        requested_after_cursor,
+        next_cursor,
+        has_more,
+        fact_count: facts.len(),
+        facts,
+    })
+}
+
+pub(super) async fn handle_get_strategy_catchup_by_intent_id(
+    State(state): State<AppState>,
+    Path(intent_id): Path<String>,
+    Query(query): Query<StrategyReplayQuery>,
+) -> Json<StrategyExecutionCatchupInput> {
+    let requested_after_cursor = query.after_cursor.unwrap_or(0);
+    let (facts, has_more) = read_strategy_execution_facts(
+        &state,
+        requested_after_cursor,
+        query.limit.unwrap_or(500),
+        |fact| fact.intent_id.as_deref() == Some(intent_id.as_str()),
+    );
+    let next_cursor = facts.last().map(|item| item.cursor);
+    Json(StrategyExecutionCatchupInput::from_replay_items(
+        None,
+        Some(intent_id),
+        requested_after_cursor,
+        next_cursor,
+        has_more,
+        facts,
+    ))
 }
 
 pub(super) async fn handle_get_strategy_config(
@@ -686,12 +1191,19 @@ pub(super) async fn handle_get_shadow_run_summary(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufReader, Cursor};
+
+    use crate::audit::AuditEvent;
     use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
+    use crate::strategy::replay::{
+        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput,
+        StrategyExecutionFact, StrategyExecutionFactStatus,
+    };
 
     use super::{
         ShadowRecordUpsertResponse, ShadowRunSummaryResponse, StrategyConfigErrorResponse,
         StrategyConfigUpdateResponse, StrategyIntentAdaptResponse, StrategyIntentShadowSeedRequest,
-        StrategyIntentSubmitRequest,
+        StrategyIntentSubmitRequest, collect_strategy_execution_facts_from_reader,
     };
 
     #[test]
@@ -797,7 +1309,9 @@ mod tests {
                 client_order_id: None,
                 intent_id: Some("intent-1".to_string()),
                 model_id: Some("model-1".to_string()),
+                execution_run_id: Some("run-1".to_string()),
             },
+            algo_plan: None,
             effective_policy: crate::strategy::shadow::ShadowPolicyView {
                 execution_policy: None,
                 urgency: Some("HIGH".to_string()),
@@ -834,6 +1348,11 @@ mod tests {
                 execution_policy: crate::strategy::intent::ExecutionPolicyKind::Passive,
                 risk_budget_ref: None,
                 model_id: Some("model-1".to_string()),
+                execution_run_id: Some("run-1".to_string()),
+                recovery_policy: Some(
+                    crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
+                ),
+                algo: None,
                 created_at_ns: 10,
                 expires_at_ns: 20,
             },
@@ -873,6 +1392,11 @@ mod tests {
                 execution_policy: crate::strategy::intent::ExecutionPolicyKind::Passive,
                 risk_budget_ref: None,
                 model_id: Some("model-1".to_string()),
+                execution_run_id: Some("run-1".to_string()),
+                recovery_policy: Some(
+                    crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
+                ),
+                algo: None,
                 created_at_ns: 10,
                 expires_at_ns: 20,
             },
@@ -883,6 +1407,180 @@ mod tests {
         .expect("serialize submit request");
 
         assert!(raw.contains("\"shadowRunId\":\"shadow-1\""));
+    }
+
+    #[test]
+    fn strategy_execution_fact_reader_filters_and_keeps_latest_matches() {
+        let events = vec![
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 1,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/1".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        1_000_000,
+                        StrategyExecutionFactStatus::Rejected,
+                    )
+                    .with_execution_run_id("run-1")
+                    .with_intent_id("intent-1")
+                    .with_session_seq(1),
+                )
+                .expect("serialize fact 1"),
+            })
+            .expect("serialize event 1"),
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 2,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/2".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        2_000_000,
+                        StrategyExecutionFactStatus::Unconfirmed,
+                    )
+                    .with_execution_run_id("run-2")
+                    .with_intent_id("intent-2")
+                    .with_session_seq(2),
+                )
+                .expect("serialize fact 2"),
+            })
+            .expect("serialize event 2"),
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 3,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/3".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        3_000_000,
+                        StrategyExecutionFactStatus::DurableAccepted,
+                    )
+                    .with_execution_run_id("run-1")
+                    .with_intent_id("intent-1")
+                    .with_session_seq(3),
+                )
+                .expect("serialize fact 3"),
+            })
+            .expect("serialize event 3"),
+        ]
+        .join("\n");
+
+        let (facts, has_more) = collect_strategy_execution_facts_from_reader(
+            BufReader::new(Cursor::new(events.into_bytes())),
+            0,
+            1,
+            |fact| fact.execution_run_id.as_deref() == Some("run-1"),
+        );
+
+        assert!(has_more);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].cursor, 1);
+        assert_eq!(facts[0].fact.session_seq, Some(1));
+        assert_eq!(
+            facts[0].fact.status,
+            StrategyExecutionFactStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn catchup_input_batches_latest_states_from_replay_page() {
+        let events = vec![
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 1,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/7".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        1_000_000,
+                        StrategyExecutionFactStatus::Unconfirmed,
+                    )
+                    .with_execution_run_id("run-1")
+                    .with_intent_id("intent-1")
+                    .with_session_seq(7)
+                    .with_position_delta_qty(10),
+                )
+                .expect("serialize fact 1"),
+            })
+            .expect("serialize event 1"),
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 2,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/7".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        2_000_000,
+                        StrategyExecutionFactStatus::DurableAccepted,
+                    )
+                    .with_execution_run_id("run-1")
+                    .with_intent_id("intent-1")
+                    .with_session_seq(7)
+                    .with_position_delta_qty(10),
+                )
+                .expect("serialize fact 2"),
+            })
+            .expect("serialize event 2"),
+            serde_json::to_string(&AuditEvent {
+                event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+                at: 3,
+                account_id: "acc-1".to_string(),
+                order_id: Some("v3/sess-1/8".to_string()),
+                data: serde_json::to_value(
+                    StrategyExecutionFact::new(
+                        "acc-1",
+                        "sess-1",
+                        "AAPL",
+                        3_000_000,
+                        StrategyExecutionFactStatus::LossSuspect,
+                    )
+                    .with_execution_run_id("run-1")
+                    .with_intent_id("intent-2")
+                    .with_session_seq(8)
+                    .with_position_delta_qty(12),
+                )
+                .expect("serialize fact 3"),
+            })
+            .expect("serialize event 3"),
+        ]
+        .join("\n");
+
+        let (facts, has_more) = collect_strategy_execution_facts_from_reader(
+            BufReader::new(Cursor::new(events.into_bytes())),
+            0,
+            32,
+            |fact| fact.execution_run_id.as_deref() == Some("run-1"),
+        );
+        let catchup = StrategyExecutionCatchupInput::from_replay_items(
+            Some("run-1".to_string()),
+            None,
+            0,
+            facts.last().map(|item| item.cursor),
+            has_more,
+            facts,
+        );
+
+        assert_eq!(catchup.fact_count, 3);
+        assert_eq!(catchup.latest_order_states.len(), 2);
+        assert_eq!(catchup.latest_status_totals.durable_accepted, 1);
+        assert_eq!(catchup.latest_status_totals.loss_suspect, 1);
+        assert_eq!(catchup.next_cursor, Some(3));
     }
 
     fn strategy_intent_fixture() -> crate::strategy::intent::StrategyIntent {
@@ -901,6 +1599,9 @@ mod tests {
             execution_policy: crate::strategy::intent::ExecutionPolicyKind::Aggressive,
             risk_budget_ref: None,
             model_id: Some("model-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            recovery_policy: Some(crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume),
+            algo: None,
             created_at_ns: 10,
             expires_at_ns: 123_000_000,
         }
@@ -996,7 +1697,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_policy_hook_rejects_unimplemented_algo_policy() {
+    fn execution_policy_hook_allows_algo_policy_to_pass_through() {
         let mut intent = strategy_intent_fixture();
         intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
         let effective_policy = crate::strategy::shadow::ShadowPolicyView {
@@ -1011,10 +1712,10 @@ mod tests {
             venue: None,
         };
 
-        let err = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
-            .err()
-            .expect("algo policy must reject");
+        let applied = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
+            .expect("algo policy should pass through");
 
-        assert_eq!(err, "STRATEGY_POLICY_NOT_IMPLEMENTED");
+        assert_eq!(applied.order_request.qty, 100);
+        assert!(applied.adjustments.is_empty());
     }
 }

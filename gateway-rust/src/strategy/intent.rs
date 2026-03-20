@@ -5,6 +5,19 @@ pub const STRATEGY_INTENT_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StrategyRecoveryPolicy {
+    GatewayManagedResume,
+    NoAutoResume,
+}
+
+impl Default for StrategyRecoveryPolicy {
+    fn default() -> Self {
+        Self::NoAutoResume
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IntentUrgency {
     Low,
     Normal,
@@ -27,6 +40,23 @@ pub enum ExecutionPolicyKind {
     Twap,
     Vwap,
     Pov,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AlgoExecutionSpec {
+    #[serde(default)]
+    pub slice_count: Option<u32>,
+    #[serde(default)]
+    pub slice_interval_ns: Option<u64>,
+    #[serde(default)]
+    pub volume_curve_bps: Vec<u32>,
+    #[serde(default)]
+    pub expected_market_volume: Vec<u64>,
+    #[serde(default)]
+    pub participation_target_bps: Option<u32>,
+    #[serde(default)]
+    pub start_at_ns: Option<u64>,
 }
 
 impl Default for ExecutionPolicyKind {
@@ -65,6 +95,12 @@ pub struct StrategyIntent {
     pub risk_budget_ref: Option<RiskBudgetRef>,
     #[serde(default)]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub execution_run_id: Option<String>,
+    #[serde(default)]
+    pub recovery_policy: Option<StrategyRecoveryPolicy>,
+    #[serde(default)]
+    pub algo: Option<AlgoExecutionSpec>,
     pub created_at_ns: u64,
     pub expires_at_ns: u64,
 }
@@ -98,6 +134,13 @@ impl StrategyIntent {
         if self.order_type == OrderType::Limit && self.limit_price.unwrap_or(0) == 0 {
             return Err("LIMIT_PRICE_REQUIRED");
         }
+        if self
+            .execution_run_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("EXECUTION_RUN_ID_REQUIRED");
+        }
         Ok(())
     }
 
@@ -108,7 +151,10 @@ impl StrategyIntent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionPolicyKind, IntentUrgency, RiskBudgetRef, StrategyIntent};
+    use super::{
+        AlgoExecutionSpec, ExecutionPolicyKind, IntentUrgency, RiskBudgetRef, StrategyIntent,
+        StrategyRecoveryPolicy,
+    };
     use crate::order::{OrderType, TimeInForce};
 
     fn intent_fixture() -> StrategyIntent {
@@ -130,6 +176,16 @@ mod tests {
                 version: 7,
             }),
             model_id: Some("model-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            algo: Some(AlgoExecutionSpec {
+                slice_count: Some(4),
+                slice_interval_ns: Some(100),
+                volume_curve_bps: vec![],
+                expected_market_volume: vec![],
+                participation_target_bps: None,
+                start_at_ns: Some(1_000),
+            }),
             created_at_ns: 10,
             expires_at_ns: 20,
         }
@@ -161,6 +217,15 @@ mod tests {
         assert_eq!(parsed.execution_policy, ExecutionPolicyKind::Passive);
         assert_eq!(parsed.urgency, IntentUrgency::High);
         assert_eq!(parsed.time_in_force, TimeInForce::Ioc);
+        assert_eq!(parsed.execution_run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            parsed.recovery_policy,
+            Some(StrategyRecoveryPolicy::NoAutoResume)
+        );
         assert_eq!(parsed.risk_budget_ref.as_ref().map(|v| v.version), Some(7));
+        assert_eq!(
+            parsed.algo.as_ref().and_then(|algo| algo.slice_count),
+            Some(4)
+        );
     }
 }

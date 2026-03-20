@@ -60,10 +60,19 @@ use crate::engine::FastPathEngine;
 use crate::inflight::InflightControllerHandle;
 use crate::rate_limit::AccountRateLimiter;
 use crate::sse::SseHub;
+use crate::store::strategy_runtime_store::StrategyRuntimeStore;
 use crate::store::strategy_shadow_store::StrategyShadowStore;
 use crate::store::strategy_snapshot::StrategySnapshotStore;
 use crate::store::{OrderIdMap, OrderStore, ShardedOrderStore};
-use crate::strategy::{feedback::FeedbackEvent, shadow::ShadowPolicyView, sink::FeedbackExporter};
+use crate::strategy::{
+    feedback::FeedbackEvent,
+    replay::{
+        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionFact, StrategyExecutionFactStatus,
+    },
+    runtime::{AlgoParentExecution, STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE},
+    shadow::ShadowPolicyView,
+    sink::FeedbackExporter,
+};
 use gateway_core::{LatencyHistogram, RdtscpClock, RdtscpStamp};
 use std::path::{Path, PathBuf};
 
@@ -79,10 +88,13 @@ use orders::{
 };
 use sse::{handle_account_stream, handle_order_stream};
 use strategy::{
-    handle_get_shadow_record, handle_get_shadow_run_summary, handle_get_strategy_config,
-    handle_post_shadow_record,
-    handle_post_strategy_intent_adapt, handle_post_strategy_intent_shadow,
-    handle_post_strategy_intent_submit, handle_put_strategy_config,
+    append_algo_runtime_snapshot, handle_get_shadow_record, handle_get_shadow_run_summary,
+    handle_get_strategy_catchup_by_execution_run_id, handle_get_strategy_catchup_by_intent_id,
+    handle_get_strategy_config, handle_get_strategy_replay_by_execution_run_id,
+    handle_get_strategy_replay_by_intent_id, handle_get_strategy_runtime,
+    handle_post_shadow_record, handle_post_strategy_intent_adapt,
+    handle_post_strategy_intent_shadow, handle_post_strategy_intent_submit,
+    handle_put_strategy_config, spawn_algo_runtime,
 };
 
 /// /v3/orders の single-writer に流す最小タスク。
@@ -90,6 +102,7 @@ use strategy::{
 pub(super) struct V3OrderTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
+    pub(super) execution_run_id: Option<Arc<str>>,
     pub(super) intent_id: Option<Arc<str>>,
     pub(super) model_id: Option<Arc<str>>,
     pub(super) effective_risk_budget_ref: Option<Arc<str>>,
@@ -122,6 +135,7 @@ impl V3AccountSymbolKey {
 pub(super) struct V3DurableTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
+    pub(super) execution_run_id: Option<Arc<str>>,
     pub(super) intent_id: Option<Arc<str>>,
     pub(super) model_id: Option<Arc<str>>,
     pub(super) effective_risk_budget_ref: Option<Arc<str>>,
@@ -139,6 +153,7 @@ impl From<V3OrderTask> for V3DurableTask {
         Self {
             session_id: task.session_id,
             account_id: task.account_id,
+            execution_run_id: task.execution_run_id,
             intent_id: task.intent_id,
             model_id: task.model_id,
             effective_risk_budget_ref: task.effective_risk_budget_ref,
@@ -168,6 +183,71 @@ pub(super) fn publish_quant_feedback(state: &AppState, event: FeedbackEvent) {
         let _ = state.strategy_shadow_store.apply_feedback(&event);
     }
     let _ = state.quant_feedback_exporter.submit(event);
+}
+
+fn v3_order_id(session_id: &str, session_seq: u64) -> String {
+    format!("v3/{session_id}/{session_seq}")
+}
+
+pub(super) fn append_strategy_execution_fact(state: &AppState, fact: StrategyExecutionFact) {
+    let order_id = fact
+        .session_seq
+        .map(|session_seq| v3_order_id(&fact.session_id, session_seq));
+    let Ok(data) = serde_json::to_value(&fact) else {
+        return;
+    };
+    state.audit_log.append(AuditEvent {
+        event_type: STRATEGY_EXECUTION_FACT_EVENT_TYPE.to_string(),
+        at: fact.event_at_ns / 1_000_000,
+        account_id: fact.account_id.clone(),
+        order_id,
+        data,
+    });
+}
+
+pub(super) fn maybe_append_strategy_execution_fact(
+    state: &AppState,
+    execution_run_id: Option<&str>,
+    intent_id: Option<&str>,
+    model_id: Option<&str>,
+    account_id: &str,
+    session_id: &str,
+    session_seq: Option<u64>,
+    symbol: &str,
+    position_delta_qty: Option<i64>,
+    event_at_ns: u64,
+    status: StrategyExecutionFactStatus,
+    reason: Option<&str>,
+) {
+    let execution_run_id = execution_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let intent_id = intent_id.map(str::trim).filter(|value| !value.is_empty());
+    let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
+    if execution_run_id.is_none() && intent_id.is_none() && model_id.is_none() {
+        return;
+    }
+
+    let mut fact = StrategyExecutionFact::new(account_id, session_id, symbol, event_at_ns, status);
+    if let Some(execution_run_id) = execution_run_id {
+        fact = fact.with_execution_run_id(execution_run_id);
+    }
+    if let Some(intent_id) = intent_id {
+        fact = fact.with_intent_id(intent_id);
+    }
+    if let Some(model_id) = model_id {
+        fact = fact.with_model_id(model_id);
+    }
+    if let Some(session_seq) = session_seq {
+        fact = fact.with_session_seq(session_seq);
+    }
+    if let Some(position_delta_qty) = position_delta_qty {
+        fact = fact.with_position_delta_qty(position_delta_qty);
+    }
+    if let Some(reason) = reason.map(str::trim).filter(|value| !value.is_empty()) {
+        fact = fact.with_reason(reason);
+    }
+    append_strategy_execution_fact(state, fact);
 }
 
 #[derive(Clone)]
@@ -379,6 +459,12 @@ struct V3ConfirmRecord {
     received_at_ns: u64,
     updated_at_ns: u64,
     shard_id: usize,
+    account_id: Option<String>,
+    execution_run_id: Option<String>,
+    intent_id: Option<String>,
+    model_id: Option<String>,
+    position_symbol_key: Option<[u8; 8]>,
+    position_delta_qty: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -389,6 +475,12 @@ pub(super) struct V3ConfirmSnapshot {
     pub(super) received_at_ns: u64,
     pub(super) updated_at_ns: u64,
     pub(super) shard_id: usize,
+    pub(super) account_id: Option<String>,
+    pub(super) execution_run_id: Option<String>,
+    pub(super) intent_id: Option<String>,
+    pub(super) model_id: Option<String>,
+    pub(super) position_symbol_key: Option<[u8; 8]>,
+    pub(super) position_delta_qty: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -597,6 +689,12 @@ impl V3ConfirmStore {
                 received_at_ns: task.received_at_ns,
                 updated_at_ns: now_ns,
                 shard_id: task.shard_id,
+                account_id: Some(task.account_id.to_string()),
+                execution_run_id: task.execution_run_id.as_deref().map(str::to_string),
+                intent_id: task.intent_id.as_deref().map(str::to_string),
+                model_id: task.model_id.as_deref().map(str::to_string),
+                position_symbol_key: Some(task.position_symbol_key),
+                position_delta_qty: Some(task.position_delta_qty),
             },
         );
         self.schedule_timeout(
@@ -653,6 +751,12 @@ impl V3ConfirmStore {
                 received_at_ns: now_ns,
                 updated_at_ns: now_ns,
                 shard_id: lane,
+                account_id: None,
+                execution_run_id: None,
+                intent_id: None,
+                model_id: None,
+                position_symbol_key: None,
+                position_delta_qty: None,
             },
         );
         self.schedule_gc_owned(lane, session_id, session_seq, now_ns);
@@ -712,6 +816,12 @@ impl V3ConfirmStore {
                 received_at_ns: now_ns,
                 updated_at_ns: now_ns,
                 shard_id: lane,
+                account_id: None,
+                execution_run_id: None,
+                intent_id: None,
+                model_id: None,
+                position_symbol_key: None,
+                position_delta_qty: None,
             },
         );
         self.schedule_gc_owned(lane, session_id, session_seq, now_ns);
@@ -751,6 +861,12 @@ impl V3ConfirmStore {
                 received_at_ns: now_ns,
                 updated_at_ns: now_ns,
                 shard_id,
+                account_id: None,
+                execution_run_id: None,
+                intent_id: None,
+                model_id: None,
+                position_symbol_key: None,
+                position_delta_qty: None,
             },
         );
         self.schedule_gc(lane, session_id, session_seq, now_ns);
@@ -768,6 +884,12 @@ impl V3ConfirmStore {
                 received_at_ns: entry.received_at_ns,
                 updated_at_ns: entry.updated_at_ns,
                 shard_id: entry.shard_id,
+                account_id: entry.account_id.clone(),
+                execution_run_id: entry.execution_run_id.clone(),
+                intent_id: entry.intent_id.clone(),
+                model_id: entry.model_id.clone(),
+                position_symbol_key: entry.position_symbol_key,
+                position_delta_qty: entry.position_delta_qty,
             })
     }
 
@@ -1346,6 +1468,7 @@ pub(super) struct AppState {
     pub(super) rate_limiter: Option<Arc<AccountRateLimiter>>,
     pub(super) strategy_snapshot_store: Arc<StrategySnapshotStore>,
     pub(super) strategy_shadow_store: Arc<StrategyShadowStore>,
+    pub(super) strategy_runtime_store: Arc<StrategyRuntimeStore>,
     pub(super) quant_feedback_exporter: Arc<FeedbackExporter>,
     pub(super) ack_hist: Arc<LatencyHistogram>,
     pub(super) wal_enqueue_hist: Arc<LatencyHistogram>,
@@ -1848,6 +1971,26 @@ impl AppState {
         ) else {
             return;
         };
+        if let Some(snapshot) = self.v3_confirm_store.snapshot(session_id, session_seq) {
+            let symbol = snapshot
+                .position_symbol_key
+                .map(crate::server::http::orders::render_v3_symbol_key)
+                .unwrap_or_default();
+            maybe_append_strategy_execution_fact(
+                self,
+                snapshot.execution_run_id.as_deref(),
+                snapshot.intent_id.as_deref(),
+                snapshot.model_id.as_deref(),
+                snapshot.account_id.as_deref().unwrap_or_default(),
+                session_id,
+                Some(session_seq),
+                symbol.as_str(),
+                snapshot.position_delta_qty,
+                now_ns,
+                StrategyExecutionFactStatus::LossSuspect,
+                Some(reason),
+            );
+        }
         self.v3_loss_suspect_total.fetch_add(1, Ordering::Relaxed);
         let shard_count = self.v3_ingress.shard_count().max(1);
         let mut effective_shard = marked_shard;
@@ -2050,6 +2193,7 @@ struct V3RebuildRecord {
     reason: Option<String>,
     at_ns: u64,
     account_id: String,
+    intent_id: Option<String>,
     position_symbol_key: Option<[u8; 8]>,
     position_delta_qty: Option<i64>,
     shard_id: Option<usize>,
@@ -2061,6 +2205,13 @@ struct V3RebuildStats {
     position_applied: u64,
     session_seq_seeded: u64,
     session_shard_seeded: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct StrategyRuntimeRebuildStats {
+    parent_restored: u64,
+    durable_child_replayed: u64,
+    resumed_children: u64,
 }
 
 fn parse_v3_u64_data_field(data: &serde_json::Value, key: &str) -> Option<u64> {
@@ -2079,6 +2230,11 @@ fn parse_v3_i64_data_field(data: &serde_json::Value, key: &str) -> Option<i64> {
             .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
             .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
     })
+}
+
+fn parse_v3_string_data_field(data: &serde_json::Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(|value| value.as_str().map(str::to_string))
 }
 
 fn collect_v3_rebuild_records_from_reader<R: BufRead>(
@@ -2133,6 +2289,7 @@ fn collect_v3_rebuild_records_from_reader<R: BufRead>(
                         reason: None,
                         at_ns,
                         account_id: event.account_id,
+                        intent_id: parse_v3_string_data_field(&event.data, "intentId"),
                         position_symbol_key,
                         position_delta_qty,
                         shard_id,
@@ -2155,6 +2312,7 @@ fn collect_v3_rebuild_records_from_reader<R: BufRead>(
                         reason: Some(reason),
                         at_ns,
                         account_id: event.account_id,
+                        intent_id: parse_v3_string_data_field(&event.data, "intentId"),
                         position_symbol_key: None,
                         position_delta_qty: None,
                         shard_id,
@@ -2280,6 +2438,153 @@ fn rebuild_v3_confirm_store_from_wal(state: &AppState, max_lines: usize) -> V3Re
             .saturating_add(stats.session_shard_seeded);
     }
     aggregate
+}
+
+fn collect_strategy_runtime_snapshots_from_reader<R: BufRead>(
+    reader: R,
+    max_lines: usize,
+) -> HashMap<String, AlgoParentExecution> {
+    let max_lines = max_lines.clamp(1, 5_000_000);
+    let mut ring: VecDeque<AuditEvent> = VecDeque::with_capacity(max_lines.min(16_384));
+
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: AuditEvent = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        ring.push_back(event);
+        while ring.len() > max_lines {
+            ring.pop_front();
+        }
+    }
+
+    let mut snapshots = HashMap::new();
+    for event in ring {
+        if event.event_type != STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE {
+            continue;
+        }
+        let runtime: AlgoParentExecution = match serde_json::from_value(event.data) {
+            Ok(runtime) => runtime,
+            Err(_) => continue,
+        };
+        snapshots.insert(runtime.parent_intent_id.clone(), runtime);
+    }
+    snapshots
+}
+
+fn rebuild_strategy_runtime_store_from_wal_path(
+    state: &AppState,
+    path: &Path,
+    max_lines: usize,
+) -> u64 {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = BufReader::new(file);
+    let snapshots = collect_strategy_runtime_snapshots_from_reader(reader, max_lines);
+    let mut restored = 0u64;
+    for runtime in snapshots.into_values() {
+        if state.strategy_runtime_store.insert(runtime).is_ok() {
+            restored = restored.saturating_add(1);
+        }
+    }
+    restored
+}
+
+fn replay_strategy_runtime_durable_outcomes_from_wal_path(
+    state: &AppState,
+    path: &Path,
+    max_lines: usize,
+) -> u64 {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = BufReader::new(file);
+    let (records, _) = collect_v3_rebuild_records_from_reader(reader, max_lines);
+    let mut replayed = 0u64;
+
+    for (_key, record) in records {
+        let Some(intent_id) = record.intent_id.as_deref() else {
+            continue;
+        };
+        if state
+            .strategy_runtime_store
+            .get_by_child(intent_id)
+            .is_none()
+        {
+            continue;
+        }
+        match record.status {
+            V3ConfirmStatus::DurableAccepted => {
+                let _ = state
+                    .strategy_runtime_store
+                    .record_child_durable_accepted(intent_id, record.at_ns);
+                replayed = replayed.saturating_add(1);
+            }
+            V3ConfirmStatus::DurableRejected => {
+                let reason = record.reason.as_deref().unwrap_or("WAL_DURABILITY_FAILED");
+                let _ = state.strategy_runtime_store.record_child_durable_rejected(
+                    intent_id,
+                    record.at_ns,
+                    reason,
+                );
+                replayed = replayed.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    replayed
+}
+
+fn rebuild_strategy_runtime_from_wal(
+    state: &AppState,
+    max_lines: usize,
+) -> StrategyRuntimeRebuildStats {
+    let mut stats = StrategyRuntimeRebuildStats::default();
+    stats.parent_restored = rebuild_strategy_runtime_store_from_wal_path(
+        state,
+        state.audit_read_path.as_ref().as_path(),
+        max_lines,
+    );
+    for path in state.v3_confirm_rebuild_paths.iter() {
+        stats.durable_child_replayed = stats.durable_child_replayed.saturating_add(
+            replay_strategy_runtime_durable_outcomes_from_wal_path(state, path, max_lines),
+        );
+    }
+    for runtime in state.strategy_runtime_store.list() {
+        if runtime.is_terminal() {
+            continue;
+        }
+        if matches!(
+            runtime.recovery_policy,
+            crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume
+        ) {
+            let paused_at_ns = gateway_core::now_nanos();
+            if state.strategy_runtime_store.pause_parent_on_restart(
+                &runtime.parent_intent_id,
+                paused_at_ns,
+                "STRATEGY_NO_AUTO_RESUME_ON_RESTART",
+            ) {
+                if let Some(parent) = state.strategy_runtime_store.get(&runtime.parent_intent_id) {
+                    append_algo_runtime_snapshot(state, &parent);
+                }
+            }
+            continue;
+        }
+        let scheduled = runtime.scheduled_child_count();
+        if scheduled == 0 {
+            continue;
+        }
+        spawn_algo_runtime(state.clone(), &runtime);
+        stats.resumed_children = stats.resumed_children.saturating_add(scheduled);
+    }
+    stats
 }
 
 fn parse_v3_symbol_limits(
@@ -3115,6 +3420,7 @@ pub async fn run(
         rate_limiter,
         strategy_snapshot_store: Arc::new(StrategySnapshotStore::default()),
         strategy_shadow_store: Arc::new(StrategyShadowStore::default()),
+        strategy_runtime_store: Arc::new(StrategyRuntimeStore::default()),
         quant_feedback_exporter: Arc::new(FeedbackExporter::from_env()),
         ack_hist: Arc::new(LatencyHistogram::new()),
         wal_enqueue_hist: Arc::new(LatencyHistogram::new()),
@@ -3456,6 +3762,20 @@ pub async fn run(
         });
     }
 
+    if v3_confirm_rebuild_on_start {
+        let rebuild_t0 = Instant::now();
+        let strategy_rebuild_stats =
+            rebuild_strategy_runtime_from_wal(&state, v3_confirm_rebuild_max_lines);
+        info!(
+            parent_restored = strategy_rebuild_stats.parent_restored,
+            durable_child_replayed = strategy_rebuild_stats.durable_child_replayed,
+            resumed_children = strategy_rebuild_stats.resumed_children,
+            elapsed_ms = rebuild_t0.elapsed().as_millis() as u64,
+            max_lines = v3_confirm_rebuild_max_lines,
+            "strategy algo runtime rebuilt from WAL"
+        );
+    }
+
     let v3_http_enable = parse_bool_env("V3_HTTP_ENABLE");
     let v3_http_ingress_enable = parse_bool_env("V3_HTTP_INGRESS_ENABLE")
         .or(v3_http_enable)
@@ -3553,6 +3873,26 @@ pub async fn run(
         .route(
             "/strategy/shadow/{shadow_run_id}/{intent_id}",
             get(handle_get_shadow_record),
+        )
+        .route(
+            "/strategy/runtime/{parent_intent_id}",
+            get(handle_get_strategy_runtime),
+        )
+        .route(
+            "/strategy/replay/execution/{execution_run_id}",
+            get(handle_get_strategy_replay_by_execution_run_id),
+        )
+        .route(
+            "/strategy/catchup/execution/{execution_run_id}",
+            get(handle_get_strategy_catchup_by_execution_run_id),
+        )
+        .route(
+            "/strategy/replay/intent/{intent_id}",
+            get(handle_get_strategy_replay_by_intent_id),
+        )
+        .route(
+            "/strategy/catchup/intent/{intent_id}",
+            get(handle_get_strategy_catchup_by_intent_id),
         )
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics));
@@ -4321,6 +4661,20 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
             &task,
             gateway_core::now_nanos(),
         );
+        maybe_append_strategy_execution_fact(
+            &state,
+            task.execution_run_id.as_deref(),
+            task.intent_id.as_deref(),
+            task.model_id.as_deref(),
+            task.account_id.as_ref(),
+            task.session_id.as_ref(),
+            Some(task.session_seq),
+            crate::server::http::orders::render_v3_symbol_key(task.position_symbol_key).as_str(),
+            Some(task.position_delta_qty),
+            task.received_at_ns,
+            StrategyExecutionFactStatus::Unconfirmed,
+            None,
+        );
         match state
             .v3_durable_ingress
             .try_enqueue(task.shard_id, task.into())
@@ -4508,7 +4862,7 @@ async fn run_v3_durable_worker(
     #[inline]
     fn build_v3_durable_accepted_line(task: &V3DurableTask, event_at_ms: u64) -> Vec<u8> {
         let mut out = Vec::with_capacity(
-            160 + task.session_id.len() + task.account_id.len().saturating_mul(2),
+            192 + task.session_id.len() + task.account_id.len().saturating_mul(2),
         );
         let symbol_key = u64::from_le_bytes(task.position_symbol_key);
         out.extend_from_slice(b"{\"type\":\"V3DurableAccepted\",\"at\":");
@@ -4528,6 +4882,10 @@ async fn run_v3_durable_worker(
         push_u64_decimal(&mut out, task.attempt_seq);
         out.extend_from_slice(b"\",\"positionSymbolKey\":");
         push_u64_decimal(&mut out, symbol_key);
+        if let Some(intent_id) = task.intent_id.as_deref() {
+            out.extend_from_slice(b",\"intentId\":");
+            push_json_string(&mut out, intent_id);
+        }
         out.extend_from_slice(b",\"positionDeltaQty\":");
         push_i64_decimal(&mut out, task.position_delta_qty);
         out.extend_from_slice(b",\"shardId\":");
@@ -4556,11 +4914,13 @@ async fn run_v3_durable_worker(
         let V3DurableTask {
             session_id,
             account_id,
+            execution_run_id,
             intent_id,
             model_id,
             effective_risk_budget_ref,
             actual_policy,
             position_symbol_key,
+            position_delta_qty,
             session_seq,
             received_at_ns,
             ..
@@ -4577,6 +4937,11 @@ async fn run_v3_durable_worker(
             .push_path_tag("v3")
             .push_path_tag("durable")
             .push_path_tag("feedback");
+            let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
+                event.with_execution_run_id(execution_run_id)
+            } else {
+                event
+            };
             let event = if let Some(intent_id) = intent_id.as_deref() {
                 event.with_intent_id(intent_id)
             } else {
@@ -4587,13 +4952,12 @@ async fn run_v3_durable_worker(
             } else {
                 event
             };
-            let event = if let Some(effective_risk_budget_ref) =
-                effective_risk_budget_ref.as_deref()
-            {
-                event.with_effective_risk_budget_ref(effective_risk_budget_ref)
-            } else {
-                event
-            };
+            let event =
+                if let Some(effective_risk_budget_ref) = effective_risk_budget_ref.as_deref() {
+                    event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+                } else {
+                    event
+                };
             let event = if let Some(actual_policy) = actual_policy.as_deref() {
                 event.with_actual_policy(actual_policy.clone())
             } else {
@@ -4605,6 +4969,53 @@ async fn run_v3_durable_worker(
                 event.durable_rejected(now_ns, outcome.reject_reason)
             };
             publish_quant_feedback(&state, event);
+        }
+        maybe_append_strategy_execution_fact(
+            &state,
+            execution_run_id.as_deref(),
+            intent_id.as_deref(),
+            model_id.as_deref(),
+            account_id.as_ref(),
+            session_id.as_ref(),
+            Some(session_seq),
+            render_v3_symbol_key(position_symbol_key).as_str(),
+            Some(position_delta_qty),
+            if outcome.durable_done_ns > 0 {
+                outcome.durable_done_ns
+            } else {
+                now_ns
+            },
+            if outcome.durable_done_ns > 0 {
+                StrategyExecutionFactStatus::DurableAccepted
+            } else {
+                StrategyExecutionFactStatus::DurableRejected
+            },
+            (outcome.durable_done_ns == 0).then_some(outcome.reject_reason),
+        );
+        if let Some(intent_id) = intent_id.as_deref() {
+            let parent_event = if outcome.durable_done_ns > 0 {
+                state
+                    .strategy_runtime_store
+                    .record_child_durable_accepted(intent_id, outcome.durable_done_ns)
+            } else {
+                state.strategy_runtime_store.record_child_durable_rejected(
+                    intent_id,
+                    now_ns,
+                    outcome.reject_reason,
+                )
+            };
+            if let Some(parent) = state.strategy_runtime_store.get_by_child(intent_id) {
+                append_algo_runtime_snapshot(&state, &parent);
+            }
+            if let Some(event) = parent_event {
+                publish_quant_feedback(
+                    &state,
+                    event
+                        .push_path_tag("strategy")
+                        .push_path_tag("algo_parent")
+                        .push_path_tag("feedback"),
+                );
+            }
         }
         if outcome.durable_done_ns > 0 {
             state.v3_confirm_store.mark_durable_accepted_in_lane(
@@ -6002,6 +6413,7 @@ mod tests {
         V3OrderTask {
             session_id: Arc::<str>::from(session_id),
             account_id: Arc::<str>::from(account_id),
+            execution_run_id: None,
             intent_id: None,
             model_id: None,
             effective_risk_budget_ref: None,
@@ -6030,6 +6442,7 @@ mod tests {
             let task = V3DurableTask {
                 session_id: Arc::<str>::from(format!("sess-{}", shard_id)),
                 account_id: Arc::<str>::from(format!("acc-{}", shard_id)),
+                execution_run_id: None,
                 intent_id: None,
                 model_id: None,
                 effective_risk_budget_ref: None,

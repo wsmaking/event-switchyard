@@ -12,7 +12,7 @@ mod strategy_intent;
 use order::{OrderType, TimeInForce};
 use strategy_intent::{
     ExecutionPolicyKind, IntentUrgency, RiskBudgetRef, STRATEGY_INTENT_SCHEMA_VERSION,
-    StrategyIntent,
+    StrategyIntent, StrategyRecoveryPolicy,
 };
 
 fn main() {
@@ -86,6 +86,9 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
                 version: 3,
             }),
             model_id: Some("model-export-1".to_string()),
+            execution_run_id: Some("run-export-1".to_string()),
+            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            algo: None,
             created_at_ns: 100,
             expires_at_ns: 1_000,
         }),
@@ -107,6 +110,9 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
                 version: 1,
             }),
             model_id: Some("model-export-2".to_string()),
+            execution_run_id: Some("run-export-2".to_string()),
+            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            algo: None,
             created_at_ns: 200,
             expires_at_ns: 1_200,
         }),
@@ -128,6 +134,9 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
                 version: 2,
             }),
             model_id: Some("model-export-3".to_string()),
+            execution_run_id: Some("run-export-3".to_string()),
+            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            algo: None,
             created_at_ns: 300,
             expires_at_ns: 1_300,
         }),

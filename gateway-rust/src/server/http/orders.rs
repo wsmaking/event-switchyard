@@ -26,7 +26,10 @@ use std::{
     time::Duration,
 };
 
-use super::{AppState, AuthErrorResponse, V3OrderTask, publish_quant_feedback};
+use super::{
+    AppState, AuthErrorResponse, V3OrderTask, maybe_append_strategy_execution_fact,
+    publish_quant_feedback,
+};
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
 type OrderResponseResult =
@@ -548,12 +551,16 @@ fn exceeds_strategy_notional_limit(qty: u64, price: u64, max_notional: u64) -> b
 }
 
 fn feedback_metadata<'a>(
+    execution_run_id: Option<&'a str>,
     intent_id: Option<&'a str>,
     model_id: Option<&'a str>,
-) -> (Option<&'a str>, Option<&'a str>) {
+) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+    let execution_run_id = execution_run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let intent_id = intent_id.map(str::trim).filter(|value| !value.is_empty());
     let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
-    (intent_id, model_id)
+    (execution_run_id, intent_id, model_id)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -841,6 +848,7 @@ pub(super) fn process_order_v3_hot_path_with_strategy_context(
         account_id,
         session_id,
         V3HotRiskInput::from_order_request(&req),
+        req.execution_run_id.as_deref(),
         req.intent_id.as_deref(),
         req.model_id.as_deref(),
         actual_policy,
@@ -863,6 +871,7 @@ pub(super) fn process_order_v3_hot_path_tcp(
         account_id,
         session_id,
         V3HotRiskInput::from_tcp(decoded),
+        None,
         decoded.intent_id,
         decoded.model_id,
         None,
@@ -878,6 +887,7 @@ fn process_order_v3_hot_path_with_input(
     account_id: &str,
     session_id: &str,
     risk_input: V3HotRiskInput,
+    execution_run_id: Option<&str>,
     intent_id: Option<&str>,
     model_id: Option<&str>,
     actual_policy: Option<Arc<ShadowPolicyView>>,
@@ -907,17 +917,20 @@ fn process_order_v3_hot_path_with_input(
         let parse_elapsed = now_nanos().saturating_sub(parse_t0) / 1_000;
         state.v3_stage_parse_hist.record(parse_elapsed);
     }
-    let (intent_id, model_id) = feedback_metadata(intent_id, model_id);
+    let symbol = risk_input
+        .symbol_key
+        .map(render_v3_symbol_key)
+        .unwrap_or_default();
+    let (execution_run_id, intent_id, model_id) =
+        feedback_metadata(execution_run_id, intent_id, model_id);
     // Strategy submit can mark high-urgency flow, but only soft admission is relaxable.
     let strategy_soft_bypass = strategy_allows_soft_admission_bypass(actual_policy.as_deref());
     let rejected_feedback_context = state.quant_feedback_exporter.is_enabled().then(|| {
         (
             session_id.to_string(),
             account_id.to_string(),
-            risk_input
-                .symbol_key
-                .map(render_v3_symbol_key)
-                .unwrap_or_default(),
+            symbol.clone(),
+            execution_run_id.map(str::to_string),
             intent_id.map(str::to_string),
             model_id.map(str::to_string),
             effective_risk_budget_ref.as_deref().map(str::to_string),
@@ -929,6 +942,7 @@ fn process_order_v3_hot_path_with_input(
             session_id,
             account_id,
             symbol,
+            execution_run_id,
             intent_id,
             model_id,
             effective_risk_budget_ref,
@@ -943,6 +957,11 @@ fn process_order_v3_hot_path_with_input(
                 received_at_ns,
                 reason,
             );
+            let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
+                event.with_execution_run_id(execution_run_id)
+            } else {
+                event
+            };
             let event = if let Some(intent_id) = intent_id.as_deref() {
                 event.with_intent_id(intent_id)
             } else {
@@ -969,6 +988,28 @@ fn process_order_v3_hot_path_with_input(
             .push_path_tag("feedback");
             publish_quant_feedback(state, event);
         }
+        maybe_append_strategy_execution_fact(
+            state,
+            execution_run_id,
+            intent_id,
+            model_id,
+            account_id,
+            session_id,
+            (session_seq != 0).then_some(session_seq),
+            symbol.as_str(),
+            risk_input.symbol_key.map(|_| {
+                if risk_input.side == 1 {
+                    risk_input.qty as i64
+                } else if risk_input.side == 2 {
+                    -(risk_input.qty as i64)
+                } else {
+                    0
+                }
+            }),
+            received_at_ns,
+            super::StrategyExecutionFactStatus::Rejected,
+            Some(reason),
+        );
     };
 
     if ingress.is_global_killed() {
@@ -1425,6 +1466,7 @@ fn process_order_v3_hot_path_with_input(
     let task = V3OrderTask {
         session_id: Arc::clone(&session_id_ref),
         account_id: Arc::clone(&account_id_ref),
+        execution_run_id: execution_run_id.map(Arc::<str>::from),
         intent_id: intent_id.map(Arc::<str>::from),
         model_id: model_id.map(Arc::<str>::from),
         effective_risk_budget_ref: effective_risk_budget_ref.clone(),
@@ -1440,6 +1482,7 @@ fn process_order_v3_hot_path_with_input(
         (
             Arc::clone(&task.session_id),
             Arc::clone(&task.account_id),
+            task.execution_run_id.clone(),
             task.intent_id.clone(),
             task.model_id.clone(),
             task.effective_risk_budget_ref.clone(),
@@ -1461,6 +1504,7 @@ fn process_order_v3_hot_path_with_input(
             if let Some((
                 session_id,
                 account_id,
+                execution_run_id,
                 intent_id,
                 model_id,
                 effective_risk_budget_ref,
@@ -1480,6 +1524,11 @@ fn process_order_v3_hot_path_with_input(
                 .push_path_tag("v3")
                 .push_path_tag(path_tag)
                 .push_path_tag("feedback");
+                let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
+                    event.with_execution_run_id(execution_run_id)
+                } else {
+                    event
+                };
                 let event = if let Some(intent_id) = intent_id.as_deref() {
                     event.with_intent_id(intent_id)
                 } else {
@@ -2872,6 +2921,17 @@ impl VolatileOrderResponse {
         }
     }
 
+    pub(super) fn algo_runtime_scheduled(session_id: &str, received_at_ns: u64) -> Self {
+        Self {
+            session_id: PooledJsonString::from_str(session_id),
+            session_seq: None,
+            attempt_id: None,
+            received_at_ns,
+            status: "ALGO_RUNTIME_SCHEDULED",
+            reason: None,
+        }
+    }
+
     fn accepted(session_id: String, session_seq: u64, received_at_ns: u64) -> Self {
         Self {
             session_id: PooledJsonString::from_str(&session_id),
@@ -2892,6 +2952,18 @@ impl VolatileOrderResponse {
             status,
             reason: Some(PooledJsonString::from_str(reason)),
         }
+    }
+
+    pub(super) fn session_seq(&self) -> Option<u64> {
+        self.session_seq
+    }
+
+    pub(super) fn status_text(&self) -> &'static str {
+        self.status
+    }
+
+    pub(super) fn reason_text(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 }
 
@@ -2978,19 +3050,27 @@ impl From<OrderSnapshot> for OrderSnapshotResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::AuditLog;
+    use crate::audit::{AuditEvent, AuditLog};
     use crate::backpressure::BackpressureConfig;
     use crate::bus::BusPublisher;
     use crate::engine::FastPathEngine;
-    use crate::order::{OrderType, TimeInForce};
+    use crate::order::{OrderRequest, OrderType, TimeInForce};
     use crate::sse::SseHub;
     use crate::store::{OrderIdMap, OrderStatus, OrderStore, ShardedOrderStore};
+    use crate::strategy::algo::{
+        AlgoExecutionPlan, AlgoExecutionSlice, STRATEGY_ALGO_PLAN_SCHEMA_VERSION,
+    };
     use crate::strategy::config::{
         AccountRiskBudget, ExecutionConfigSnapshot, ExecutionPolicyConfig, KillSwitchPolicy,
         SymbolExecutionOverride, UrgencyOverride, VenuePreference,
     };
     use crate::strategy::intent::{
-        ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
+        AlgoExecutionSpec, ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION,
+        StrategyIntent, StrategyRecoveryPolicy,
+    };
+    use crate::strategy::runtime::{
+        AlgoChildStatus, AlgoParentExecution, AlgoParentStatus,
+        STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE,
     };
     use crate::strategy::shadow::ShadowScoreComponent;
     use crate::strategy::shadow::{
@@ -3003,6 +3083,7 @@ mod tests {
     use hmac::{Hmac, Mac};
     use serde::Deserialize;
     use serde::de::DeserializeOwned;
+    use serde_json::json;
     use sha2::Sha256;
     use std::collections::{HashMap, HashSet};
     use std::fs;
@@ -3079,6 +3160,9 @@ mod tests {
             ),
             strategy_shadow_store: Arc::new(
                 crate::store::strategy_shadow_store::StrategyShadowStore::default(),
+            ),
+            strategy_runtime_store: Arc::new(
+                crate::store::strategy_runtime_store::StrategyRuntimeStore::default(),
             ),
             quant_feedback_exporter: Arc::new(crate::strategy::sink::FeedbackExporter::disabled()),
             ack_hist: Arc::new(LatencyHistogram::new()),
@@ -3312,6 +3396,28 @@ mod tests {
         let wal_path =
             std::env::temp_dir().join(format!("gateway-rust-orders-v3-int-{}.log", now_nanos()));
         let audit_log = Arc::new(AuditLog::new(wal_path).expect("create audit log"));
+        build_test_state_with_v3_pipeline_and_audit_log(
+            audit_log,
+            confirm_timeout_ms,
+            confirm_ttl_ms,
+            loss_scan_interval_ms,
+            durable_lane_count,
+            durable_lane_capacity,
+        )
+    }
+
+    fn build_test_state_with_v3_pipeline_and_audit_log(
+        audit_log: Arc<AuditLog>,
+        confirm_timeout_ms: u64,
+        confirm_ttl_ms: u64,
+        loss_scan_interval_ms: u64,
+        durable_lane_count: usize,
+        durable_lane_capacity: usize,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<super::super::V3OrderTask>,
+        Vec<tokio::sync::mpsc::Receiver<super::super::V3DurableTask>>,
+    ) {
         let mut state = build_test_state_with_audit_log(audit_log);
         let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(1024);
         let shard = super::super::V3ShardIngress::new(ingress_tx, 1024);
@@ -3359,7 +3465,10 @@ mod tests {
         soft_reject_pct: u64,
         hard_reject_pct: u64,
         kill_reject_pct: u64,
-    ) -> (AppState, tokio::sync::mpsc::Receiver<super::super::V3OrderTask>) {
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<super::super::V3OrderTask>,
+    ) {
         let mut state = build_test_state();
         let capacity = max_depth.max(1) as usize;
         let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(capacity);
@@ -3383,6 +3492,7 @@ mod tests {
             let task = super::super::V3OrderTask {
                 session_id: Arc::<str>::from(format!("seed-sess-{seq}")),
                 account_id: Arc::<str>::from("seed-acc"),
+                execution_run_id: None,
                 intent_id: None,
                 model_id: None,
                 effective_risk_budget_ref: None,
@@ -3457,6 +3567,7 @@ mod tests {
             client_order_id: Some(client_order_id.to_string()),
             intent_id: None,
             model_id: None,
+            execution_run_id: None,
         }
     }
 
@@ -3479,9 +3590,88 @@ mod tests {
                 version: 3,
             }),
             model_id: Some("model-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            algo: None,
             created_at_ns: 10,
             expires_at_ns: 123_000_000,
         }
+    }
+
+    fn twap_strategy_intent_fixture(start_at_ns: u64) -> StrategyIntent {
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = ExecutionPolicyKind::Twap;
+        intent.time_in_force = TimeInForce::Gtc;
+        intent.algo = Some(AlgoExecutionSpec {
+            slice_count: Some(4),
+            slice_interval_ns: Some(1),
+            volume_curve_bps: vec![],
+            expected_market_volume: vec![],
+            participation_target_bps: None,
+            start_at_ns: Some(start_at_ns),
+        });
+        intent
+    }
+
+    fn replay_runtime_fixture(child_count: usize, start_at_ns: u64) -> AlgoParentExecution {
+        let qty_per_child = 100 / child_count.max(1) as u64;
+        let slices = (0..child_count)
+            .map(|idx| AlgoExecutionSlice {
+                child_intent_id: format!("intent-1::child-{:02}", idx + 1),
+                sequence: idx as u32 + 1,
+                qty: qty_per_child,
+                send_at_ns: start_at_ns.saturating_add(idx as u64),
+                weight_bps: None,
+                expected_market_volume: None,
+                participation_target_bps: None,
+            })
+            .collect::<Vec<_>>();
+        AlgoParentExecution::from_plan(
+            &AlgoExecutionPlan {
+                schema_version: STRATEGY_ALGO_PLAN_SCHEMA_VERSION,
+                parent_intent_id: "intent-1".to_string(),
+                policy: ExecutionPolicyKind::Twap,
+                total_qty: 100,
+                child_count: slices.len() as u32,
+                start_at_ns,
+                slice_interval_ns: 1,
+                slices,
+            },
+            "acc-1".to_string(),
+            "sess-1".to_string(),
+            "AAPL".to_string(),
+            Some("model-1".to_string()),
+            Some("run-1".to_string()),
+            StrategyRecoveryPolicy::GatewayManagedResume,
+            OrderRequest {
+                symbol: "AAPL".to_string(),
+                side: "BUY".to_string(),
+                order_type: OrderType::Limit,
+                qty: 100,
+                price: Some(15_000),
+                time_in_force: TimeInForce::Gtc,
+                expire_at: None,
+                client_order_id: None,
+                intent_id: Some("intent-1".to_string()),
+                model_id: Some("model-1".to_string()),
+                execution_run_id: Some("run-1".to_string()),
+            },
+            Some("budget-42".to_string()),
+            None,
+            None,
+            start_at_ns.saturating_sub(10),
+        )
+    }
+
+    fn strategy_runtime_snapshot_line(runtime: &AlgoParentExecution, at: u64) -> String {
+        serde_json::to_string(&AuditEvent {
+            event_type: STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE.to_string(),
+            at,
+            account_id: runtime.account_id.clone(),
+            order_id: None,
+            data: serde_json::to_value(runtime).expect("serialize runtime"),
+        })
+        .expect("serialize runtime event")
     }
 
     fn wait_for_feedback_lines(path: &PathBuf, min_lines: usize) -> String {
@@ -3825,6 +4015,7 @@ mod tests {
                 client_order_id: None,
                 intent_id: None,
                 model_id: None,
+                execution_run_id: None,
             };
             let account_ref = state.intern_v3_account_id("fixture-risk");
 
@@ -4009,6 +4200,7 @@ mod tests {
                 client_order_id: Some(format!("cid_tif_{}", case.id)),
                 intent_id: None,
                 model_id: None,
+                execution_run_id: None,
             };
             let (status, Json(resp)) = handle_order(
                 State(state.clone()),
@@ -4128,6 +4320,7 @@ mod tests {
                 client_order_id: None,
                 intent_id: None,
                 model_id: None,
+                execution_run_id: None,
             };
 
             let (allowed, reason, http_status, projected_position_qty) =
@@ -5928,7 +6121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strategy_intent_submit_rejects_unimplemented_algo_policy() {
+    async fn strategy_intent_adapter_returns_twap_algo_plan() {
         let state = build_test_state();
         state
             .strategy_snapshot_store
@@ -5940,24 +6133,269 @@ mod tests {
             })
             .expect("store snapshot");
 
-        let mut intent = strategy_intent_fixture();
-        intent.execution_policy = ExecutionPolicyKind::Twap;
+        let Json(resp) = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(twap_strategy_intent_fixture(1_000)),
+        )
+        .await
+        .expect("algo adapt should succeed");
 
-        let err = super::super::strategy::handle_post_strategy_intent_submit(
+        let algo_plan = resp.algo_plan.expect("algo plan");
+        assert_eq!(algo_plan.policy, ExecutionPolicyKind::Twap);
+        assert_eq!(algo_plan.child_count, 4);
+        assert_eq!(
+            algo_plan
+                .slices
+                .iter()
+                .map(|slice| slice.qty)
+                .collect::<Vec<_>>(),
+            vec![25, 25, 25, 25]
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_schedules_twap_algo_runtime_and_updates_shadow() {
+        let (state, ingress_rx, mut durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-algo-runtime".to_string(),
+                version: 11,
+                applied_at_ns: now_nanos(),
+                shadow_enabled: true,
+                venue_preference: vec![VenuePreference {
+                    symbol: "AAPL".to_string(),
+                    venue: "NASDAQ".to_string(),
+                    rank: 1,
+                }],
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let writer_handle = tokio::spawn(super::super::run_v3_single_writer(
+            0,
+            ingress_rx,
+            state.clone(),
+        ));
+        let durable_handle = tokio::spawn(super::super::run_v3_durable_worker(
+            0,
+            durable_rxs.remove(0),
+            state.clone(),
+            state.v3_durable_worker_batch_max,
+            state.v3_durable_worker_batch_wait_us,
+            super::super::V3DurableWorkerBatchAdaptiveConfig {
+                enabled: state.v3_durable_worker_batch_adaptive,
+                batch_min: state.v3_durable_worker_batch_min,
+                batch_max: state.v3_durable_worker_batch_max,
+                wait_min: Duration::from_micros(state.v3_durable_worker_batch_wait_min_us.max(1)),
+                wait_max: Duration::from_micros(state.v3_durable_worker_batch_wait_us.max(1)),
+                low_util_pct: state.v3_durable_worker_batch_adaptive_low_util_pct,
+                high_util_pct: state.v3_durable_worker_batch_adaptive_high_util_pct,
+            },
+            super::super::V3DurableWorkerPressureConfig::from_env(
+                state.v3_durable_worker_inflight_hard_cap_pct,
+            ),
+        ));
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
             State(state.clone()),
             Json(super::super::strategy::StrategyIntentSubmitRequest {
-                intent,
-                shadow_run_id: None,
+                intent: twap_strategy_intent_fixture(now_nanos()),
+                shadow_run_id: Some("shadow-algo-1".to_string()),
                 predicted_policy: None,
                 predicted_outcome: None,
             }),
         )
         .await
-        .err()
-        .expect("algo policy must reject");
+        .expect("algo runtime submit should succeed");
 
-        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(err.1.0.reason, "STRATEGY_POLICY_NOT_IMPLEMENTED");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.volatile_order.status, "ALGO_RUNTIME_SCHEDULED");
+        assert!(resp.algo_plan.is_some());
+        assert!(resp.algo_runtime.is_some());
+
+        let mut completed = false;
+        for _ in 0..100 {
+            let runtime = state
+                .strategy_runtime_store
+                .get("intent-1")
+                .expect("algo runtime state");
+            if runtime.status == AlgoParentStatus::Completed
+                && runtime.durable_accepted_child_count() == 4
+            {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(completed, "expected algo runtime to complete");
+
+        let Json(runtime_resp) = super::super::strategy::handle_get_strategy_runtime(
+            State(state.clone()),
+            Path("intent-1".to_string()),
+        )
+        .await
+        .expect("runtime endpoint");
+        assert_eq!(runtime_resp.status, AlgoParentStatus::Completed);
+        assert!(
+            runtime_resp
+                .slices
+                .iter()
+                .all(|slice| slice.session_seq.is_some())
+        );
+
+        let shadow = state
+            .strategy_shadow_store
+            .get("shadow-algo-1", "intent-1")
+            .expect("shadow record");
+        assert_eq!(
+            shadow
+                .actual_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.final_status.as_deref()),
+            Some("DURABLE_ACCEPTED")
+        );
+        assert_eq!(shadow.comparison_status, ShadowComparisonStatus::Matched);
+
+        writer_handle.abort();
+        durable_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn strategy_runtime_rebuild_restores_snapshot_and_replays_durable_child() {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-strategy-replay-{}.log", now_nanos()));
+        let mut runtime = replay_runtime_fixture(1, 1_000);
+        runtime.status = AlgoParentStatus::Running;
+        runtime.accepted_at_ns = Some(900);
+        runtime.last_updated_at_ns = 900;
+        runtime.slices[0].status = AlgoChildStatus::VolatileAccepted;
+        runtime.slices[0].session_seq = Some(7);
+        runtime.slices[0].received_at_ns = Some(900);
+
+        let events = vec![
+            strategy_runtime_snapshot_line(&runtime, 1),
+            serde_json::to_string(&AuditEvent {
+                event_type: "V3DurableAccepted".to_string(),
+                at: 2,
+                account_id: runtime.account_id.clone(),
+                order_id: Some("v3/sess-1/7".to_string()),
+                data: json!({
+                    "intentId": runtime.slices[0].child_intent_id,
+                    "positionSymbolKey": 0,
+                    "positionDeltaQty": 0,
+                    "shardId": 0,
+                }),
+            })
+            .expect("serialize durable event"),
+        ]
+        .join("\n");
+        fs::write(&wal_path, format!("{events}\n")).expect("write wal");
+
+        let audit_log = Arc::new(AuditLog::new(&wal_path).expect("create audit log"));
+        let state = build_test_state_with_audit_log(audit_log);
+
+        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        assert_eq!(stats.parent_restored, 1);
+        assert_eq!(stats.durable_child_replayed, 1);
+        assert_eq!(stats.resumed_children, 0);
+
+        let restored = state
+            .strategy_runtime_store
+            .get("intent-1")
+            .expect("restored runtime");
+        assert_eq!(restored.status, AlgoParentStatus::Completed);
+        assert_eq!(restored.slices[0].status, AlgoChildStatus::DurableAccepted);
+        assert_eq!(restored.slices[0].durable_at_ns, Some(2_000_000));
+    }
+
+    #[tokio::test]
+    async fn strategy_runtime_rebuild_resumes_scheduled_children() {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-strategy-resume-{}.log", now_nanos()));
+        let runtime = replay_runtime_fixture(1, 0);
+        fs::write(
+            &wal_path,
+            format!("{}\n", strategy_runtime_snapshot_line(&runtime, 1)),
+        )
+        .expect("write wal");
+
+        let audit_log = Arc::new(AuditLog::new(&wal_path).expect("create audit log"));
+        let (state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline_and_audit_log(audit_log, 500, 60_000, 20, 1, 1_024);
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-replay".to_string(),
+                version: 1,
+                applied_at_ns: now_nanos(),
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        assert_eq!(stats.parent_restored, 1);
+        assert_eq!(stats.resumed_children, 1);
+
+        let mut resumed = false;
+        for _ in 0..100 {
+            let runtime = state
+                .strategy_runtime_store
+                .get("intent-1")
+                .expect("runtime after resume");
+            if runtime.slices[0].status != AlgoChildStatus::Scheduled {
+                resumed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(resumed, "expected scheduled child to resume");
+
+        let runtime = state
+            .strategy_runtime_store
+            .get("intent-1")
+            .expect("runtime after resume");
+        assert!(
+            matches!(
+                runtime.slices[0].status,
+                AlgoChildStatus::Dispatching | AlgoChildStatus::VolatileAccepted
+            ),
+            "unexpected child status: {:?}",
+            runtime.slices[0].status
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_runtime_rebuild_pauses_no_auto_resume_parent() {
+        let wal_path =
+            std::env::temp_dir().join(format!("gateway-rust-strategy-pause-{}.log", now_nanos()));
+        let mut runtime = replay_runtime_fixture(1, 0);
+        runtime.recovery_policy = StrategyRecoveryPolicy::NoAutoResume;
+        fs::write(
+            &wal_path,
+            format!("{}\n", strategy_runtime_snapshot_line(&runtime, 1)),
+        )
+        .expect("write wal");
+
+        let audit_log = Arc::new(AuditLog::new(&wal_path).expect("create audit log"));
+        let (state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline_and_audit_log(audit_log, 500, 60_000, 20, 1, 1_024);
+
+        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        assert_eq!(stats.parent_restored, 1);
+        assert_eq!(stats.resumed_children, 0);
+
+        let paused = state
+            .strategy_runtime_store
+            .get("intent-1")
+            .expect("paused runtime");
+        assert_eq!(paused.status, AlgoParentStatus::Paused);
+        assert_eq!(
+            paused.final_reason.as_deref(),
+            Some("STRATEGY_NO_AUTO_RESUME_ON_RESTART")
+        );
+        assert_eq!(paused.slices[0].status, AlgoChildStatus::Scheduled);
     }
 
     #[tokio::test]
@@ -5981,7 +6419,10 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_BACKPRESSURE_SOFT")
         );
     }
@@ -6031,7 +6472,10 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_BACKPRESSURE_HARD")
         );
         assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
@@ -6063,7 +6507,10 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_DURABLE_CONTROLLER_SOFT")
         );
     }
@@ -6124,7 +6571,10 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_DURABLE_CONTROLLER_HARD")
         );
         assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
@@ -6159,7 +6609,10 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_DURABLE_BACKPRESSURE_SOFT")
         );
     }
@@ -6226,7 +6679,10 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.volatile_order.status, "REJECTED");
         assert_eq!(
-            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            resp.volatile_order
+                .reason
+                .as_ref()
+                .map(|value| value.as_str()),
             Some("V3_DURABLE_CONFIRM_AGE_SOFT")
         );
     }

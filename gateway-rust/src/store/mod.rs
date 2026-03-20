@@ -9,6 +9,7 @@
 
 mod id_map;
 mod sharded;
+pub mod strategy_runtime_store;
 pub mod strategy_shadow_store;
 pub mod strategy_snapshot;
 

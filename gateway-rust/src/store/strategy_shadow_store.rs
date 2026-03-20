@@ -200,12 +200,16 @@ impl StrategyShadowStore {
             summary.push_sample(record, score);
         }
         summary.average_score_bps = summary.total_score_bps as f64 / summary.record_count as f64;
-        summary
-            .top_positive
-            .sort_by(|a, b| b.score_bps.cmp(&a.score_bps).then_with(|| b.evaluated_at_ns.cmp(&a.evaluated_at_ns)));
-        summary
-            .top_negative
-            .sort_by(|a, b| a.score_bps.cmp(&b.score_bps).then_with(|| b.evaluated_at_ns.cmp(&a.evaluated_at_ns)));
+        summary.top_positive.sort_by(|a, b| {
+            b.score_bps
+                .cmp(&a.score_bps)
+                .then_with(|| b.evaluated_at_ns.cmp(&a.evaluated_at_ns))
+        });
+        summary.top_negative.sort_by(|a, b| {
+            a.score_bps
+                .cmp(&b.score_bps)
+                .then_with(|| b.evaluated_at_ns.cmp(&a.evaluated_at_ns))
+        });
         summary.top_positive.truncate(3);
         summary.top_negative.truncate(3);
         Some(summary)
@@ -289,11 +293,11 @@ mod tests {
     use super::{StrategyShadowMetrics, StrategyShadowStore};
     use crate::strategy::config::ExecutionPolicyConfig;
     use crate::strategy::feedback::FeedbackEvent;
+    use crate::strategy::intent::ExecutionPolicyKind;
     use crate::strategy::shadow::{
         SHADOW_RECORD_SCHEMA_VERSION, ShadowComparisonStatus, ShadowOutcomeView, ShadowPolicyView,
         ShadowRecord,
     };
-    use crate::strategy::intent::ExecutionPolicyKind;
 
     fn shadow_fixture() -> ShadowRecord {
         ShadowRecord {
@@ -333,7 +337,10 @@ mod tests {
             .expect("shadow record exists");
         assert_eq!(fetched.session_id, "sess-1");
         assert_eq!(fetched.session_seq, 1);
-        assert_eq!(store.run_ids_for_intent("intent-1"), vec!["shadow-1".to_string()]);
+        assert_eq!(
+            store.run_ids_for_intent("intent-1"),
+            vec!["shadow-1".to_string()]
+        );
     }
 
     #[test]
@@ -479,9 +486,13 @@ mod tests {
         let mut other_run = shadow_fixture();
         other_run.shadow_run_id = "run-2".to_string();
 
-        store.upsert(matched_negative).expect("upsert run-1 matched");
+        store
+            .upsert(matched_negative)
+            .expect("upsert run-1 matched");
         store.upsert(pending_zero).expect("upsert run-1 pending");
-        store.upsert(skipped_positive).expect("upsert run-1 skipped");
+        store
+            .upsert(skipped_positive)
+            .expect("upsert run-1 skipped");
         store.upsert(other_run).expect("upsert run-2");
 
         let summary = store.summary_for_run("run-1").expect("summary");

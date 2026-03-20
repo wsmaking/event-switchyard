@@ -2,8 +2,8 @@
 //!
 //! Minimal implementation for order/account event history.
 
-use aws_sdk_kms::primitives::Blob;
 use aws_sdk_kms::Client as KmsClient;
+use aws_sdk_kms::primitives::Blob;
 use base64::Engine;
 use gateway_core::now_nanos;
 use hmac::{Hmac, Mac};
@@ -90,7 +90,9 @@ fn parse_env_u64(key: &str) -> Option<u64> {
 
 #[inline]
 fn parse_env_usize(key: &str) -> Option<usize> {
-    std::env::var(key).ok().and_then(|v| v.parse::<usize>().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
 }
 
 #[inline]
@@ -567,8 +569,9 @@ impl AuditLog {
             .max(1);
         let fdatasync_coalesce_us = parse_lane_override_u64("AUDIT_FDATASYNC_COALESCE_US", lane_id)
             .unwrap_or(self.fdatasync_coalesce_us);
-        let fdatasync_max_defer_us = parse_lane_override_u64("AUDIT_FDATASYNC_MAX_DEFER_US", lane_id)
-            .unwrap_or(self.fdatasync_max_defer_us);
+        let fdatasync_max_defer_us =
+            parse_lane_override_u64("AUDIT_FDATASYNC_MAX_DEFER_US", lane_id)
+                .unwrap_or(self.fdatasync_max_defer_us);
         let fdatasync_max_inflight_age_default = fdatasync_max_defer_us
             .max(max_wait_us.saturating_mul(8))
             .max(1_000);
@@ -576,24 +579,21 @@ impl AuditLog {
             parse_lane_override_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US", lane_id)
                 .or_else(|| parse_env_u64("AUDIT_FDATASYNC_MAX_INFLIGHT_AGE_US"))
                 .unwrap_or(fdatasync_max_inflight_age_default);
-        let target_batch_bytes = parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES", lane_id)
-            .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES"))
-            .unwrap_or(64 * 1024)
-            .max(1_024);
-        let min_target_batch_bytes = parse_lane_override_usize(
-            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN",
-            lane_id,
-        )
-        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN"))
-        .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
-        .max(1_024);
-        let max_target_batch_bytes = parse_lane_override_usize(
-            "AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX",
-            lane_id,
-        )
-        .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX"))
-        .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
-        .max(min_target_batch_bytes);
+        let target_batch_bytes =
+            parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES", lane_id)
+                .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES"))
+                .unwrap_or(64 * 1024)
+                .max(1_024);
+        let min_target_batch_bytes =
+            parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN", lane_id)
+                .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MIN"))
+                .unwrap_or((target_batch_bytes / 4).max(4 * 1024))
+                .max(1_024);
+        let max_target_batch_bytes =
+            parse_lane_override_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX", lane_id)
+                .or_else(|| parse_env_usize("AUDIT_FDATASYNC_TARGET_BATCH_BYTES_MAX"))
+                .unwrap_or((target_batch_bytes.saturating_mul(8)).max(target_batch_bytes))
+                .max(min_target_batch_bytes);
         let fdatasync_max_pending_bytes =
             parse_lane_override_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES", lane_id)
                 .or_else(|| parse_env_usize("AUDIT_FDATASYNC_MAX_PENDING_BYTES"))

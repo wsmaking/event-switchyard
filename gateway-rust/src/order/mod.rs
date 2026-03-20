@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 注文タイプ
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderType {
     Limit,
@@ -14,7 +14,7 @@ pub enum OrderType {
 }
 
 /// TimeInForce
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TimeInForce {
     Gtc,
@@ -33,7 +33,7 @@ impl Default for TimeInForce {
 ///
 /// Kotlin Gateway の CreateOrderRequest と互換。
 /// account_id は JWT トークンから取得するため、リクエストボディには含めない。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderRequest {
     /// 銘柄コード
@@ -63,6 +63,9 @@ pub struct OrderRequest {
     /// strategy 側の model ID
     #[serde(default)]
     pub model_id: Option<String>,
+    /// strategy / execution 側の execution run ID
+    #[serde(default)]
+    pub execution_run_id: Option<String>,
 }
 
 impl OrderRequest {

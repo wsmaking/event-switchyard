@@ -586,6 +586,7 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
     let strategy_snapshot_risk_budget_count = strategy_snapshot.risk_budget_by_account.len() as u64;
     let strategy_snapshot_venue_preference_count = strategy_snapshot.venue_preference.len() as u64;
     let strategy_shadow_metrics = state.strategy_shadow_store.metrics();
+    let strategy_runtime_metrics = state.strategy_runtime_store.metrics();
 
     let mut snapshot = format!(
         "# HELP gateway_queue_len Current queue length\n\
@@ -943,7 +944,46 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          gateway_strategy_shadow_positive_score_count {}\n\
          # HELP gateway_strategy_shadow_last_evaluated_at_ns Max evaluated_at_ns across shadow records\n\
          # TYPE gateway_strategy_shadow_last_evaluated_at_ns gauge\n\
-         gateway_strategy_shadow_last_evaluated_at_ns {}\n",
+         gateway_strategy_shadow_last_evaluated_at_ns {}\n\
+         # HELP gateway_strategy_runtime_parent_count Current algo parent runtime count\n\
+         # TYPE gateway_strategy_runtime_parent_count gauge\n\
+         gateway_strategy_runtime_parent_count {}\n\
+         # HELP gateway_strategy_runtime_active_parent_count Current active algo parent runtimes\n\
+         # TYPE gateway_strategy_runtime_active_parent_count gauge\n\
+         gateway_strategy_runtime_active_parent_count {}\n\
+         # HELP gateway_strategy_runtime_completed_parent_count Current completed algo parent runtimes\n\
+         # TYPE gateway_strategy_runtime_completed_parent_count gauge\n\
+         gateway_strategy_runtime_completed_parent_count {}\n\
+         # HELP gateway_strategy_runtime_rejected_parent_count Current rejected algo parent runtimes\n\
+         # TYPE gateway_strategy_runtime_rejected_parent_count gauge\n\
+         gateway_strategy_runtime_rejected_parent_count {}\n\
+         # HELP gateway_strategy_runtime_paused_parent_count Current paused algo parent runtimes\n\
+         # TYPE gateway_strategy_runtime_paused_parent_count gauge\n\
+         gateway_strategy_runtime_paused_parent_count {}\n\
+         # HELP gateway_strategy_runtime_created_total Total algo parent runtime creations\n\
+         # TYPE gateway_strategy_runtime_created_total counter\n\
+         gateway_strategy_runtime_created_total {}\n\
+         # HELP gateway_strategy_runtime_child_scheduled_count Current scheduled algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_scheduled_count gauge\n\
+         gateway_strategy_runtime_child_scheduled_count {}\n\
+         # HELP gateway_strategy_runtime_child_dispatching_count Current dispatching algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_dispatching_count gauge\n\
+         gateway_strategy_runtime_child_dispatching_count {}\n\
+         # HELP gateway_strategy_runtime_child_accepted_count Current volatile-accepted algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_accepted_count gauge\n\
+         gateway_strategy_runtime_child_accepted_count {}\n\
+         # HELP gateway_strategy_runtime_child_durable_accepted_count Current durable-accepted algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_durable_accepted_count gauge\n\
+         gateway_strategy_runtime_child_durable_accepted_count {}\n\
+         # HELP gateway_strategy_runtime_child_rejected_count Current rejected algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_rejected_count gauge\n\
+         gateway_strategy_runtime_child_rejected_count {}\n\
+         # HELP gateway_strategy_runtime_child_skipped_count Current skipped algo child orders\n\
+         # TYPE gateway_strategy_runtime_child_skipped_count gauge\n\
+         gateway_strategy_runtime_child_skipped_count {}\n\
+         # HELP gateway_strategy_runtime_last_updated_at_ns Last algo runtime update timestamp in nanoseconds\n\
+         # TYPE gateway_strategy_runtime_last_updated_at_ns gauge\n\
+         gateway_strategy_runtime_last_updated_at_ns {}\n",
         strategy_snapshot_version,
         strategy_snapshot_applied_total,
         strategy_snapshot_last_applied_at_ns,
@@ -962,6 +1002,19 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         strategy_shadow_metrics.zero_score_count,
         strategy_shadow_metrics.positive_score_count,
         strategy_shadow_metrics.last_evaluated_at_ns,
+        strategy_runtime_metrics.parent_count,
+        strategy_runtime_metrics.active_parent_count,
+        strategy_runtime_metrics.completed_parent_count,
+        strategy_runtime_metrics.rejected_parent_count,
+        strategy_runtime_metrics.paused_parent_count,
+        strategy_runtime_metrics.created_total,
+        strategy_runtime_metrics.child_scheduled_count,
+        strategy_runtime_metrics.child_dispatching_count,
+        strategy_runtime_metrics.child_accepted_count,
+        strategy_runtime_metrics.child_durable_accepted_count,
+        strategy_runtime_metrics.child_rejected_count,
+        strategy_runtime_metrics.child_skipped_count,
+        strategy_runtime_metrics.last_updated_at_ns,
     ));
     snapshot.push_str(&format!(
         "# HELP gateway_quant_feedback_enabled Quant feedback export enabled (1/0)\n\

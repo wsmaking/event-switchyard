@@ -15,6 +15,7 @@ pub enum FeedbackEventStatus {
 #[serde(rename_all = "camelCase")]
 pub struct FeedbackEvent {
     pub event_type: FeedbackEventStatus,
+    pub execution_run_id: Option<String>,
     pub intent_id: Option<String>,
     pub model_id: Option<String>,
     #[serde(default)]
@@ -48,6 +49,7 @@ impl FeedbackEvent {
     ) -> Self {
         Self {
             event_type: FeedbackEventStatus::Accepted,
+            execution_run_id: None,
             intent_id: None,
             model_id: None,
             shadow_run_ids: Vec::new(),
@@ -79,6 +81,7 @@ impl FeedbackEvent {
     ) -> Self {
         Self {
             event_type: FeedbackEventStatus::Rejected,
+            execution_run_id: None,
             intent_id: None,
             model_id: None,
             shadow_run_ids: Vec::new(),
@@ -127,6 +130,11 @@ impl FeedbackEvent {
 
     pub fn with_intent_id(mut self, intent_id: impl Into<String>) -> Self {
         self.intent_id = Some(intent_id.into());
+        self
+    }
+
+    pub fn with_execution_run_id(mut self, execution_run_id: impl Into<String>) -> Self {
+        self.execution_run_id = Some(execution_run_id.into());
         self
     }
 
@@ -186,6 +194,7 @@ mod tests {
     #[test]
     fn accepted_feedback_serializes_as_json_line() {
         let event = FeedbackEvent::accepted("sess-1", 7, "acc-1", "AAPL", 123)
+            .with_execution_run_id("run-1")
             .with_intent_id("intent-1")
             .with_model_id("model-a")
             .with_shadow_run_ids(vec!["shadow-1".to_string(), "shadow-2".to_string()])
@@ -211,6 +220,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&line[..line.len() - 1]).expect("parse serialized feedback");
         assert_eq!(value["eventType"], "ACCEPTED");
+        assert_eq!(value["executionRunId"], "run-1");
         assert_eq!(value["intentId"], "intent-1");
         assert_eq!(value["modelId"], "model-a");
         assert_eq!(value["shadowRunIds"][0], "shadow-1");
