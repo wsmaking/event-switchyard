@@ -793,13 +793,7 @@ pub(super) fn process_order_v3_hot_path(
     t0: u64,
 ) -> (StatusCode, VolatileOrderResponse) {
     process_order_v3_hot_path_with_strategy_context(
-        state,
-        account_id,
-        session_id,
-        req,
-        None,
-        None,
-        t0,
+        state, account_id, session_id, req, None, None, t0,
     )
 }
 
@@ -894,12 +888,8 @@ fn process_order_v3_hot_path_with_input(
                 .unwrap_or_default(),
             intent_id.map(str::to_string),
             model_id.map(str::to_string),
-            effective_risk_budget_ref
-                .as_deref()
-                .map(str::to_string),
-            actual_policy
-                .as_deref()
-                .cloned(),
+            effective_risk_budget_ref.as_deref().map(str::to_string),
+            actual_policy.as_deref().cloned(),
         )
     });
     let emit_rejected_feedback = |session_seq: u64, reason: &'static str, received_at_ns: u64| {
@@ -911,8 +901,7 @@ fn process_order_v3_hot_path_with_input(
             model_id,
             effective_risk_budget_ref,
             actual_policy,
-        )) =
-            &rejected_feedback_context
+        )) = &rejected_feedback_context
         {
             let event = FeedbackEvent::rejected(
                 session_id.as_str(),
@@ -932,13 +921,12 @@ fn process_order_v3_hot_path_with_input(
             } else {
                 event
             };
-            let event = if let Some(effective_risk_budget_ref) =
-                effective_risk_budget_ref.as_deref()
-            {
-                event.with_effective_risk_budget_ref(effective_risk_budget_ref)
-            } else {
-                event
-            };
+            let event =
+                if let Some(effective_risk_budget_ref) = effective_risk_budget_ref.as_deref() {
+                    event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+                } else {
+                    event
+                };
             let event = if let Some(actual_policy) = actual_policy.as_ref() {
                 event.with_actual_policy(actual_policy.clone())
             } else {
@@ -1462,13 +1450,12 @@ fn process_order_v3_hot_path_with_input(
                 } else {
                     event
                 };
-                let event = if let Some(effective_risk_budget_ref) =
-                    effective_risk_budget_ref.as_deref()
-                {
-                    event.with_effective_risk_budget_ref(effective_risk_budget_ref)
-                } else {
-                    event
-                };
+                let event =
+                    if let Some(effective_risk_budget_ref) = effective_risk_budget_ref.as_deref() {
+                        event.with_effective_risk_budget_ref(effective_risk_budget_ref)
+                    } else {
+                        event
+                    };
                 let event = if let Some(actual_policy) = actual_policy.as_deref() {
                     event.with_actual_policy(actual_policy.clone())
                 } else {
@@ -2951,7 +2938,6 @@ impl From<OrderSnapshot> for OrderSnapshotResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::shadow::ShadowScoreComponent;
     use crate::audit::AuditLog;
     use crate::backpressure::BackpressureConfig;
     use crate::bus::BusPublisher;
@@ -2966,6 +2952,7 @@ mod tests {
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
     };
+    use crate::strategy::shadow::ShadowScoreComponent;
     use crate::strategy::shadow::{
         SHADOW_RECORD_SCHEMA_VERSION, ShadowComparisonStatus, ShadowOutcomeView, ShadowPolicyView,
         ShadowRecord,
@@ -4872,13 +4859,8 @@ mod tests {
             Some("model-tcp-1"),
         );
         let decoded = decode_v3_tcp_request(&frame).expect("decode tcp metadata frame");
-        let resp = process_order_v3_hot_path_tcp(
-            &state,
-            "acc-tcp-1",
-            "sess-tcp-1",
-            &decoded,
-            now_nanos(),
-        );
+        let resp =
+            process_order_v3_hot_path_tcp(&state, "acc-tcp-1", "sess-tcp-1", &decoded, now_nanos());
 
         assert_eq!(resp[0], V3_TCP_KIND_ACCEPT);
         assert_eq!(u16::from_le_bytes([resp[2], resp[3]]), 202);
@@ -5768,6 +5750,7 @@ mod tests {
         assert_eq!(resp.order_request.intent_id.as_deref(), Some("intent-1"));
         assert_eq!(resp.order_request.model_id.as_deref(), Some("model-1"));
         assert_eq!(resp.order_request.expire_at, Some(123));
+        assert!(resp.policy_adjustments.is_empty());
         assert_eq!(resp.effective_risk_budget_ref.as_deref(), Some("budget-42"));
         assert!(resp.shadow_enabled);
         let policy = resp
@@ -5809,6 +5792,82 @@ mod tests {
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.reason, "STRATEGY_SNAPSHOT_STALE");
         assert_eq!(err.1.0.current_snapshot_id, "snapshot-stale");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_adapter_normalizes_passive_ioc_to_gtc() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-passive".to_string(),
+                version: 6,
+                applied_at_ns: now_nanos(),
+                default_execution_policy: ExecutionPolicyConfig {
+                    policy: ExecutionPolicyKind::Passive,
+                    prefer_passive: true,
+                    post_only: false,
+                    max_slippage_bps: Some(6),
+                    participation_rate_bps: Some(900),
+                },
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = ExecutionPolicyKind::Passive;
+        intent.time_in_force = TimeInForce::Ioc;
+
+        let Json(resp) = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(intent),
+        )
+        .await
+        .expect("adapt passive intent");
+
+        assert_eq!(resp.order_request.time_in_force, TimeInForce::Gtc);
+        assert_eq!(resp.order_request.expire_at, None);
+        assert_eq!(resp.policy_adjustments, vec!["PASSIVE_NORMALIZED_TO_GTC"]);
+        assert_eq!(
+            resp.effective_policy
+                .execution_policy
+                .as_ref()
+                .map(|policy| policy.policy),
+            Some(ExecutionPolicyKind::Passive)
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_rejects_unimplemented_algo_policy() {
+        let state = build_test_state();
+        state
+            .strategy_snapshot_store
+            .replace(ExecutionConfigSnapshot {
+                snapshot_id: "snapshot-algo".to_string(),
+                version: 10,
+                applied_at_ns: now_nanos(),
+                ..ExecutionConfigSnapshot::default()
+            })
+            .expect("store snapshot");
+
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = ExecutionPolicyKind::Twap;
+
+        let err = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("algo policy must reject");
+
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.1.0.reason, "STRATEGY_POLICY_NOT_IMPLEMENTED");
     }
 
     #[tokio::test]
@@ -5958,6 +6017,7 @@ mod tests {
         assert_eq!(resp.version, 8);
         assert!(resp.shadow_enabled);
         assert!(resp.shadow_seeded);
+        assert!(resp.policy_adjustments.is_empty());
         assert_eq!(resp.shadow_run_id.as_deref(), Some("shadow-submit-1"));
         assert_eq!(resp.order_request.intent_id.as_deref(), Some("intent-1"));
         assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");

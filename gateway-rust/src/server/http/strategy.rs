@@ -6,7 +6,7 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::order::OrderRequest;
+use crate::order::{OrderRequest, OrderType, TimeInForce};
 use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
 use crate::strategy::config::ExecutionConfigSnapshot;
 use crate::strategy::intent::{IntentUrgency, StrategyIntent};
@@ -76,6 +76,7 @@ pub(super) struct StrategyIntentAdaptResponse {
     pub order_request: OrderRequest,
     pub effective_policy: ShadowPolicyView,
     pub effective_risk_budget_ref: Option<String>,
+    pub policy_adjustments: Vec<String>,
     pub shadow_enabled: bool,
 }
 
@@ -111,10 +112,26 @@ pub(super) struct StrategyIntentSubmitResponse {
     pub order_request: OrderRequest,
     pub effective_policy: ShadowPolicyView,
     pub effective_risk_budget_ref: Option<String>,
+    pub policy_adjustments: Vec<String>,
     pub shadow_enabled: bool,
     pub shadow_run_id: Option<String>,
     pub shadow_seeded: bool,
     pub volatile_order: VolatileOrderResponse,
+}
+
+#[derive(Debug)]
+struct AppliedExecutionPolicy {
+    order_request: OrderRequest,
+    adjustments: Vec<&'static str>,
+}
+
+impl AppliedExecutionPolicy {
+    fn adjustment_strings(&self) -> Vec<String> {
+        self.adjustments
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    }
 }
 
 fn snapshot_error(
@@ -236,7 +253,7 @@ fn validate_intent_against_snapshot(
 }
 
 fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
-    let expire_at = if matches!(intent.time_in_force, crate::order::TimeInForce::Gtd) {
+    let expire_at = if matches!(intent.time_in_force, TimeInForce::Gtd) {
         Some(intent.expires_at_ns / 1_000_000)
     } else {
         None
@@ -253,6 +270,82 @@ fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
         intent_id: Some(intent.intent_id.clone()),
         model_id: intent.model_id.clone(),
     }
+}
+
+fn normalize_resting_time_in_force(order_request: &mut OrderRequest) -> bool {
+    if matches!(
+        order_request.time_in_force,
+        TimeInForce::Ioc | TimeInForce::Fok
+    ) {
+        order_request.time_in_force = TimeInForce::Gtc;
+        order_request.expire_at = None;
+        return true;
+    }
+    false
+}
+
+fn normalize_aggressive_market_time_in_force(order_request: &mut OrderRequest) -> bool {
+    if order_request.order_type == OrderType::Market
+        && !matches!(
+            order_request.time_in_force,
+            TimeInForce::Ioc | TimeInForce::Fok
+        )
+    {
+        order_request.time_in_force = TimeInForce::Ioc;
+        order_request.expire_at = None;
+        return true;
+    }
+    false
+}
+
+fn apply_execution_policy_to_order_request(
+    intent: &StrategyIntent,
+    effective_policy: &ShadowPolicyView,
+) -> Result<AppliedExecutionPolicy, &'static str> {
+    let mut order_request = adapt_order_request(intent);
+    let mut adjustments = Vec::new();
+    let Some(policy_cfg) = effective_policy.execution_policy.as_ref() else {
+        return Ok(AppliedExecutionPolicy {
+            order_request,
+            adjustments,
+        });
+    };
+
+    if policy_cfg.post_only {
+        if order_request.order_type != OrderType::Limit {
+            return Err("STRATEGY_POLICY_POST_ONLY_REQUIRES_LIMIT");
+        }
+        if normalize_resting_time_in_force(&mut order_request) {
+            adjustments.push("POST_ONLY_NORMALIZED_TO_GTC");
+        }
+    }
+
+    match policy_cfg.policy {
+        crate::strategy::intent::ExecutionPolicyKind::Default => {}
+        crate::strategy::intent::ExecutionPolicyKind::Passive => {
+            if order_request.order_type != OrderType::Limit {
+                return Err("STRATEGY_POLICY_PASSIVE_REQUIRES_LIMIT");
+            }
+            if normalize_resting_time_in_force(&mut order_request) {
+                adjustments.push("PASSIVE_NORMALIZED_TO_GTC");
+            }
+        }
+        crate::strategy::intent::ExecutionPolicyKind::Aggressive => {
+            if normalize_aggressive_market_time_in_force(&mut order_request) {
+                adjustments.push("AGGRESSIVE_MARKET_NORMALIZED_TO_IOC");
+            }
+        }
+        crate::strategy::intent::ExecutionPolicyKind::Twap
+        | crate::strategy::intent::ExecutionPolicyKind::Vwap
+        | crate::strategy::intent::ExecutionPolicyKind::Pov => {
+            return Err("STRATEGY_POLICY_NOT_IMPLEMENTED");
+        }
+    }
+
+    Ok(AppliedExecutionPolicy {
+        order_request,
+        adjustments,
+    })
 }
 
 fn upsert_shadow_record_for_intent(
@@ -333,14 +426,22 @@ pub(super) async fn handle_post_strategy_intent_adapt(
 
     let effective_policy = resolve_effective_policy(&snapshot, &intent);
     let effective_risk_budget_ref = resolve_effective_risk_budget_ref(&snapshot, &intent);
+    let applied_policy = apply_execution_policy_to_order_request(&intent, &effective_policy)
+        .map_err(|reason| {
+            snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+        })?;
+
+    let policy_adjustments = applied_policy.adjustment_strings();
+    let order_request = applied_policy.order_request;
 
     Ok(Json(StrategyIntentAdaptResponse {
         snapshot_id: snapshot.snapshot_id.clone(),
         version: snapshot.version,
         adapted_at_ns: now_ns,
-        order_request: adapt_order_request(&intent),
+        order_request,
         effective_policy,
         effective_risk_budget_ref,
+        policy_adjustments,
         shadow_enabled: snapshot.shadow_enabled,
     }))
 }
@@ -370,7 +471,12 @@ pub(super) async fn handle_post_strategy_intent_submit(
 
     let effective_policy = resolve_effective_policy(&snapshot, &request.intent);
     let effective_risk_budget_ref = resolve_effective_risk_budget_ref(&snapshot, &request.intent);
-    let order_request = adapt_order_request(&request.intent);
+    let applied_policy =
+        apply_execution_policy_to_order_request(&request.intent, &effective_policy).map_err(
+            |reason| snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason),
+        )?;
+    let order_request = applied_policy.order_request.clone();
+    let policy_adjustments = applied_policy.adjustment_strings();
     let shadow_seeded = if let Some(shadow_run_id) = request.shadow_run_id.as_deref() {
         let replaced = upsert_shadow_record_for_intent(
             &state,
@@ -405,6 +511,7 @@ pub(super) async fn handle_post_strategy_intent_submit(
             order_request,
             effective_policy,
             effective_risk_budget_ref,
+            policy_adjustments,
             shadow_enabled: snapshot.shadow_enabled,
             shadow_run_id: request.shadow_run_id,
             shadow_seeded,
@@ -583,8 +690,8 @@ mod tests {
 
     use super::{
         ShadowRecordUpsertResponse, ShadowRunSummaryResponse, StrategyConfigErrorResponse,
-        StrategyConfigUpdateResponse, StrategyIntentAdaptResponse,
-        StrategyIntentShadowSeedRequest, StrategyIntentSubmitRequest,
+        StrategyConfigUpdateResponse, StrategyIntentAdaptResponse, StrategyIntentShadowSeedRequest,
+        StrategyIntentSubmitRequest,
     };
 
     #[test]
@@ -697,12 +804,14 @@ mod tests {
                 venue: Some("NASDAQ".to_string()),
             },
             effective_risk_budget_ref: Some("budget-1".to_string()),
+            policy_adjustments: vec!["PASSIVE_NORMALIZED_TO_GTC".to_string()],
             shadow_enabled: true,
         })
         .expect("serialize adapt response");
 
         assert!(raw.contains("\"adaptedAtNs\":55"));
         assert!(raw.contains("\"effectiveRiskBudgetRef\":\"budget-1\""));
+        assert!(raw.contains("\"policyAdjustments\":[\"PASSIVE_NORMALIZED_TO_GTC\"]"));
         assert!(raw.contains("\"shadowEnabled\":true"));
     }
 
@@ -774,5 +883,138 @@ mod tests {
         .expect("serialize submit request");
 
         assert!(raw.contains("\"shadowRunId\":\"shadow-1\""));
+    }
+
+    fn strategy_intent_fixture() -> crate::strategy::intent::StrategyIntent {
+        crate::strategy::intent::StrategyIntent {
+            schema_version: crate::strategy::intent::STRATEGY_INTENT_SCHEMA_VERSION,
+            intent_id: "intent-1".to_string(),
+            account_id: "acc-1".to_string(),
+            session_id: "sess-1".to_string(),
+            symbol: "AAPL".to_string(),
+            side: "BUY".to_string(),
+            order_type: crate::order::OrderType::Limit,
+            qty: 100,
+            limit_price: Some(15_000),
+            time_in_force: crate::order::TimeInForce::Gtd,
+            urgency: crate::strategy::intent::IntentUrgency::Normal,
+            execution_policy: crate::strategy::intent::ExecutionPolicyKind::Aggressive,
+            risk_budget_ref: None,
+            model_id: Some("model-1".to_string()),
+            created_at_ns: 10,
+            expires_at_ns: 123_000_000,
+        }
+    }
+
+    #[test]
+    fn execution_policy_hook_normalizes_passive_immediate_tif_to_gtc() {
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Passive;
+        intent.time_in_force = crate::order::TimeInForce::Ioc;
+        let effective_policy = crate::strategy::shadow::ShadowPolicyView {
+            execution_policy: Some(crate::strategy::config::ExecutionPolicyConfig {
+                policy: crate::strategy::intent::ExecutionPolicyKind::Passive,
+                prefer_passive: true,
+                post_only: false,
+                max_slippage_bps: None,
+                participation_rate_bps: None,
+            }),
+            urgency: None,
+            venue: None,
+        };
+
+        let applied = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
+            .expect("passive policy should adapt");
+
+        assert_eq!(
+            applied.order_request.order_type,
+            crate::order::OrderType::Limit
+        );
+        assert_eq!(
+            applied.order_request.time_in_force,
+            crate::order::TimeInForce::Gtc
+        );
+        assert_eq!(applied.order_request.expire_at, None);
+        assert_eq!(applied.adjustments, vec!["PASSIVE_NORMALIZED_TO_GTC"]);
+    }
+
+    #[test]
+    fn execution_policy_hook_rejects_passive_market_order() {
+        let mut intent = strategy_intent_fixture();
+        intent.order_type = crate::order::OrderType::Market;
+        intent.limit_price = None;
+        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Passive;
+        let effective_policy = crate::strategy::shadow::ShadowPolicyView {
+            execution_policy: Some(crate::strategy::config::ExecutionPolicyConfig {
+                policy: crate::strategy::intent::ExecutionPolicyKind::Passive,
+                prefer_passive: true,
+                post_only: false,
+                max_slippage_bps: None,
+                participation_rate_bps: None,
+            }),
+            urgency: None,
+            venue: None,
+        };
+
+        let err = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
+            .err()
+            .expect("passive market must reject");
+
+        assert_eq!(err, "STRATEGY_POLICY_PASSIVE_REQUIRES_LIMIT");
+    }
+
+    #[test]
+    fn execution_policy_hook_normalizes_aggressive_market_time_in_force() {
+        let mut intent = strategy_intent_fixture();
+        intent.order_type = crate::order::OrderType::Market;
+        intent.limit_price = None;
+        intent.time_in_force = crate::order::TimeInForce::Gtd;
+        let effective_policy = crate::strategy::shadow::ShadowPolicyView {
+            execution_policy: Some(crate::strategy::config::ExecutionPolicyConfig {
+                policy: crate::strategy::intent::ExecutionPolicyKind::Aggressive,
+                prefer_passive: false,
+                post_only: false,
+                max_slippage_bps: Some(5),
+                participation_rate_bps: None,
+            }),
+            urgency: None,
+            venue: None,
+        };
+
+        let applied = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
+            .expect("aggressive market should adapt");
+
+        assert_eq!(
+            applied.order_request.time_in_force,
+            crate::order::TimeInForce::Ioc
+        );
+        assert_eq!(applied.order_request.expire_at, None);
+        assert_eq!(
+            applied.adjustments,
+            vec!["AGGRESSIVE_MARKET_NORMALIZED_TO_IOC"]
+        );
+    }
+
+    #[test]
+    fn execution_policy_hook_rejects_unimplemented_algo_policy() {
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
+        let effective_policy = crate::strategy::shadow::ShadowPolicyView {
+            execution_policy: Some(crate::strategy::config::ExecutionPolicyConfig {
+                policy: crate::strategy::intent::ExecutionPolicyKind::Twap,
+                prefer_passive: false,
+                post_only: false,
+                max_slippage_bps: None,
+                participation_rate_bps: Some(250),
+            }),
+            urgency: None,
+            venue: None,
+        };
+
+        let err = super::apply_execution_policy_to_order_request(&intent, &effective_policy)
+            .err()
+            .expect("algo policy must reject");
+
+        assert_eq!(err, "STRATEGY_POLICY_NOT_IMPLEMENTED");
     }
 }
