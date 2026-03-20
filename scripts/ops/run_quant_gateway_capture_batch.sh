@@ -8,6 +8,7 @@ BASE_URL="http://127.0.0.1:8081"
 FEEDBACK_JSONL="var/gateway/quant_feedback.jsonl"
 OUTPUT_DIR="/tmp/quant-gateway-captures"
 SHADOW_RUN_PREFIX="collector"
+MANIFEST_PATH=""
 EXPORT_EXTRA=()
 COLLECT_EXTRA=()
 
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       SHADOW_RUN_PREFIX="$2"
       shift 2
       ;;
+    --manifest)
+      MANIFEST_PATH="$2"
+      shift 2
+      ;;
     --)
       shift
       EXPORT_EXTRA+=("$@")
@@ -45,7 +50,11 @@ INTENTS_DIR="$OUTPUT_DIR/intents"
 CAPTURES_DIR="$OUTPUT_DIR/captures"
 mkdir -p "$INTENTS_DIR" "$CAPTURES_DIR"
 
-scripts/ops/export_quant_strategy_intent_batch.sh --output-dir "$INTENTS_DIR" "${EXPORT_EXTRA[@]}"
+EXPORT_ARGS=(--output-dir "$INTENTS_DIR")
+if [[ -n "$MANIFEST_PATH" ]]; then
+  EXPORT_ARGS+=(--manifest "$MANIFEST_PATH")
+fi
+scripts/ops/export_quant_strategy_intent_batch.sh "${EXPORT_ARGS[@]}" "${EXPORT_EXTRA[@]}"
 scripts/ops/run_collect_quant_feedback_shadow_from_gateway.sh \
   --base-url "$BASE_URL" \
   --input-dir "$INTENTS_DIR" \

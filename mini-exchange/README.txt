@@ -89,6 +89,12 @@ gateway capture batch
 - quant 側で `scripts/ops/run_quant_gateway_capture_batch.sh` を使うと、intent export と gateway submit/feedback/shadow 回収を一度に回せる
 - 出力は `intents/` と `captures/` に分かれ、batch join は `captures/` を入力にする
 
+quant eval gate
+- `scripts/ops/check_quant_eval_gate.sh`
+- fixed scenario manifest は `contracts/fixtures/quant_eval_gate_scenarios.json`
+- `export -> gateway capture -> mini-exchange report -> batch join -> expectation check` を一度に回す
+- 出力は `/tmp/quant-eval-gate_<timestamp>/` 配下に保存される
+
 比較観点
 - `executed_qty`: どれだけ即時に約定したか
 - `resting_qty`: どれだけ板に残ったか
