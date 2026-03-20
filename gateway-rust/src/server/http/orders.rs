@@ -6038,6 +6038,230 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strategy_intent_submit_normal_urgency_rejects_durable_controller_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(1, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(1, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::Normal;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("strategy submit returns durable controller soft response");
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_DURABLE_CONTROLLER_SOFT")
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_bypasses_durable_controller_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(1, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(1, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("high urgency should bypass durable controller soft");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");
+        assert!(resp.volatile_order.session_seq.is_some());
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_does_not_bypass_durable_controller_hard() {
+        let mut state = build_test_state();
+        state.v3_durable_admission_controller_enabled = true;
+        state.v3_durable_admission_level.store(2, Ordering::Relaxed);
+        if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
+            level.store(2, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("hard reject still returns durable controller response");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_DURABLE_CONTROLLER_HARD")
+        );
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_normal_urgency_rejects_durable_backpressure_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_backlog_soft_reject_per_sec = 1_000;
+        state.v3_durable_backlog_hard_reject_per_sec = 2_000;
+        state
+            .v3_durable_backlog_growth_per_sec
+            .store(1_200, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_durable_backlog_growth_per_sec_per_lane.get(0) {
+            gauge.store(1_200, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::Normal;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("strategy submit returns durable backlog soft response");
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_DURABLE_BACKPRESSURE_SOFT")
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_bypasses_durable_backpressure_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_backlog_soft_reject_per_sec = 1_000;
+        state.v3_durable_backlog_hard_reject_per_sec = 2_000;
+        state
+            .v3_durable_backlog_growth_per_sec
+            .store(1_200, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_durable_backlog_growth_per_sec_per_lane.get(0) {
+            gauge.store(1_200, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("high urgency should bypass durable backlog soft");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");
+        assert!(resp.volatile_order.session_seq.is_some());
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_normal_urgency_rejects_durable_confirm_age_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(6_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(6_000, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::Normal;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("strategy submit returns durable confirm age soft response");
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_DURABLE_CONFIRM_AGE_SOFT")
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_bypasses_durable_confirm_age_soft() {
+        let mut state = build_test_state();
+        state.v3_durable_confirm_soft_reject_age_us = 5_000;
+        state.v3_durable_confirm_hard_reject_age_us = 10_000;
+        state
+            .v3_confirm_oldest_inflight_us
+            .store(6_000, Ordering::Relaxed);
+        if let Some(gauge) = state.v3_confirm_oldest_inflight_us_per_lane.get(0) {
+            gauge.store(6_000, Ordering::Relaxed);
+        }
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("high urgency should bypass durable confirm age soft");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");
+        assert!(resp.volatile_order.session_seq.is_some());
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
     async fn strategy_intent_shadow_seed_creates_shadow_record_from_intent() {
         let state = build_test_state();
         state
