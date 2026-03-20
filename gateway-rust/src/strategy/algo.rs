@@ -222,6 +222,8 @@ mod tests {
             risk_budget_ref: None,
             model_id: Some("model-1".to_string()),
             execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(1),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 10,

@@ -66,6 +66,12 @@ pub struct OrderRequest {
     /// strategy / execution 側の execution run ID
     #[serde(default)]
     pub execution_run_id: Option<String>,
+    /// execution 側の stable decision key
+    #[serde(default)]
+    pub decision_key: Option<String>,
+    /// same decision の resend count
+    #[serde(default)]
+    pub decision_attempt_seq: Option<u64>,
 }
 
 impl OrderRequest {
@@ -214,6 +220,25 @@ mod tests {
         }"#;
         let fok: OrderRequest = serde_json::from_str(fok_raw).expect("fok deserialize");
         assert_eq!(fok.time_in_force, super::TimeInForce::Fok);
+    }
+
+    #[test]
+    fn order_request_accepts_decision_metadata() {
+        let raw = r#"{
+            "symbol":"AAPL",
+            "side":"BUY",
+            "type":"LIMIT",
+            "qty":100,
+            "price":15000,
+            "executionRunId":"run-1",
+            "decisionKey":"dec-007",
+            "decisionAttemptSeq":2
+        }"#;
+        let parsed: OrderRequest = serde_json::from_str(raw).expect("decision deserialize");
+
+        assert_eq!(parsed.execution_run_id.as_deref(), Some("run-1"));
+        assert_eq!(parsed.decision_key.as_deref(), Some("dec-007"));
+        assert_eq!(parsed.decision_attempt_seq, Some(2));
     }
 }
 

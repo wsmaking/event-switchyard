@@ -1,4 +1,5 @@
 pub mod algo;
+pub mod catchup;
 pub mod config;
 pub mod feedback;
 pub mod intent;

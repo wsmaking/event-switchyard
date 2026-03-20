@@ -312,6 +312,8 @@ fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
         intent_id: Some(intent.intent_id.clone()),
         model_id: intent.model_id.clone(),
         execution_run_id: intent.execution_run_id.clone(),
+        decision_key: intent.decision_key.clone(),
+        decision_attempt_seq: intent.decision_attempt_seq,
     }
 }
 
@@ -679,6 +681,8 @@ async fn dispatch_algo_slice(
     child_request.qty = slice.qty;
     child_request.client_order_id = None;
     child_request.intent_id = Some(slice.child_intent_id.clone());
+    child_request.decision_key = Some(slice.child_intent_id.clone());
+    child_request.decision_attempt_seq = Some(1);
     let submitted_at_ns = gateway_core::now_nanos();
     let (status, volatile_order) = super::orders::process_order_v3_hot_path_with_strategy_context(
         &state,
@@ -1196,8 +1200,8 @@ mod tests {
     use crate::audit::AuditEvent;
     use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
     use crate::strategy::replay::{
-        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput,
-        StrategyExecutionFact, StrategyExecutionFactStatus,
+        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput, StrategyExecutionFact,
+        StrategyExecutionFactStatus,
     };
 
     use super::{
@@ -1310,6 +1314,8 @@ mod tests {
                 intent_id: Some("intent-1".to_string()),
                 model_id: Some("model-1".to_string()),
                 execution_run_id: Some("run-1".to_string()),
+                decision_key: Some("decision-1".to_string()),
+                decision_attempt_seq: Some(1),
             },
             algo_plan: None,
             effective_policy: crate::strategy::shadow::ShadowPolicyView {
@@ -1349,6 +1355,8 @@ mod tests {
                 risk_budget_ref: None,
                 model_id: Some("model-1".to_string()),
                 execution_run_id: Some("run-1".to_string()),
+                decision_key: Some("decision-1".to_string()),
+                decision_attempt_seq: Some(1),
                 recovery_policy: Some(
                     crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
                 ),
@@ -1393,6 +1401,8 @@ mod tests {
                 risk_budget_ref: None,
                 model_id: Some("model-1".to_string()),
                 execution_run_id: Some("run-1".to_string()),
+                decision_key: Some("decision-1".to_string()),
+                decision_attempt_seq: Some(1),
                 recovery_policy: Some(
                     crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
                 ),
@@ -1486,10 +1496,7 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].cursor, 1);
         assert_eq!(facts[0].fact.session_seq, Some(1));
-        assert_eq!(
-            facts[0].fact.status,
-            StrategyExecutionFactStatus::Rejected
-        );
+        assert_eq!(facts[0].fact.status, StrategyExecutionFactStatus::Rejected);
     }
 
     #[test]
@@ -1600,6 +1607,8 @@ mod tests {
             risk_budget_ref: None,
             model_id: Some("model-1".to_string()),
             execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(1),
             recovery_policy: Some(crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 10,

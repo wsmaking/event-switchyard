@@ -103,6 +103,8 @@ pub(super) struct V3OrderTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
     pub(super) execution_run_id: Option<Arc<str>>,
+    pub(super) decision_key: Option<Arc<str>>,
+    pub(super) decision_attempt_seq: Option<u64>,
     pub(super) intent_id: Option<Arc<str>>,
     pub(super) model_id: Option<Arc<str>>,
     pub(super) effective_risk_budget_ref: Option<Arc<str>>,
@@ -136,6 +138,8 @@ pub(super) struct V3DurableTask {
     pub(super) session_id: Arc<str>,
     pub(super) account_id: Arc<str>,
     pub(super) execution_run_id: Option<Arc<str>>,
+    pub(super) decision_key: Option<Arc<str>>,
+    pub(super) decision_attempt_seq: Option<u64>,
     pub(super) intent_id: Option<Arc<str>>,
     pub(super) model_id: Option<Arc<str>>,
     pub(super) effective_risk_budget_ref: Option<Arc<str>>,
@@ -154,6 +158,8 @@ impl From<V3OrderTask> for V3DurableTask {
             session_id: task.session_id,
             account_id: task.account_id,
             execution_run_id: task.execution_run_id,
+            decision_key: task.decision_key,
+            decision_attempt_seq: task.decision_attempt_seq,
             intent_id: task.intent_id,
             model_id: task.model_id,
             effective_risk_budget_ref: task.effective_risk_budget_ref,
@@ -208,6 +214,8 @@ pub(super) fn append_strategy_execution_fact(state: &AppState, fact: StrategyExe
 pub(super) fn maybe_append_strategy_execution_fact(
     state: &AppState,
     execution_run_id: Option<&str>,
+    decision_key: Option<&str>,
+    decision_attempt_seq: Option<u64>,
     intent_id: Option<&str>,
     model_id: Option<&str>,
     account_id: &str,
@@ -222,15 +230,29 @@ pub(super) fn maybe_append_strategy_execution_fact(
     let execution_run_id = execution_run_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let decision_key = decision_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let decision_attempt_seq = decision_attempt_seq.filter(|value| *value > 0);
     let intent_id = intent_id.map(str::trim).filter(|value| !value.is_empty());
     let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
-    if execution_run_id.is_none() && intent_id.is_none() && model_id.is_none() {
+    if execution_run_id.is_none()
+        && decision_key.is_none()
+        && intent_id.is_none()
+        && model_id.is_none()
+    {
         return;
     }
 
     let mut fact = StrategyExecutionFact::new(account_id, session_id, symbol, event_at_ns, status);
     if let Some(execution_run_id) = execution_run_id {
         fact = fact.with_execution_run_id(execution_run_id);
+    }
+    if let Some(decision_key) = decision_key {
+        fact = fact.with_decision_key(decision_key);
+    }
+    if let Some(decision_attempt_seq) = decision_attempt_seq {
+        fact = fact.with_decision_attempt_seq(decision_attempt_seq);
     }
     if let Some(intent_id) = intent_id {
         fact = fact.with_intent_id(intent_id);
@@ -461,6 +483,8 @@ struct V3ConfirmRecord {
     shard_id: usize,
     account_id: Option<String>,
     execution_run_id: Option<String>,
+    decision_key: Option<String>,
+    decision_attempt_seq: Option<u64>,
     intent_id: Option<String>,
     model_id: Option<String>,
     position_symbol_key: Option<[u8; 8]>,
@@ -477,6 +501,8 @@ pub(super) struct V3ConfirmSnapshot {
     pub(super) shard_id: usize,
     pub(super) account_id: Option<String>,
     pub(super) execution_run_id: Option<String>,
+    pub(super) decision_key: Option<String>,
+    pub(super) decision_attempt_seq: Option<u64>,
     pub(super) intent_id: Option<String>,
     pub(super) model_id: Option<String>,
     pub(super) position_symbol_key: Option<[u8; 8]>,
@@ -691,6 +717,8 @@ impl V3ConfirmStore {
                 shard_id: task.shard_id,
                 account_id: Some(task.account_id.to_string()),
                 execution_run_id: task.execution_run_id.as_deref().map(str::to_string),
+                decision_key: task.decision_key.as_deref().map(str::to_string),
+                decision_attempt_seq: task.decision_attempt_seq,
                 intent_id: task.intent_id.as_deref().map(str::to_string),
                 model_id: task.model_id.as_deref().map(str::to_string),
                 position_symbol_key: Some(task.position_symbol_key),
@@ -753,6 +781,8 @@ impl V3ConfirmStore {
                 shard_id: lane,
                 account_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
                 intent_id: None,
                 model_id: None,
                 position_symbol_key: None,
@@ -818,6 +848,8 @@ impl V3ConfirmStore {
                 shard_id: lane,
                 account_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
                 intent_id: None,
                 model_id: None,
                 position_symbol_key: None,
@@ -863,6 +895,8 @@ impl V3ConfirmStore {
                 shard_id,
                 account_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
                 intent_id: None,
                 model_id: None,
                 position_symbol_key: None,
@@ -886,6 +920,8 @@ impl V3ConfirmStore {
                 shard_id: entry.shard_id,
                 account_id: entry.account_id.clone(),
                 execution_run_id: entry.execution_run_id.clone(),
+                decision_key: entry.decision_key.clone(),
+                decision_attempt_seq: entry.decision_attempt_seq,
                 intent_id: entry.intent_id.clone(),
                 model_id: entry.model_id.clone(),
                 position_symbol_key: entry.position_symbol_key,
@@ -1979,6 +2015,8 @@ impl AppState {
             maybe_append_strategy_execution_fact(
                 self,
                 snapshot.execution_run_id.as_deref(),
+                snapshot.decision_key.as_deref(),
+                snapshot.decision_attempt_seq,
                 snapshot.intent_id.as_deref(),
                 snapshot.model_id.as_deref(),
                 snapshot.account_id.as_deref().unwrap_or_default(),
@@ -4664,6 +4702,8 @@ async fn run_v3_single_writer(shard_id: usize, mut rx: Receiver<V3OrderTask>, st
         maybe_append_strategy_execution_fact(
             &state,
             task.execution_run_id.as_deref(),
+            task.decision_key.as_deref(),
+            task.decision_attempt_seq,
             task.intent_id.as_deref(),
             task.model_id.as_deref(),
             task.account_id.as_ref(),
@@ -4915,6 +4955,8 @@ async fn run_v3_durable_worker(
             session_id,
             account_id,
             execution_run_id,
+            decision_key,
+            decision_attempt_seq,
             intent_id,
             model_id,
             effective_risk_budget_ref,
@@ -4939,6 +4981,16 @@ async fn run_v3_durable_worker(
             .push_path_tag("feedback");
             let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
                 event.with_execution_run_id(execution_run_id)
+            } else {
+                event
+            };
+            let event = if let Some(decision_key) = decision_key.as_deref() {
+                event.with_decision_key(decision_key)
+            } else {
+                event
+            };
+            let event = if let Some(decision_attempt_seq) = decision_attempt_seq {
+                event.with_decision_attempt_seq(decision_attempt_seq)
             } else {
                 event
             };
@@ -4973,6 +5025,8 @@ async fn run_v3_durable_worker(
         maybe_append_strategy_execution_fact(
             &state,
             execution_run_id.as_deref(),
+            decision_key.as_deref(),
+            decision_attempt_seq,
             intent_id.as_deref(),
             model_id.as_deref(),
             account_id.as_ref(),
@@ -6414,6 +6468,8 @@ mod tests {
             session_id: Arc::<str>::from(session_id),
             account_id: Arc::<str>::from(account_id),
             execution_run_id: None,
+            decision_key: None,
+            decision_attempt_seq: None,
             intent_id: None,
             model_id: None,
             effective_risk_budget_ref: None,
@@ -6443,6 +6499,8 @@ mod tests {
                 session_id: Arc::<str>::from(format!("sess-{}", shard_id)),
                 account_id: Arc::<str>::from(format!("acc-{}", shard_id)),
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
                 intent_id: None,
                 model_id: None,
                 effective_risk_budget_ref: None,

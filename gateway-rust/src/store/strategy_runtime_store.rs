@@ -568,6 +568,8 @@ mod tests {
                 intent_id: Some("intent-1".to_string()),
                 model_id: Some("model-1".to_string()),
                 execution_run_id: Some("run-1".to_string()),
+                decision_key: Some("decision-1".to_string()),
+                decision_attempt_seq: Some(1),
             },
             Some("budget-1".to_string()),
             None,

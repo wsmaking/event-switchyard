@@ -420,12 +420,30 @@ fn authenticate_request(
 
 fn build_idempotency_key(headers: &HeaderMap, req: &OrderRequest) -> Option<String> {
     let client_order_id = req.client_order_id.clone();
+    let decision_key = req
+        .decision_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let execution_run_id = req
+        .execution_run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let decision_attempt_seq = req.decision_attempt_seq.unwrap_or(1).max(1);
     headers
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .or_else(|| client_order_id.clone())
+        .or_else(|| {
+            execution_run_id
+                .zip(decision_key)
+                .map(|(execution_run_id, decision_key)| {
+                    format!("decision:{execution_run_id}:{decision_key}:{decision_attempt_seq}")
+                })
+        })
 }
 
 async fn reserve_inflight(
@@ -552,15 +570,33 @@ fn exceeds_strategy_notional_limit(qty: u64, price: u64, max_notional: u64) -> b
 
 fn feedback_metadata<'a>(
     execution_run_id: Option<&'a str>,
+    decision_key: Option<&'a str>,
+    decision_attempt_seq: Option<u64>,
     intent_id: Option<&'a str>,
     model_id: Option<&'a str>,
-) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+) -> (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<u64>,
+    Option<&'a str>,
+    Option<&'a str>,
+) {
     let execution_run_id = execution_run_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let decision_key = decision_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let decision_attempt_seq = decision_attempt_seq.filter(|value| *value > 0);
     let intent_id = intent_id.map(str::trim).filter(|value| !value.is_empty());
     let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
-    (execution_run_id, intent_id, model_id)
+    (
+        execution_run_id,
+        decision_key,
+        decision_attempt_seq,
+        intent_id,
+        model_id,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -602,6 +638,31 @@ fn validate_order_request(req: &OrderRequest) -> Option<&'static str> {
     }
     if req.order_type == crate::order::OrderType::Limit && req.price.unwrap_or(0) == 0 {
         return Some("INVALID_PRICE");
+    }
+    let execution_run_id = req
+        .execution_run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if req.execution_run_id.is_some() && execution_run_id.is_none() {
+        return Some("INVALID_EXECUTION_RUN_ID");
+    }
+    let decision_key = req
+        .decision_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if req.decision_key.is_some() && decision_key.is_none() {
+        return Some("INVALID_DECISION_KEY");
+    }
+    if decision_key.is_some() && execution_run_id.is_none() {
+        return Some("EXECUTION_RUN_ID_REQUIRED");
+    }
+    if req.decision_attempt_seq == Some(0) {
+        return Some("INVALID_DECISION_ATTEMPT");
+    }
+    if req.decision_attempt_seq.is_some() && decision_key.is_none() {
+        return Some("DECISION_KEY_REQUIRED");
     }
     None
 }
@@ -849,6 +910,8 @@ pub(super) fn process_order_v3_hot_path_with_strategy_context(
         session_id,
         V3HotRiskInput::from_order_request(&req),
         req.execution_run_id.as_deref(),
+        req.decision_key.as_deref(),
+        req.decision_attempt_seq,
         req.intent_id.as_deref(),
         req.model_id.as_deref(),
         actual_policy,
@@ -872,6 +935,8 @@ pub(super) fn process_order_v3_hot_path_tcp(
         session_id,
         V3HotRiskInput::from_tcp(decoded),
         None,
+        None,
+        None,
         decoded.intent_id,
         decoded.model_id,
         None,
@@ -888,6 +953,8 @@ fn process_order_v3_hot_path_with_input(
     session_id: &str,
     risk_input: V3HotRiskInput,
     execution_run_id: Option<&str>,
+    decision_key: Option<&str>,
+    decision_attempt_seq: Option<u64>,
     intent_id: Option<&str>,
     model_id: Option<&str>,
     actual_policy: Option<Arc<ShadowPolicyView>>,
@@ -921,8 +988,14 @@ fn process_order_v3_hot_path_with_input(
         .symbol_key
         .map(render_v3_symbol_key)
         .unwrap_or_default();
-    let (execution_run_id, intent_id, model_id) =
-        feedback_metadata(execution_run_id, intent_id, model_id);
+    let (execution_run_id, decision_key, decision_attempt_seq, intent_id, model_id) =
+        feedback_metadata(
+            execution_run_id,
+            decision_key,
+            decision_attempt_seq,
+            intent_id,
+            model_id,
+        );
     // Strategy submit can mark high-urgency flow, but only soft admission is relaxable.
     let strategy_soft_bypass = strategy_allows_soft_admission_bypass(actual_policy.as_deref());
     let rejected_feedback_context = state.quant_feedback_exporter.is_enabled().then(|| {
@@ -931,6 +1004,8 @@ fn process_order_v3_hot_path_with_input(
             account_id.to_string(),
             symbol.clone(),
             execution_run_id.map(str::to_string),
+            decision_key.map(str::to_string),
+            decision_attempt_seq,
             intent_id.map(str::to_string),
             model_id.map(str::to_string),
             effective_risk_budget_ref.as_deref().map(str::to_string),
@@ -943,6 +1018,8 @@ fn process_order_v3_hot_path_with_input(
             account_id,
             symbol,
             execution_run_id,
+            decision_key,
+            decision_attempt_seq,
             intent_id,
             model_id,
             effective_risk_budget_ref,
@@ -959,6 +1036,16 @@ fn process_order_v3_hot_path_with_input(
             );
             let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
                 event.with_execution_run_id(execution_run_id)
+            } else {
+                event
+            };
+            let event = if let Some(decision_key) = decision_key.as_deref() {
+                event.with_decision_key(decision_key)
+            } else {
+                event
+            };
+            let event = if let Some(decision_attempt_seq) = decision_attempt_seq {
+                event.with_decision_attempt_seq(*decision_attempt_seq)
             } else {
                 event
             };
@@ -991,6 +1078,8 @@ fn process_order_v3_hot_path_with_input(
         maybe_append_strategy_execution_fact(
             state,
             execution_run_id,
+            decision_key,
+            decision_attempt_seq,
             intent_id,
             model_id,
             account_id,
@@ -1467,6 +1556,8 @@ fn process_order_v3_hot_path_with_input(
         session_id: Arc::clone(&session_id_ref),
         account_id: Arc::clone(&account_id_ref),
         execution_run_id: execution_run_id.map(Arc::<str>::from),
+        decision_key: decision_key.map(Arc::<str>::from),
+        decision_attempt_seq,
         intent_id: intent_id.map(Arc::<str>::from),
         model_id: model_id.map(Arc::<str>::from),
         effective_risk_budget_ref: effective_risk_budget_ref.clone(),
@@ -1483,6 +1574,8 @@ fn process_order_v3_hot_path_with_input(
             Arc::clone(&task.session_id),
             Arc::clone(&task.account_id),
             task.execution_run_id.clone(),
+            task.decision_key.clone(),
+            task.decision_attempt_seq,
             task.intent_id.clone(),
             task.model_id.clone(),
             task.effective_risk_budget_ref.clone(),
@@ -1505,6 +1598,8 @@ fn process_order_v3_hot_path_with_input(
                 session_id,
                 account_id,
                 execution_run_id,
+                decision_key,
+                decision_attempt_seq,
                 intent_id,
                 model_id,
                 effective_risk_budget_ref,
@@ -1526,6 +1621,16 @@ fn process_order_v3_hot_path_with_input(
                 .push_path_tag("feedback");
                 let event = if let Some(execution_run_id) = execution_run_id.as_deref() {
                     event.with_execution_run_id(execution_run_id)
+                } else {
+                    event
+                };
+                let event = if let Some(decision_key) = decision_key.as_deref() {
+                    event.with_decision_key(decision_key)
+                } else {
+                    event
+                };
+                let event = if let Some(decision_attempt_seq) = decision_attempt_seq {
+                    event.with_decision_attempt_seq(decision_attempt_seq)
                 } else {
                     event
                 };
@@ -3493,6 +3598,8 @@ mod tests {
                 session_id: Arc::<str>::from(format!("seed-sess-{seq}")),
                 account_id: Arc::<str>::from("seed-acc"),
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
                 intent_id: None,
                 model_id: None,
                 effective_risk_budget_ref: None,
@@ -3568,6 +3675,8 @@ mod tests {
             intent_id: None,
             model_id: None,
             execution_run_id: None,
+            decision_key: None,
+            decision_attempt_seq: None,
         }
     }
 
@@ -3591,6 +3700,8 @@ mod tests {
             }),
             model_id: Some("model-1".to_string()),
             execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(1),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 10,
@@ -3655,12 +3766,58 @@ mod tests {
                 intent_id: Some("intent-1".to_string()),
                 model_id: Some("model-1".to_string()),
                 execution_run_id: Some("run-1".to_string()),
+                decision_key: Some("decision-1".to_string()),
+                decision_attempt_seq: Some(1),
             },
             Some("budget-42".to_string()),
             None,
             None,
             start_at_ns.saturating_sub(10),
         )
+    }
+
+    #[test]
+    fn build_idempotency_key_falls_back_to_decision_metadata() {
+        let headers = HeaderMap::new();
+        let req = OrderRequest {
+            symbol: "AAPL".into(),
+            side: "BUY".into(),
+            order_type: OrderType::Limit,
+            qty: 100,
+            price: Some(15_000),
+            time_in_force: TimeInForce::Gtc,
+            expire_at: None,
+            client_order_id: None,
+            intent_id: Some("intent-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("dec-7".to_string()),
+            decision_attempt_seq: Some(2),
+        };
+
+        assert_eq!(
+            build_idempotency_key(&headers, &req).as_deref(),
+            Some("decision:run-1:dec-7:2")
+        );
+    }
+
+    #[test]
+    fn validate_order_request_rejects_invalid_decision_metadata() {
+        let mut req = request_with_client_id("cid-decision");
+        req.decision_attempt_seq = Some(0);
+        assert_eq!(
+            validate_order_request(&req),
+            Some("INVALID_DECISION_ATTEMPT")
+        );
+
+        let mut req = request_with_client_id("cid-decision");
+        req.execution_run_id = Some("run-1".to_string());
+        req.decision_key = Some(" ".to_string());
+        assert_eq!(validate_order_request(&req), Some("INVALID_DECISION_KEY"));
+
+        let mut req = request_with_client_id("cid-decision");
+        req.decision_attempt_seq = Some(1);
+        assert_eq!(validate_order_request(&req), Some("DECISION_KEY_REQUIRED"));
     }
 
     fn strategy_runtime_snapshot_line(runtime: &AlgoParentExecution, at: u64) -> String {
@@ -4016,6 +4173,8 @@ mod tests {
                 intent_id: None,
                 model_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
             };
             let account_ref = state.intern_v3_account_id("fixture-risk");
 
@@ -4201,6 +4360,8 @@ mod tests {
                 intent_id: None,
                 model_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
             };
             let (status, Json(resp)) = handle_order(
                 State(state.clone()),
@@ -4321,6 +4482,8 @@ mod tests {
                 intent_id: None,
                 model_id: None,
                 execution_run_id: None,
+                decision_key: None,
+                decision_attempt_seq: None,
             };
 
             let (allowed, reason, http_status, projected_position_qty) =

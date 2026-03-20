@@ -22,6 +22,10 @@ pub struct StrategyExecutionFact {
     #[serde(default)]
     pub execution_run_id: Option<String>,
     #[serde(default)]
+    pub decision_key: Option<String>,
+    #[serde(default)]
+    pub decision_attempt_seq: Option<u64>,
+    #[serde(default)]
     pub intent_id: Option<String>,
     #[serde(default)]
     pub model_id: Option<String>,
@@ -49,6 +53,8 @@ impl StrategyExecutionFact {
         Self {
             schema_version: STRATEGY_EXECUTION_FACT_SCHEMA_VERSION,
             execution_run_id: None,
+            decision_key: None,
+            decision_attempt_seq: None,
             intent_id: None,
             model_id: None,
             account_id: account_id.into(),
@@ -69,6 +75,16 @@ impl StrategyExecutionFact {
 
     pub fn with_intent_id(mut self, intent_id: impl Into<String>) -> Self {
         self.intent_id = Some(intent_id.into());
+        self
+    }
+
+    pub fn with_decision_key(mut self, decision_key: impl Into<String>) -> Self {
+        self.decision_key = Some(decision_key.into());
+        self
+    }
+
+    pub fn with_decision_attempt_seq(mut self, decision_attempt_seq: u64) -> Self {
+        self.decision_attempt_seq = Some(decision_attempt_seq);
         self
     }
 
@@ -132,6 +148,10 @@ pub struct StrategyExecutionCatchupOrderState {
     #[serde(default)]
     pub execution_run_id: Option<String>,
     #[serde(default)]
+    pub decision_key: Option<String>,
+    #[serde(default)]
+    pub decision_attempt_seq: Option<u64>,
+    #[serde(default)]
     pub intent_id: Option<String>,
     #[serde(default)]
     pub model_id: Option<String>,
@@ -151,6 +171,8 @@ impl StrategyExecutionCatchupOrderState {
             session_id: item.fact.session_id.clone(),
             session_seq: item.fact.session_seq,
             execution_run_id: item.fact.execution_run_id.clone(),
+            decision_key: item.fact.decision_key.clone(),
+            decision_attempt_seq: item.fact.decision_attempt_seq,
             intent_id: item.fact.intent_id.clone(),
             model_id: item.fact.model_id.clone(),
             symbol: item.fact.symbol.clone(),
@@ -182,8 +204,19 @@ pub struct StrategyExecutionCatchupInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum StrategyExecutionOrderKey {
-    SessionOrder { session_id: String, session_seq: u64 },
-    IntentOrder(String),
+    Decision {
+        execution_run_id: Option<String>,
+        intent_id: Option<String>,
+        decision_key: String,
+    },
+    SessionOrder {
+        session_id: String,
+        session_seq: u64,
+    },
+    IntentOrder {
+        execution_run_id: Option<String>,
+        intent_id: String,
+    },
     Cursor(u64),
 }
 
@@ -196,20 +229,34 @@ impl StrategyExecutionCatchupInput {
         has_more: bool,
         facts: Vec<StrategyExecutionReplayItem>,
     ) -> Self {
-        let mut latest_by_order: HashMap<StrategyExecutionOrderKey, StrategyExecutionCatchupOrderState> =
-            HashMap::new();
+        let mut latest_by_order: HashMap<
+            StrategyExecutionOrderKey,
+            StrategyExecutionCatchupOrderState,
+        > = HashMap::new();
         for item in &facts {
-            let key = if let Some(session_seq) = item.fact.session_seq {
+            let key = if let Some(decision_key) = item.fact.decision_key.clone() {
+                StrategyExecutionOrderKey::Decision {
+                    execution_run_id: item.fact.execution_run_id.clone(),
+                    intent_id: item.fact.intent_id.clone(),
+                    decision_key,
+                }
+            } else if let Some(session_seq) = item.fact.session_seq {
                 StrategyExecutionOrderKey::SessionOrder {
                     session_id: item.fact.session_id.clone(),
                     session_seq,
                 }
             } else if let Some(intent_id) = item.fact.intent_id.clone() {
-                StrategyExecutionOrderKey::IntentOrder(intent_id)
+                StrategyExecutionOrderKey::IntentOrder {
+                    execution_run_id: item.fact.execution_run_id.clone(),
+                    intent_id,
+                }
             } else {
                 StrategyExecutionOrderKey::Cursor(item.cursor)
             };
-            latest_by_order.insert(key, StrategyExecutionCatchupOrderState::from_replay_item(item));
+            latest_by_order.insert(
+                key,
+                StrategyExecutionCatchupOrderState::from_replay_item(item),
+            );
         }
 
         let mut latest_order_states = latest_by_order.into_values().collect::<Vec<_>>();
@@ -252,6 +299,8 @@ mod tests {
             StrategyExecutionFactStatus::Unconfirmed,
         )
         .with_execution_run_id("run-1")
+        .with_decision_key("dec-1")
+        .with_decision_attempt_seq(2)
         .with_intent_id("intent-1")
         .with_model_id("model-1")
         .with_session_seq(7)
@@ -260,6 +309,8 @@ mod tests {
         let raw = serde_json::to_string(&fact).expect("serialize fact");
         let parsed: StrategyExecutionFact = serde_json::from_str(&raw).expect("deserialize fact");
         assert_eq!(parsed.execution_run_id.as_deref(), Some("run-1"));
+        assert_eq!(parsed.decision_key.as_deref(), Some("dec-1"));
+        assert_eq!(parsed.decision_attempt_seq, Some(2));
         assert_eq!(parsed.intent_id.as_deref(), Some("intent-1"));
         assert_eq!(parsed.model_id.as_deref(), Some("model-1"));
         assert_eq!(parsed.session_seq, Some(7));
@@ -280,6 +331,8 @@ mod tests {
                     StrategyExecutionFactStatus::Unconfirmed,
                 )
                 .with_execution_run_id("run-1")
+                .with_decision_key("dec-1")
+                .with_decision_attempt_seq(1)
                 .with_intent_id("intent-1")
                 .with_session_seq(7)
                 .with_position_delta_qty(10),
@@ -294,8 +347,10 @@ mod tests {
                     StrategyExecutionFactStatus::DurableAccepted,
                 )
                 .with_execution_run_id("run-1")
+                .with_decision_key("dec-1")
+                .with_decision_attempt_seq(2)
                 .with_intent_id("intent-1")
-                .with_session_seq(7)
+                .with_session_seq(8)
                 .with_position_delta_qty(10),
             },
             StrategyExecutionReplayItem {
@@ -308,6 +363,8 @@ mod tests {
                     StrategyExecutionFactStatus::Rejected,
                 )
                 .with_execution_run_id("run-1")
+                .with_decision_key("dec-2")
+                .with_decision_attempt_seq(1)
                 .with_intent_id("intent-2"),
             },
         ];
@@ -326,6 +383,11 @@ mod tests {
         assert_eq!(catchup.latest_status_totals.durable_accepted, 1);
         assert_eq!(catchup.latest_status_totals.rejected, 1);
         assert_eq!(catchup.latest_order_states[0].cursor, 12);
+        assert_eq!(
+            catchup.latest_order_states[0].decision_key.as_deref(),
+            Some("dec-1")
+        );
+        assert_eq!(catchup.latest_order_states[0].decision_attempt_seq, Some(2));
         assert_eq!(
             catchup.latest_order_states[0].latest_status,
             StrategyExecutionFactStatus::DurableAccepted

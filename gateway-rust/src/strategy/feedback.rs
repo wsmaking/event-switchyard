@@ -16,6 +16,8 @@ pub enum FeedbackEventStatus {
 pub struct FeedbackEvent {
     pub event_type: FeedbackEventStatus,
     pub execution_run_id: Option<String>,
+    pub decision_key: Option<String>,
+    pub decision_attempt_seq: Option<u64>,
     pub intent_id: Option<String>,
     pub model_id: Option<String>,
     #[serde(default)]
@@ -50,6 +52,8 @@ impl FeedbackEvent {
         Self {
             event_type: FeedbackEventStatus::Accepted,
             execution_run_id: None,
+            decision_key: None,
+            decision_attempt_seq: None,
             intent_id: None,
             model_id: None,
             shadow_run_ids: Vec::new(),
@@ -82,6 +86,8 @@ impl FeedbackEvent {
         Self {
             event_type: FeedbackEventStatus::Rejected,
             execution_run_id: None,
+            decision_key: None,
+            decision_attempt_seq: None,
             intent_id: None,
             model_id: None,
             shadow_run_ids: Vec::new(),
@@ -135,6 +141,16 @@ impl FeedbackEvent {
 
     pub fn with_execution_run_id(mut self, execution_run_id: impl Into<String>) -> Self {
         self.execution_run_id = Some(execution_run_id.into());
+        self
+    }
+
+    pub fn with_decision_key(mut self, decision_key: impl Into<String>) -> Self {
+        self.decision_key = Some(decision_key.into());
+        self
+    }
+
+    pub fn with_decision_attempt_seq(mut self, decision_attempt_seq: u64) -> Self {
+        self.decision_attempt_seq = Some(decision_attempt_seq);
         self
     }
 
@@ -195,6 +211,8 @@ mod tests {
     fn accepted_feedback_serializes_as_json_line() {
         let event = FeedbackEvent::accepted("sess-1", 7, "acc-1", "AAPL", 123)
             .with_execution_run_id("run-1")
+            .with_decision_key("dec-1")
+            .with_decision_attempt_seq(2)
             .with_intent_id("intent-1")
             .with_model_id("model-a")
             .with_shadow_run_ids(vec!["shadow-1".to_string(), "shadow-2".to_string()])
@@ -221,6 +239,8 @@ mod tests {
             serde_json::from_slice(&line[..line.len() - 1]).expect("parse serialized feedback");
         assert_eq!(value["eventType"], "ACCEPTED");
         assert_eq!(value["executionRunId"], "run-1");
+        assert_eq!(value["decisionKey"], "dec-1");
+        assert_eq!(value["decisionAttemptSeq"], 2);
         assert_eq!(value["intentId"], "intent-1");
         assert_eq!(value["modelId"], "model-a");
         assert_eq!(value["shadowRunIds"][0], "shadow-1");

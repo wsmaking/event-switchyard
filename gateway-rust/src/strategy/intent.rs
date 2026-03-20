@@ -98,6 +98,10 @@ pub struct StrategyIntent {
     #[serde(default)]
     pub execution_run_id: Option<String>,
     #[serde(default)]
+    pub decision_key: Option<String>,
+    #[serde(default)]
+    pub decision_attempt_seq: Option<u64>,
+    #[serde(default)]
     pub recovery_policy: Option<StrategyRecoveryPolicy>,
     #[serde(default)]
     pub algo: Option<AlgoExecutionSpec>,
@@ -141,6 +145,19 @@ impl StrategyIntent {
         {
             return Err("EXECUTION_RUN_ID_REQUIRED");
         }
+        let decision_key = self.decision_key.as_deref().map(str::trim);
+        if decision_key.is_some_and(str::is_empty) {
+            return Err("DECISION_KEY_REQUIRED");
+        }
+        if decision_key.is_some() && self.execution_run_id.is_none() {
+            return Err("EXECUTION_RUN_ID_REQUIRED");
+        }
+        if self.decision_attempt_seq == Some(0) {
+            return Err("DECISION_ATTEMPT_SEQ_REQUIRED");
+        }
+        if self.decision_attempt_seq.is_some() && decision_key.is_none() {
+            return Err("DECISION_KEY_REQUIRED");
+        }
         Ok(())
     }
 
@@ -177,6 +194,8 @@ mod tests {
             }),
             model_id: Some("model-1".to_string()),
             execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(2),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: Some(AlgoExecutionSpec {
                 slice_count: Some(4),
@@ -218,6 +237,8 @@ mod tests {
         assert_eq!(parsed.urgency, IntentUrgency::High);
         assert_eq!(parsed.time_in_force, TimeInForce::Ioc);
         assert_eq!(parsed.execution_run_id.as_deref(), Some("run-1"));
+        assert_eq!(parsed.decision_key.as_deref(), Some("decision-1"));
+        assert_eq!(parsed.decision_attempt_seq, Some(2));
         assert_eq!(
             parsed.recovery_policy,
             Some(StrategyRecoveryPolicy::NoAutoResume)
@@ -227,5 +248,24 @@ mod tests {
             parsed.algo.as_ref().and_then(|algo| algo.slice_count),
             Some(4)
         );
+    }
+
+    #[test]
+    fn strategy_intent_rejects_invalid_decision_metadata() {
+        let mut intent = intent_fixture();
+        intent.execution_run_id = None;
+        assert_eq!(intent.validate(), Err("EXECUTION_RUN_ID_REQUIRED"));
+
+        let mut intent = intent_fixture();
+        intent.decision_key = Some(" ".to_string());
+        assert_eq!(intent.validate(), Err("DECISION_KEY_REQUIRED"));
+
+        let mut intent = intent_fixture();
+        intent.decision_attempt_seq = Some(0);
+        assert_eq!(intent.validate(), Err("DECISION_ATTEMPT_SEQ_REQUIRED"));
+
+        let mut intent = intent_fixture();
+        intent.decision_key = None;
+        assert_eq!(intent.validate(), Err("DECISION_KEY_REQUIRED"));
     }
 }
