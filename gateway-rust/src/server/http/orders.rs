@@ -6011,6 +6011,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_does_not_bypass_hard_reject() {
+        let (state, _ingress_rx) = build_test_state_with_soft_queue_pressure(10, 9, 60, 90, 95);
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("hard reject still returns volatile response");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_BACKPRESSURE_HARD")
+        );
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
     async fn strategy_intent_shadow_seed_creates_shadow_record_from_intent() {
         let state = build_test_state();
         state
