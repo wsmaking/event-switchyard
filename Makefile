@@ -1,4 +1,4 @@
-.PHONY: help rust-check rust-test rust-run v3-build-release v3-local-gate v3-stable-gate v3-capability-gate v3-absolute-gate v3-absolute-gate-loop v3-phase2-compare v3-phase2-compare-quiet v3-open-loop v3-capacity-sweep preset-switch-gate bench gate check check-lite check-full bless perf-gate-rust perf-gate-rust-ci perf-gate-rust-nightly perf-gate-rust-bless
+.PHONY: help rust-check rust-test rust-run v3-build-release v3-local-gate v3-stable-gate v3-capability-gate v3-absolute-gate v3-absolute-gate-loop v3-phase2-compare v3-phase2-compare-quiet v3-open-loop v3-capacity-sweep quant-eval-gate preset-switch-gate bench gate check check-lite check-full bless perf-gate-rust perf-gate-rust-ci perf-gate-rust-nightly perf-gate-rust-bless
 
 .DEFAULT_GOAL := help
 
@@ -24,6 +24,7 @@ help:
 	@echo "  make v3-phase2-compare-quiet - compare after noise wait"
 	@echo "  make v3-open-loop          - open-loop probe"
 	@echo "  make v3-capacity-sweep     - capacity sweep"
+	@echo "  make quant-eval-gate       - quant evaluation gate with self-started gateway"
 	@echo ""
 	@echo "Compatibility aliases:"
 	@echo "  make check / check-lite / check-full"
@@ -68,6 +69,9 @@ v3-open-loop:
 
 v3-capacity-sweep:
 	@scripts/ops/run_v3_capacity_sweep.sh
+
+quant-eval-gate:
+	@scripts/ops/check_quant_eval_ci_gate.sh
 
 # Compatibility aliases for existing workflows
 bench: v3-phase2-compare

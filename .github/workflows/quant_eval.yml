@@ -1,0 +1,49 @@
+name: quant-eval
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/quant_eval.yml'
+      - 'Makefile'
+      - 'contracts/fixtures/quant_eval_gate_scenarios.json'
+      - 'gateway-rust/**'
+      - 'mini-exchange/**'
+      - 'scripts/ops/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/quant_eval.yml'
+      - 'Makefile'
+      - 'contracts/fixtures/quant_eval_gate_scenarios.json'
+      - 'gateway-rust/**'
+      - 'mini-exchange/**'
+      - 'scripts/ops/**'
+  workflow_dispatch: {}
+
+jobs:
+  quant-eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Run quant eval gate
+        run: make quant-eval-gate
+
+      - name: Upload quant eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quant-eval-gate-artifacts
+          path: var/results/quant_eval_gate_ci_*
