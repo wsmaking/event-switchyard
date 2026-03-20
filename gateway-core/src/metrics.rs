@@ -124,11 +124,20 @@ fn rdtscp_read_internal() -> Option<RdtscpStamp> {
     if !rdtscp_supported_internal() {
         return None;
     }
-    use std::arch::x86_64::_rdtscp;
-    let mut aux = 0u32;
-    let cycles = unsafe { _rdtscp(&mut aux) };
+    let aux: u32;
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        std::arch::asm!(
+            "rdtscp",
+            out("eax") lo,
+            out("edx") hi,
+            out("ecx") aux,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
     Some(RdtscpStamp {
-        cycles: cycles as u64,
+        cycles: ((hi as u64) << 32) | lo as u64,
         aux,
     })
 }
