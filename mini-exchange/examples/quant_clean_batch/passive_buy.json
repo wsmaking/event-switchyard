@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "intentId": "batch-passive-buy",
+  "accountId": "acc-batch-1",
+  "sessionId": "sess-batch-1",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "type": "LIMIT",
+  "qty": 120,
+  "limitPrice": 100,
+  "timeInForce": "GTC",
+  "urgency": "NORMAL",
+  "executionPolicy": "PASSIVE",
+  "riskBudgetRef": {
+    "budgetId": "budget-batch-1",
+    "version": 1
+  },
+  "modelId": "model-batch-1",
+  "createdAtNs": 10,
+  "expiresAtNs": 1000
+}
