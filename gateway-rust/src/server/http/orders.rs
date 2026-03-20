@@ -556,6 +556,36 @@ fn feedback_metadata<'a>(
     (intent_id, model_id)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StrategyAdmissionUrgency {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+fn strategy_admission_urgency(
+    actual_policy: Option<&ShadowPolicyView>,
+) -> StrategyAdmissionUrgency {
+    let Some(raw) = actual_policy.and_then(|policy| policy.urgency.as_deref()) else {
+        return StrategyAdmissionUrgency::Normal;
+    };
+    if raw.eq_ignore_ascii_case("CRITICAL") {
+        return StrategyAdmissionUrgency::Critical;
+    }
+    if raw.eq_ignore_ascii_case("HIGH") {
+        return StrategyAdmissionUrgency::High;
+    }
+    if raw.eq_ignore_ascii_case("LOW") {
+        return StrategyAdmissionUrgency::Low;
+    }
+    StrategyAdmissionUrgency::Normal
+}
+
+fn strategy_allows_soft_admission_bypass(actual_policy: Option<&ShadowPolicyView>) -> bool {
+    strategy_admission_urgency(actual_policy) >= StrategyAdmissionUrgency::High
+}
+
 fn validate_order_request(req: &OrderRequest) -> Option<&'static str> {
     if req.symbol.trim().is_empty() {
         return Some("INVALID_SYMBOL");
@@ -878,6 +908,8 @@ fn process_order_v3_hot_path_with_input(
         state.v3_stage_parse_hist.record(parse_elapsed);
     }
     let (intent_id, model_id) = feedback_metadata(intent_id, model_id);
+    // Strategy submit can mark high-urgency flow, but only soft admission is relaxable.
+    let strategy_soft_bypass = strategy_allows_soft_admission_bypass(actual_policy.as_deref());
     let rejected_feedback_context = state.quant_feedback_exporter.is_enabled().then(|| {
         (
             session_id.to_string(),
@@ -1172,29 +1204,31 @@ fn process_order_v3_hot_path_with_input(
         }
         if confirm_soft_guard_age_us > 0 && confirm_oldest_age_us >= confirm_soft_guard_age_us {
             if soft_guard_enabled {
-                state.increment_v3_rejected_soft_total(shard_id);
-                state
-                    .v3_durable_confirm_age_soft_reject_total
-                    .fetch_add(1, Ordering::Relaxed);
-                state
-                    .v3_durable_backpressure_soft_total
-                    .fetch_add(1, Ordering::Relaxed);
-                if let Some(counter) = state
-                    .v3_durable_backpressure_soft_total_per_lane
-                    .get(durable_lane_id)
-                {
-                    counter.fetch_add(1, Ordering::Relaxed);
+                if !strategy_soft_bypass {
+                    state.increment_v3_rejected_soft_total(shard_id);
+                    state
+                        .v3_durable_confirm_age_soft_reject_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    state
+                        .v3_durable_backpressure_soft_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(counter) = state
+                        .v3_durable_backpressure_soft_total_per_lane
+                        .get(durable_lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    record_v3_ack(&state, t0, hotpath_sampled);
+                    let rejected_at_ns = now_nanos();
+                    emit_rejected_feedback(0, "V3_DURABLE_CONFIRM_AGE_SOFT", rejected_at_ns);
+                    return V3HotPathOutcome::rejected(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        V3_TCP_KIND_REJECTED,
+                        "REJECTED",
+                        "V3_DURABLE_CONFIRM_AGE_SOFT",
+                        rejected_at_ns,
+                    );
                 }
-                record_v3_ack(&state, t0, hotpath_sampled);
-                let rejected_at_ns = now_nanos();
-                emit_rejected_feedback(0, "V3_DURABLE_CONFIRM_AGE_SOFT", rejected_at_ns);
-                return V3HotPathOutcome::rejected(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    V3_TCP_KIND_REJECTED,
-                    "REJECTED",
-                    "V3_DURABLE_CONFIRM_AGE_SOFT",
-                    rejected_at_ns,
-                );
             } else if !soft_guard_admission_enabled {
                 state
                     .v3_durable_confirm_age_soft_reject_skipped_total
@@ -1255,26 +1289,28 @@ fn process_order_v3_hot_path_with_input(
                     );
                 }
                 1 => {
-                    state.increment_v3_rejected_soft_total(shard_id);
-                    state
-                        .v3_durable_backpressure_soft_total
-                        .fetch_add(1, Ordering::Relaxed);
-                    if let Some(counter) = state
-                        .v3_durable_backpressure_soft_total_per_lane
-                        .get(durable_lane_id)
-                    {
-                        counter.fetch_add(1, Ordering::Relaxed);
+                    if !strategy_soft_bypass {
+                        state.increment_v3_rejected_soft_total(shard_id);
+                        state
+                            .v3_durable_backpressure_soft_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        if let Some(counter) = state
+                            .v3_durable_backpressure_soft_total_per_lane
+                            .get(durable_lane_id)
+                        {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        record_v3_ack(&state, t0, hotpath_sampled);
+                        let rejected_at_ns = now_nanos();
+                        emit_rejected_feedback(0, "V3_DURABLE_CONTROLLER_SOFT", rejected_at_ns);
+                        return V3HotPathOutcome::rejected(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            V3_TCP_KIND_REJECTED,
+                            "REJECTED",
+                            "V3_DURABLE_CONTROLLER_SOFT",
+                            rejected_at_ns,
+                        );
                     }
-                    record_v3_ack(&state, t0, hotpath_sampled);
-                    let rejected_at_ns = now_nanos();
-                    emit_rejected_feedback(0, "V3_DURABLE_CONTROLLER_SOFT", rejected_at_ns);
-                    return V3HotPathOutcome::rejected(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        V3_TCP_KIND_REJECTED,
-                        "REJECTED",
-                        "V3_DURABLE_CONTROLLER_SOFT",
-                        rejected_at_ns,
-                    );
                 }
                 _ => {}
             }
@@ -1310,26 +1346,28 @@ fn process_order_v3_hot_path_with_input(
                     && durable_backlog_growth_per_sec
                         >= state.v3_durable_backlog_soft_reject_per_sec)
             {
-                state.increment_v3_rejected_soft_total(shard_id);
-                state
-                    .v3_durable_backpressure_soft_total
-                    .fetch_add(1, Ordering::Relaxed);
-                if let Some(counter) = state
-                    .v3_durable_backpressure_soft_total_per_lane
-                    .get(durable_lane_id)
-                {
-                    counter.fetch_add(1, Ordering::Relaxed);
+                if !strategy_soft_bypass {
+                    state.increment_v3_rejected_soft_total(shard_id);
+                    state
+                        .v3_durable_backpressure_soft_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(counter) = state
+                        .v3_durable_backpressure_soft_total_per_lane
+                        .get(durable_lane_id)
+                    {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    record_v3_ack(&state, t0, hotpath_sampled);
+                    let rejected_at_ns = now_nanos();
+                    emit_rejected_feedback(0, "V3_DURABLE_BACKPRESSURE_SOFT", rejected_at_ns);
+                    return V3HotPathOutcome::rejected(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        V3_TCP_KIND_REJECTED,
+                        "REJECTED",
+                        "V3_DURABLE_BACKPRESSURE_SOFT",
+                        rejected_at_ns,
+                    );
                 }
-                record_v3_ack(&state, t0, hotpath_sampled);
-                let rejected_at_ns = now_nanos();
-                emit_rejected_feedback(0, "V3_DURABLE_BACKPRESSURE_SOFT", rejected_at_ns);
-                return V3HotPathOutcome::rejected(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    V3_TCP_KIND_REJECTED,
-                    "REJECTED",
-                    "V3_DURABLE_BACKPRESSURE_SOFT",
-                    rejected_at_ns,
-                );
             }
         }
     }
@@ -1367,17 +1405,19 @@ fn process_order_v3_hot_path_with_input(
     }
 
     if queue_pct >= state.v3_soft_reject_pct {
-        state.increment_v3_rejected_soft_total(shard_id);
-        record_v3_ack(&state, t0, hotpath_sampled);
-        let rejected_at_ns = now_nanos();
-        emit_rejected_feedback(0, "V3_BACKPRESSURE_SOFT", rejected_at_ns);
-        return V3HotPathOutcome::rejected(
-            StatusCode::TOO_MANY_REQUESTS,
-            V3_TCP_KIND_REJECTED,
-            "REJECTED",
-            "V3_BACKPRESSURE_SOFT",
-            rejected_at_ns,
-        );
+        if !strategy_soft_bypass {
+            state.increment_v3_rejected_soft_total(shard_id);
+            record_v3_ack(&state, t0, hotpath_sampled);
+            let rejected_at_ns = now_nanos();
+            emit_rejected_feedback(0, "V3_BACKPRESSURE_SOFT", rejected_at_ns);
+            return V3HotPathOutcome::rejected(
+                StatusCode::TOO_MANY_REQUESTS,
+                V3_TCP_KIND_REJECTED,
+                "REJECTED",
+                "V3_BACKPRESSURE_SOFT",
+                rejected_at_ns,
+            );
+        }
     }
 
     let session_seq = ingress.next_seq(session_id);
@@ -3311,6 +3351,56 @@ mod tests {
         state.v3_durable_worker_batch_max = 4;
         state.v3_durable_worker_batch_wait_us = 100;
         (state, ingress_rx, durable_rxs)
+    }
+
+    fn build_test_state_with_soft_queue_pressure(
+        max_depth: u64,
+        queued_depth: u64,
+        soft_reject_pct: u64,
+        hard_reject_pct: u64,
+        kill_reject_pct: u64,
+    ) -> (AppState, tokio::sync::mpsc::Receiver<super::super::V3OrderTask>) {
+        let mut state = build_test_state();
+        let capacity = max_depth.max(1) as usize;
+        let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(capacity);
+        let shard = super::super::V3ShardIngress::new(ingress_tx, max_depth.max(1));
+        state.v3_ingress = Arc::new(super::super::V3Ingress::new(
+            vec![shard],
+            false,
+            95,
+            10,
+            5,
+            32,
+            64,
+            128,
+        ));
+        state.v3_soft_reject_pct = soft_reject_pct;
+        state.v3_hard_reject_pct = hard_reject_pct;
+        state.v3_kill_reject_pct = kill_reject_pct;
+        state.v3_durable_ack_path_guard_enabled = false;
+
+        for seq in 0..queued_depth.min(max_depth) {
+            let task = super::super::V3OrderTask {
+                session_id: Arc::<str>::from(format!("seed-sess-{seq}")),
+                account_id: Arc::<str>::from("seed-acc"),
+                intent_id: None,
+                model_id: None,
+                effective_risk_budget_ref: None,
+                actual_policy: None,
+                position_symbol_key: FastPathEngine::symbol_to_bytes("AAPL"),
+                position_delta_qty: 1,
+                session_seq: seq + 1,
+                attempt_seq: seq + 1,
+                received_at_ns: now_nanos(),
+                shard_id: 0,
+            };
+            state
+                .v3_ingress
+                .try_enqueue(0, task)
+                .expect("seed ingress queue");
+        }
+
+        (state, ingress_rx)
     }
 
     fn make_token(account_id: &str) -> String {
@@ -5868,6 +5958,83 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(err.1.0.reason, "STRATEGY_POLICY_NOT_IMPLEMENTED");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_normal_urgency_soft_rejects_under_queue_pressure() {
+        let (state, _ingress_rx) = build_test_state_with_soft_queue_pressure(10, 6, 60, 90, 95);
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::Normal;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("strategy submit returns volatile response");
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_BACKPRESSURE_SOFT")
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_bypasses_queue_soft_reject() {
+        let (state, _ingress_rx) = build_test_state_with_soft_queue_pressure(10, 6, 60, 90, 95);
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("high urgency should bypass soft reject");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp.volatile_order.status, "VOLATILE_ACCEPT");
+        assert!(resp.volatile_order.session_seq.is_some());
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_high_urgency_does_not_bypass_hard_reject() {
+        let (state, _ingress_rx) = build_test_state_with_soft_queue_pressure(10, 9, 60, 90, 95);
+        let mut intent = strategy_intent_fixture();
+        intent.urgency = IntentUrgency::High;
+
+        let (status, Json(resp)) = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .expect("hard reject still returns volatile response");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.volatile_order.status, "REJECTED");
+        assert_eq!(
+            resp.volatile_order.reason.as_ref().map(|value| value.as_str()),
+            Some("V3_BACKPRESSURE_HARD")
+        );
+        assert_eq!(resp.effective_policy.urgency.as_deref(), Some("HIGH"));
     }
 
     #[tokio::test]

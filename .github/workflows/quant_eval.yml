@@ -41,9 +41,14 @@ jobs:
       - name: Run quant eval gate
         run: make quant-eval-gate
 
+      - name: Run quant policy runtime gate
+        run: make quant-policy-runtime-gate
+
       - name: Upload quant eval artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: quant-eval-gate-artifacts
-          path: var/results/quant_eval_gate_ci_*
+          path: |
+            var/results/quant_eval_gate_ci_*
+            var/results/quant_policy_runtime_gate_*
