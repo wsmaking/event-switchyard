@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "name": "quant-eval-gate-v1",
+  "scenarios": [
+    {
+      "profile": "aggressive_buy",
+      "outputFile": "aggressive_buy.json",
+      "scenarioId": "export-aggressive-buy-1",
+      "expect": {
+        "status": "OK",
+        "matchedPolicy": "AGGRESSIVE",
+        "matchedReportFound": true,
+        "reportPolicyCount": {
+          "eq": 1
+        },
+        "latestFinalStatus": "DURABLE_ACCEPTED",
+        "feedbackEventCount": {
+          "eq": 2
+        },
+        "shadowComparisonStatus": "MATCHED",
+        "executedQty": {
+          "eq": 100
+        },
+        "restingQty": {
+          "eq": 0
+        },
+        "averageScoreBps": {
+          "eq": 0
+        },
+        "recordScoreBps": {
+          "eq": 0
+        },
+        "effectiveRiskBudgetRef": "budget-export-1",
+        "modelId": "model-export-1"
+      }
+    },
+    {
+      "profile": "passive_sell",
+      "outputFile": "passive_sell.json",
+      "scenarioId": "export-passive-sell-1",
+      "expect": {
+        "status": "OK",
+        "matchedPolicy": "PASSIVE",
+        "matchedReportFound": true,
+        "reportPolicyCount": {
+          "eq": 1
+        },
+        "latestFinalStatus": "DURABLE_ACCEPTED",
+        "feedbackEventCount": {
+          "eq": 2
+        },
+        "shadowComparisonStatus": "MATCHED",
+        "executedQty": {
+          "eq": 0
+        },
+        "restingQty": {
+          "eq": 120
+        },
+        "averageScoreBps": {
+          "eq": 0
+        },
+        "recordScoreBps": {
+          "eq": 0
+        },
+        "effectiveRiskBudgetRef": "budget-export-2",
+        "modelId": "model-export-2"
+      }
+    },
+    {
+      "profile": "default_compare",
+      "outputFile": "default_compare.json",
+      "scenarioId": "export-default-compare-1",
+      "expect": {
+        "status": "OK",
+        "matchedPolicy": "DEFAULT",
+        "matchedReportFound": false,
+        "reportPolicyCount": {
+          "eq": 5
+        },
+        "latestFinalStatus": "DURABLE_ACCEPTED",
+        "feedbackEventCount": {
+          "eq": 2
+        },
+        "shadowComparisonStatus": "MATCHED",
+        "executedQty": {
+          "eq": 0
+        },
+        "restingQty": {
+          "eq": 0
+        },
+        "averageScoreBps": {
+          "eq": 0
+        },
+        "recordScoreBps": {
+          "eq": 0
+        },
+        "effectiveRiskBudgetRef": "budget-export-3",
+        "modelId": "model-export-3"
+      }
+    }
+  ]
+}
