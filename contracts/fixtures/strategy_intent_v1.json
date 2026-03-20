@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "intentId": "export-aggressive-buy-1",
+  "accountId": "acc-export-1",
+  "sessionId": "sess-export-1",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "type": "LIMIT",
+  "qty": 100,
+  "limitPrice": 101,
+  "timeInForce": "IOC",
+  "urgency": "HIGH",
+  "executionPolicy": "AGGRESSIVE",
+  "riskBudgetRef": {
+    "budgetId": "budget-export-1",
+    "version": 3
+  },
+  "modelId": "model-export-1",
+  "createdAtNs": 100,
+  "expiresAtNs": 1000
+}
