@@ -6070,7 +6070,8 @@ mod tests {
 
     #[tokio::test]
     async fn strategy_intent_submit_high_urgency_bypasses_durable_controller_soft() {
-        let mut state = build_test_state();
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
         state.v3_durable_admission_controller_enabled = true;
         state.v3_durable_admission_level.store(1, Ordering::Relaxed);
         if let Some(level) = state.v3_durable_admission_level_per_lane.get(0) {
@@ -6165,7 +6166,8 @@ mod tests {
 
     #[tokio::test]
     async fn strategy_intent_submit_high_urgency_bypasses_durable_backpressure_soft() {
-        let mut state = build_test_state();
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
         state.v3_durable_backlog_soft_reject_per_sec = 1_000;
         state.v3_durable_backlog_hard_reject_per_sec = 2_000;
         state
@@ -6231,7 +6233,8 @@ mod tests {
 
     #[tokio::test]
     async fn strategy_intent_submit_high_urgency_bypasses_durable_confirm_age_soft() {
-        let mut state = build_test_state();
+        let (mut state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
         state.v3_durable_confirm_soft_reject_age_us = 5_000;
         state.v3_durable_confirm_hard_reject_age_us = 10_000;
         state
