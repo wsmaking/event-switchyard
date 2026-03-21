@@ -728,25 +728,88 @@ fn enrich_strategy_execution_catchup_live_orders(
             continue;
         };
         let order_id = super::v3_order_id(&order_state.session_id, session_seq);
-        let Some(order) = state.sharded_store.find_by_id(&order_id) else {
-            continue;
-        };
-        order_state.attach_live_order(StrategyExecutionLiveOrderState::new(
-            order.order_id.clone(),
-            order.side.clone(),
-            order.status.as_str(),
-            order.qty,
-            order.filled_qty,
-            order.accepted_at.saturating_mul(1_000_000),
-            order.last_update_at.saturating_mul(1_000_000),
-            order.status.is_terminal(),
-        ));
+        if let Some(order) = state.sharded_store.find_by_id(&order_id) {
+            attach_live_order_from_store_snapshot(order_state, &order);
+        } else if let Some(confirm_snapshot) = state
+            .v3_confirm_store
+            .snapshot(&order_state.session_id, session_seq)
+        {
+            attach_synthetic_live_order_from_confirm_snapshot(order_state, &confirm_snapshot);
+        }
         if let Some(live_order) = order_state.live_order.as_ref() {
             order_state.latest_event_at_ns = order_state
                 .latest_event_at_ns
                 .max(live_order.last_update_at_ns);
         }
     }
+}
+
+fn attach_live_order_from_store_snapshot(
+    order_state: &mut StrategyExecutionCatchupOrderState,
+    order: &crate::store::OrderSnapshot,
+) {
+    order_state.attach_live_order(StrategyExecutionLiveOrderState::new(
+        order.order_id.clone(),
+        order.side.clone(),
+        order.status.as_str(),
+        order.qty,
+        order.filled_qty,
+        order.accepted_at.saturating_mul(1_000_000),
+        order.last_update_at.saturating_mul(1_000_000),
+        order.status.is_terminal(),
+    ));
+}
+
+fn attach_synthetic_live_order_from_confirm_snapshot(
+    order_state: &mut StrategyExecutionCatchupOrderState,
+    confirm_snapshot: &super::V3ConfirmSnapshot,
+) {
+    let live_order = synthetic_live_order_from_confirm_snapshot(order_state, confirm_snapshot);
+    if let Some(live_order) = live_order {
+        order_state.attach_live_order(live_order);
+    }
+}
+
+fn synthetic_live_order_from_confirm_snapshot(
+    order_state: &StrategyExecutionCatchupOrderState,
+    confirm_snapshot: &super::V3ConfirmSnapshot,
+) -> Option<StrategyExecutionLiveOrderState> {
+    let signed_qty = order_state
+        .position_delta_qty
+        .or(confirm_snapshot.position_delta_qty)?;
+    if signed_qty == 0 {
+        return None;
+    }
+    let side = if signed_qty > 0 { "BUY" } else { "SELL" };
+    let qty = signed_qty.unsigned_abs();
+    let status = match confirm_snapshot.status {
+        super::V3ConfirmStatus::DurableAccepted => "DURABLE_ACCEPTED",
+        super::V3ConfirmStatus::DurableRejected => "REJECTED",
+        super::V3ConfirmStatus::VolatileAccept | super::V3ConfirmStatus::LossSuspect => {
+            return None;
+        }
+    };
+    Some(StrategyExecutionLiveOrderState::new(
+        super::v3_order_id(
+            &order_state.session_id,
+            order_state.session_seq.unwrap_or_default(),
+        ),
+        side,
+        status,
+        qty,
+        0,
+        confirm_snapshot
+            .received_at_ns
+            .max(order_state.latest_event_at_ns),
+        confirm_snapshot
+            .updated_at_ns
+            .max(confirm_snapshot.received_at_ns)
+            .max(order_state.latest_event_at_ns),
+        matches!(
+            confirm_snapshot.status,
+            super::V3ConfirmStatus::DurableRejected
+        ),
+    ))
 }
 
 pub(super) fn append_algo_runtime_snapshot(state: &AppState, execution: &AlgoParentExecution) {
@@ -1393,8 +1456,8 @@ mod tests {
     use crate::audit::AuditEvent;
     use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
     use crate::strategy::replay::{
-        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput, StrategyExecutionFact,
-        StrategyExecutionFactStatus,
+        STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput,
+        StrategyExecutionCatchupOrderState, StrategyExecutionFact, StrategyExecutionFactStatus,
     };
 
     use super::{
@@ -1852,6 +1915,97 @@ mod tests {
         assert_eq!(latest_order_states.len(), 2);
         assert_eq!(latest_order_states[0].cursor, 1);
         assert_eq!(latest_order_states[1].cursor, 2);
+    }
+
+    #[test]
+    fn synthetic_live_order_uses_durable_accept_snapshot_when_runtime_order_missing() {
+        let order_state = StrategyExecutionCatchupOrderState {
+            cursor: 7,
+            session_id: "sess-1".to_string(),
+            session_seq: Some(7),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(1),
+            intent_id: Some("intent-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            symbol: "AAPL".to_string(),
+            position_delta_qty: Some(15),
+            latest_event_at_ns: 7_000,
+            latest_status: StrategyExecutionFactStatus::DurableAccepted,
+            reason: None,
+            live_order: None,
+        };
+        let confirm_snapshot = super::super::V3ConfirmSnapshot {
+            status: super::super::V3ConfirmStatus::DurableAccepted,
+            reason: None,
+            attempt_seq: 7,
+            received_at_ns: 6_000,
+            updated_at_ns: 8_000,
+            shard_id: 0,
+            account_id: Some("acc-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-1".to_string()),
+            decision_attempt_seq: Some(1),
+            intent_id: Some("intent-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            position_symbol_key: None,
+            position_delta_qty: Some(15),
+        };
+
+        let live_order =
+            super::synthetic_live_order_from_confirm_snapshot(&order_state, &confirm_snapshot)
+                .expect("durable accepted snapshot should synthesize live order");
+
+        assert_eq!(live_order.order_id, "v3/sess-1/7");
+        assert_eq!(live_order.side, "BUY");
+        assert_eq!(live_order.qty, 15);
+        assert_eq!(live_order.filled_qty, 0);
+        assert_eq!(live_order.remaining_qty, 15);
+        assert_eq!(live_order.status, "DURABLE_ACCEPTED");
+        assert!(!live_order.is_terminal);
+        assert_eq!(live_order.accepted_at_ns, 7_000);
+        assert_eq!(live_order.last_update_at_ns, 8_000);
+    }
+
+    #[test]
+    fn synthetic_live_order_skips_unknown_confirm_statuses() {
+        let order_state = StrategyExecutionCatchupOrderState {
+            cursor: 9,
+            session_id: "sess-1".to_string(),
+            session_seq: Some(9),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-9".to_string()),
+            decision_attempt_seq: Some(1),
+            intent_id: Some("intent-9".to_string()),
+            model_id: Some("model-1".to_string()),
+            symbol: "AAPL".to_string(),
+            position_delta_qty: Some(-12),
+            latest_event_at_ns: 9_000,
+            latest_status: StrategyExecutionFactStatus::LossSuspect,
+            reason: Some("DURABILITY_QUEUE_FULL".to_string()),
+            live_order: None,
+        };
+        let confirm_snapshot = super::super::V3ConfirmSnapshot {
+            status: super::super::V3ConfirmStatus::LossSuspect,
+            reason: Some("DURABILITY_QUEUE_FULL".to_string()),
+            attempt_seq: 9,
+            received_at_ns: 9_000,
+            updated_at_ns: 9_500,
+            shard_id: 0,
+            account_id: Some("acc-1".to_string()),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("decision-9".to_string()),
+            decision_attempt_seq: Some(1),
+            intent_id: Some("intent-9".to_string()),
+            model_id: Some("model-1".to_string()),
+            position_symbol_key: None,
+            position_delta_qty: Some(-12),
+        };
+
+        assert!(
+            super::synthetic_live_order_from_confirm_snapshot(&order_state, &confirm_snapshot)
+                .is_none()
+        );
     }
 
     fn strategy_intent_fixture() -> crate::strategy::intent::StrategyIntent {

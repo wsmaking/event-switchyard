@@ -402,6 +402,9 @@ fn parse_args() -> Result<ReaderConfig, String> {
             return Err("--adapt-proposal requires --market-desired-signed-qty".to_string());
         }
     }
+    if submit_proposal && !adapt_proposal {
+        return Err("--submit-proposal requires --adapt-proposal".to_string());
+    }
 
     Ok(ReaderConfig {
         base_url,
@@ -887,7 +890,9 @@ mod tests {
         decode_json_or_string, parse_http_base_url, parse_http_response, persist_cursor_state,
     };
     use crate::order::{OrderType, TimeInForce};
-    use crate::strategy::alpha_redecision::AlphaRecoveryContext;
+    use crate::strategy::alpha_redecision::{
+        AlphaRecoveryContext, AlphaRecoveryOperatorStatus, AlphaUnknownExposureBreakdown,
+    };
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
         StrategyRecoveryPolicy,
@@ -1005,8 +1010,11 @@ mod tests {
             open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
+            unknown_exposure_breakdown: AlphaUnknownExposureBreakdown::default(),
             unsent_signed_qty: 40,
             requires_manual_intervention: false,
+            operator_status: AlphaRecoveryOperatorStatus::ReadyForReDecision,
+            operator_reason: None,
             next_cursor: 77,
             has_more: false,
             latest_status_totals: Default::default(),
@@ -1047,8 +1055,11 @@ mod tests {
             open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
+            unknown_exposure_breakdown: AlphaUnknownExposureBreakdown::default(),
             unsent_signed_qty: 40,
             requires_manual_intervention: false,
+            operator_status: AlphaRecoveryOperatorStatus::ReadyForReDecision,
+            operator_reason: None,
             next_cursor: 77,
             has_more: false,
             latest_status_totals: Default::default(),

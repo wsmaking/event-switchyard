@@ -15,6 +15,16 @@ pub enum AlphaDecisionClass {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlphaUnknownExposureReason {
+    Unconfirmed,
+    LossSuspect,
+    ResidualUnknown,
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AlphaRecoveryDecision {
@@ -24,6 +34,34 @@ pub struct AlphaRecoveryDecision {
     pub open_signed_qty: i64,
     pub failed_signed_qty: i64,
     pub unknown_signed_qty: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<AlphaUnknownExposureReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AlphaUnknownExposureBreakdown {
+    pub unconfirmed_signed_qty: i64,
+    pub loss_suspect_signed_qty: i64,
+    pub residual_unknown_signed_qty: i64,
+}
+
+impl AlphaUnknownExposureBreakdown {
+    fn total_unknown_signed_qty(&self) -> i64 {
+        self.unconfirmed_signed_qty
+            .saturating_add(self.loss_suspect_signed_qty)
+            .saturating_add(self.residual_unknown_signed_qty)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlphaRecoveryOperatorStatus {
+    ReadyForReDecision,
+    HoldUnconfirmedExposure,
+    HoldLossSuspectExposure,
+    HoldMixedUnknownExposure,
+    HoldResidualUnknownExposure,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,8 +76,12 @@ pub struct AlphaRecoveryContext {
     pub open_signed_qty: i64,
     pub failed_signed_qty: i64,
     pub unknown_signed_qty: i64,
+    pub unknown_exposure_breakdown: AlphaUnknownExposureBreakdown,
     pub unsent_signed_qty: i64,
     pub requires_manual_intervention: bool,
+    pub operator_status: AlphaRecoveryOperatorStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_reason: Option<String>,
     pub next_cursor: u64,
     pub has_more: bool,
     pub latest_status_totals: StrategyExecutionStatusTotals,
@@ -59,6 +101,7 @@ impl AlphaRecoveryContext {
         let mut open_signed_qty = 0i64;
         let mut failed_signed_qty = 0i64;
         let mut unknown_signed_qty = 0i64;
+        let mut unknown_exposure_breakdown = AlphaUnknownExposureBreakdown::default();
         let mut decisions = Vec::with_capacity(snapshot.decisions.len());
 
         for decision in snapshot.decisions {
@@ -67,6 +110,25 @@ impl AlphaRecoveryContext {
             open_signed_qty = open_signed_qty.saturating_add(classified.open_signed_qty);
             failed_signed_qty = failed_signed_qty.saturating_add(classified.failed_signed_qty);
             unknown_signed_qty = unknown_signed_qty.saturating_add(classified.unknown_signed_qty);
+            match classified.unknown_reason {
+                Some(AlphaUnknownExposureReason::Unconfirmed) => {
+                    unknown_exposure_breakdown.unconfirmed_signed_qty = unknown_exposure_breakdown
+                        .unconfirmed_signed_qty
+                        .saturating_add(classified.unknown_signed_qty);
+                }
+                Some(AlphaUnknownExposureReason::LossSuspect) => {
+                    unknown_exposure_breakdown.loss_suspect_signed_qty = unknown_exposure_breakdown
+                        .loss_suspect_signed_qty
+                        .saturating_add(classified.unknown_signed_qty);
+                }
+                Some(AlphaUnknownExposureReason::ResidualUnknown) => {
+                    unknown_exposure_breakdown.residual_unknown_signed_qty =
+                        unknown_exposure_breakdown
+                            .residual_unknown_signed_qty
+                            .saturating_add(classified.unknown_signed_qty);
+                }
+                Some(AlphaUnknownExposureReason::None) | None => {}
+            }
             decisions.push(classified);
         }
 
@@ -82,6 +144,8 @@ impl AlphaRecoveryContext {
         } else {
             0
         };
+        let (operator_status, operator_reason) =
+            classify_operator_status(&unknown_exposure_breakdown);
 
         Self {
             execution_run_id: snapshot.execution_run_id,
@@ -91,8 +155,12 @@ impl AlphaRecoveryContext {
             open_signed_qty,
             failed_signed_qty,
             unknown_signed_qty,
+            unknown_exposure_breakdown,
             unsent_signed_qty,
-            requires_manual_intervention: unknown_signed_qty != 0,
+            requires_manual_intervention: operator_status
+                != AlphaRecoveryOperatorStatus::ReadyForReDecision,
+            operator_status,
+            operator_reason,
             next_cursor: snapshot.next_cursor,
             has_more: snapshot.has_more,
             latest_status_totals: snapshot.latest_status_totals,
@@ -108,6 +176,7 @@ fn classify_recovery_decision(decision: StrategyExecutionDecisionState) -> Alpha
     let mut open_signed_qty = 0i64;
     let mut failed_signed_qty = 0i64;
     let mut unknown_signed_qty = 0i64;
+    let mut unknown_reason = None;
 
     let class = if let Some(live_order) = decision.live_order.as_ref() {
         let filled_abs_qty = live_order.filled_qty.min(basis_abs_qty);
@@ -137,6 +206,7 @@ fn classify_recovery_decision(decision: StrategyExecutionDecisionState) -> Alpha
             AlphaDecisionClass::Failed
         } else {
             unknown_signed_qty = signed_qty_from_abs(sign, basis_abs_qty);
+            unknown_reason = Some(AlphaUnknownExposureReason::ResidualUnknown);
             AlphaDecisionClass::Unknown
         }
     } else {
@@ -147,10 +217,18 @@ fn classify_recovery_decision(decision: StrategyExecutionDecisionState) -> Alpha
                 failed_signed_qty = decision_signed_qty;
                 AlphaDecisionClass::Failed
             }
-            StrategyExecutionFactStatus::DurableAccepted
-            | StrategyExecutionFactStatus::Unconfirmed
-            | StrategyExecutionFactStatus::LossSuspect => {
+            StrategyExecutionFactStatus::DurableAccepted => {
+                open_signed_qty = decision_signed_qty;
+                AlphaDecisionClass::Open
+            }
+            StrategyExecutionFactStatus::Unconfirmed => {
                 unknown_signed_qty = decision_signed_qty;
+                unknown_reason = Some(AlphaUnknownExposureReason::Unconfirmed);
+                AlphaDecisionClass::Unknown
+            }
+            StrategyExecutionFactStatus::LossSuspect => {
+                unknown_signed_qty = decision_signed_qty;
+                unknown_reason = Some(AlphaUnknownExposureReason::LossSuspect);
                 AlphaDecisionClass::Unknown
             }
         }
@@ -163,7 +241,42 @@ fn classify_recovery_decision(decision: StrategyExecutionDecisionState) -> Alpha
         open_signed_qty,
         failed_signed_qty,
         unknown_signed_qty,
+        unknown_reason,
     }
+}
+
+fn classify_operator_status(
+    breakdown: &AlphaUnknownExposureBreakdown,
+) -> (AlphaRecoveryOperatorStatus, Option<String>) {
+    let has_unconfirmed = breakdown.unconfirmed_signed_qty != 0;
+    let has_loss_suspect = breakdown.loss_suspect_signed_qty != 0;
+    let has_residual = breakdown.residual_unknown_signed_qty != 0;
+    let total_unknown = breakdown.total_unknown_signed_qty();
+    if total_unknown == 0 {
+        return (AlphaRecoveryOperatorStatus::ReadyForReDecision, None);
+    }
+    if has_residual {
+        return (
+            AlphaRecoveryOperatorStatus::HoldResidualUnknownExposure,
+            Some("RESIDUAL_UNKNOWN_EXPOSURE_PRESENT".to_string()),
+        );
+    }
+    if has_unconfirmed && has_loss_suspect {
+        return (
+            AlphaRecoveryOperatorStatus::HoldMixedUnknownExposure,
+            Some("MIXED_UNKNOWN_EXPOSURE_PRESENT".to_string()),
+        );
+    }
+    if has_unconfirmed {
+        return (
+            AlphaRecoveryOperatorStatus::HoldUnconfirmedExposure,
+            Some("UNCONFIRMED_EXPOSURE_PRESENT".to_string()),
+        );
+    }
+    (
+        AlphaRecoveryOperatorStatus::HoldLossSuspectExposure,
+        Some("LOSS_SUSPECT_EXPOSURE_PRESENT".to_string()),
+    )
 }
 
 fn decision_sign(decision: &StrategyExecutionDecisionState) -> i64 {
@@ -335,7 +448,11 @@ impl AlphaReDecision {
         if input.recovery.requires_manual_intervention {
             return Self {
                 action: AlphaReDecisionAction::HoldUnknownExposure,
-                reason: Some("UNKNOWN_EXPOSURE_PRESENT".to_string()),
+                reason: input
+                    .recovery
+                    .operator_reason
+                    .clone()
+                    .or_else(|| Some("UNKNOWN_EXPOSURE_PRESENT".to_string())),
                 desired_signed_qty: input.market.desired_signed_qty,
                 effective_desired_signed_qty: 0,
                 residual_signed_qty: 0,
@@ -461,6 +578,7 @@ mod tests {
     use super::{
         AlphaDecisionClass, AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision,
         AlphaReDecisionAction, AlphaReDecisionInput, AlphaRecoveryContext,
+        AlphaRecoveryOperatorStatus, AlphaUnknownExposureBreakdown, AlphaUnknownExposureReason,
     };
     use crate::order::{OrderType, TimeInForce};
     use crate::strategy::catchup::{
@@ -578,14 +696,34 @@ mod tests {
         let context = AlphaRecoveryContext::from_snapshot(snapshot, 100);
 
         assert_eq!(context.filled_signed_qty, 0);
-        assert_eq!(context.open_signed_qty, 0);
+        assert_eq!(context.open_signed_qty, 40);
         assert_eq!(context.failed_signed_qty, 20);
-        assert_eq!(context.unknown_signed_qty, 55);
+        assert_eq!(context.unknown_signed_qty, 15);
         assert_eq!(context.unsent_signed_qty, 25);
         assert!(context.requires_manual_intervention);
-        assert_eq!(context.decisions[0].class, AlphaDecisionClass::Unknown);
+        assert_eq!(
+            context.unknown_exposure_breakdown,
+            AlphaUnknownExposureBreakdown {
+                unconfirmed_signed_qty: 10,
+                loss_suspect_signed_qty: 5,
+                residual_unknown_signed_qty: 0,
+            }
+        );
+        assert_eq!(
+            context.operator_status,
+            AlphaRecoveryOperatorStatus::HoldMixedUnknownExposure
+        );
+        assert_eq!(context.decisions[0].class, AlphaDecisionClass::Open);
         assert_eq!(context.decisions[1].class, AlphaDecisionClass::Failed);
         assert_eq!(context.decisions[2].class, AlphaDecisionClass::Unknown);
+        assert_eq!(
+            context.decisions[2].unknown_reason,
+            Some(AlphaUnknownExposureReason::Unconfirmed)
+        );
+        assert_eq!(
+            context.decisions[3].unknown_reason,
+            Some(AlphaUnknownExposureReason::LossSuspect)
+        );
     }
 
     #[test]
@@ -630,8 +768,15 @@ mod tests {
             open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 10,
+            unknown_exposure_breakdown: AlphaUnknownExposureBreakdown {
+                unconfirmed_signed_qty: 10,
+                loss_suspect_signed_qty: 0,
+                residual_unknown_signed_qty: 0,
+            },
             unsent_signed_qty: 30,
             requires_manual_intervention: true,
+            operator_status: AlphaRecoveryOperatorStatus::HoldUnconfirmedExposure,
+            operator_reason: Some("UNCONFIRMED_EXPOSURE_PRESENT".to_string()),
             next_cursor: 1,
             has_more: false,
             latest_status_totals: Default::default(),
@@ -661,6 +806,10 @@ mod tests {
         );
 
         assert_eq!(outcome.action, AlphaReDecisionAction::HoldUnknownExposure);
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("UNCONFIRMED_EXPOSURE_PRESENT")
+        );
         assert!(outcome.proposed_intent.is_none());
     }
 
@@ -674,8 +823,11 @@ mod tests {
             open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
+            unknown_exposure_breakdown: AlphaUnknownExposureBreakdown::default(),
             unsent_signed_qty: 40,
             requires_manual_intervention: false,
+            operator_status: AlphaRecoveryOperatorStatus::ReadyForReDecision,
+            operator_reason: None,
             next_cursor: 1,
             has_more: false,
             latest_status_totals: Default::default(),
@@ -718,8 +870,11 @@ mod tests {
             open_signed_qty: 30,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
+            unknown_exposure_breakdown: AlphaUnknownExposureBreakdown::default(),
             unsent_signed_qty: 40,
             requires_manual_intervention: false,
+            operator_status: AlphaRecoveryOperatorStatus::ReadyForReDecision,
+            operator_reason: None,
             next_cursor: 7,
             has_more: false,
             latest_status_totals: Default::default(),
