@@ -682,7 +682,7 @@ fn redecision_skip_reason(redecision: &AlphaReDecision) -> String {
             AlphaReDecisionAction::AbortSideFlip => "SIDE_FLIP_REQUIRES_NEW_RUN",
             AlphaReDecisionAction::NoopNoSignal => "NO_DESIRED_QTY",
             AlphaReDecisionAction::NoopAlreadySatisfied => {
-                "CONFIRMED_QTY_ALREADY_SATISFIES_DESIRED_QTY"
+                "LIVE_COMMITTED_QTY_ALREADY_SATISFIES_DESIRED_QTY"
             }
             AlphaReDecisionAction::SubmitFreshIntent => "SUBMIT_FRESH_INTENT",
         }
@@ -1001,7 +1001,8 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
-            confirmed_signed_qty: 40,
+            filled_signed_qty: 40,
+            open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
             unsent_signed_qty: 40,
@@ -1042,7 +1043,8 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
-            confirmed_signed_qty: 40,
+            filled_signed_qty: 40,
+            open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
             unsent_signed_qty: 40,

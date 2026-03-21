@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AlphaDecisionClass {
-    Confirmed,
+    Filled,
+    Open,
     Failed,
     Unknown,
 }
@@ -19,6 +20,10 @@ pub enum AlphaDecisionClass {
 pub struct AlphaRecoveryDecision {
     pub decision: StrategyExecutionDecisionState,
     pub class: AlphaDecisionClass,
+    pub filled_signed_qty: i64,
+    pub open_signed_qty: i64,
+    pub failed_signed_qty: i64,
+    pub unknown_signed_qty: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,7 +34,8 @@ pub struct AlphaRecoveryContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent_id: Option<String>,
     pub target_signed_qty: i64,
-    pub confirmed_signed_qty: i64,
+    pub filled_signed_qty: i64,
+    pub open_signed_qty: i64,
     pub failed_signed_qty: i64,
     pub unknown_signed_qty: i64,
     pub unsent_signed_qty: i64,
@@ -41,38 +47,32 @@ pub struct AlphaRecoveryContext {
 }
 
 impl AlphaRecoveryContext {
+    pub fn committed_signed_qty(&self) -> i64 {
+        self.filled_signed_qty.saturating_add(self.open_signed_qty)
+    }
+
     pub fn from_snapshot(
         snapshot: StrategyExecutionCatchupLoopSnapshot,
         target_signed_qty: i64,
     ) -> Self {
-        let mut confirmed_signed_qty = 0i64;
+        let mut filled_signed_qty = 0i64;
+        let mut open_signed_qty = 0i64;
         let mut failed_signed_qty = 0i64;
         let mut unknown_signed_qty = 0i64;
         let mut decisions = Vec::with_capacity(snapshot.decisions.len());
 
         for decision in snapshot.decisions {
-            let signed_qty = decision.position_delta_qty.unwrap_or_default();
-            let class = match decision.latest_status {
-                StrategyExecutionFactStatus::DurableAccepted => {
-                    confirmed_signed_qty = confirmed_signed_qty.saturating_add(signed_qty);
-                    AlphaDecisionClass::Confirmed
-                }
-                StrategyExecutionFactStatus::Rejected
-                | StrategyExecutionFactStatus::DurableRejected => {
-                    failed_signed_qty = failed_signed_qty.saturating_add(signed_qty);
-                    AlphaDecisionClass::Failed
-                }
-                StrategyExecutionFactStatus::Unconfirmed
-                | StrategyExecutionFactStatus::LossSuspect => {
-                    unknown_signed_qty = unknown_signed_qty.saturating_add(signed_qty);
-                    AlphaDecisionClass::Unknown
-                }
-            };
-            decisions.push(AlphaRecoveryDecision { decision, class });
+            let classified = classify_recovery_decision(decision);
+            filled_signed_qty = filled_signed_qty.saturating_add(classified.filled_signed_qty);
+            open_signed_qty = open_signed_qty.saturating_add(classified.open_signed_qty);
+            failed_signed_qty = failed_signed_qty.saturating_add(classified.failed_signed_qty);
+            unknown_signed_qty = unknown_signed_qty.saturating_add(classified.unknown_signed_qty);
+            decisions.push(classified);
         }
 
         let raw_unsent_signed_qty = target_signed_qty
-            .saturating_sub(confirmed_signed_qty)
+            .saturating_sub(filled_signed_qty)
+            .saturating_sub(open_signed_qty)
             .saturating_sub(failed_signed_qty)
             .saturating_sub(unknown_signed_qty);
         let unsent_signed_qty = if target_signed_qty > 0 {
@@ -87,7 +87,8 @@ impl AlphaRecoveryContext {
             execution_run_id: snapshot.execution_run_id,
             intent_id: snapshot.intent_id,
             target_signed_qty,
-            confirmed_signed_qty,
+            filled_signed_qty,
+            open_signed_qty,
             failed_signed_qty,
             unknown_signed_qty,
             unsent_signed_qty,
@@ -97,6 +98,110 @@ impl AlphaRecoveryContext {
             latest_status_totals: snapshot.latest_status_totals,
             decisions,
         }
+    }
+}
+
+fn classify_recovery_decision(decision: StrategyExecutionDecisionState) -> AlphaRecoveryDecision {
+    let sign = decision_sign(&decision);
+    let basis_abs_qty = decision_abs_qty(&decision);
+    let mut filled_signed_qty = 0i64;
+    let mut open_signed_qty = 0i64;
+    let mut failed_signed_qty = 0i64;
+    let mut unknown_signed_qty = 0i64;
+
+    let class = if let Some(live_order) = decision.live_order.as_ref() {
+        let filled_abs_qty = live_order.filled_qty.min(basis_abs_qty);
+        filled_signed_qty = signed_qty_from_abs(sign, filled_abs_qty);
+
+        let remaining_budget = basis_abs_qty.saturating_sub(filled_abs_qty);
+        let open_abs_qty = if live_order.is_terminal {
+            0
+        } else {
+            live_order.remaining_qty.min(remaining_budget)
+        };
+        open_signed_qty = signed_qty_from_abs(sign, open_abs_qty);
+
+        let residual_abs_qty = basis_abs_qty
+            .saturating_sub(filled_abs_qty)
+            .saturating_sub(open_abs_qty);
+        if live_order.is_terminal && residual_abs_qty > 0 {
+            failed_signed_qty = signed_qty_from_abs(sign, residual_abs_qty);
+        }
+
+        if open_abs_qty > 0 {
+            AlphaDecisionClass::Open
+        } else if filled_abs_qty > 0 {
+            AlphaDecisionClass::Filled
+        } else if live_order.is_terminal {
+            failed_signed_qty = signed_qty_from_abs(sign, residual_abs_qty.max(basis_abs_qty));
+            AlphaDecisionClass::Failed
+        } else {
+            unknown_signed_qty = signed_qty_from_abs(sign, basis_abs_qty);
+            AlphaDecisionClass::Unknown
+        }
+    } else {
+        let decision_signed_qty = signed_qty_from_abs(sign, basis_abs_qty);
+        match decision.latest_status {
+            StrategyExecutionFactStatus::Rejected
+            | StrategyExecutionFactStatus::DurableRejected => {
+                failed_signed_qty = decision_signed_qty;
+                AlphaDecisionClass::Failed
+            }
+            StrategyExecutionFactStatus::DurableAccepted
+            | StrategyExecutionFactStatus::Unconfirmed
+            | StrategyExecutionFactStatus::LossSuspect => {
+                unknown_signed_qty = decision_signed_qty;
+                AlphaDecisionClass::Unknown
+            }
+        }
+    };
+
+    AlphaRecoveryDecision {
+        decision,
+        class,
+        filled_signed_qty,
+        open_signed_qty,
+        failed_signed_qty,
+        unknown_signed_qty,
+    }
+}
+
+fn decision_sign(decision: &StrategyExecutionDecisionState) -> i64 {
+    let signed_qty = decision.position_delta_qty.unwrap_or_default();
+    if signed_qty != 0 {
+        return signed_qty.signum();
+    }
+    let Some(live_order) = decision.live_order.as_ref() else {
+        return 0;
+    };
+    match live_order.side.trim().to_ascii_uppercase().as_str() {
+        "BUY" => 1,
+        "SELL" => -1,
+        _ => 0,
+    }
+}
+
+fn decision_abs_qty(decision: &StrategyExecutionDecisionState) -> u64 {
+    let decision_abs_qty = decision
+        .position_delta_qty
+        .map(|value| value.unsigned_abs())
+        .unwrap_or_default();
+    let live_order_qty = decision
+        .live_order
+        .as_ref()
+        .map(|live_order| live_order.qty)
+        .unwrap_or_default();
+    decision_abs_qty.max(live_order_qty)
+}
+
+fn signed_qty_from_abs(sign: i64, abs_qty: u64) -> i64 {
+    let bounded_abs_qty = i64::try_from(abs_qty).unwrap_or(i64::MAX);
+    if sign < 0 {
+        -bounded_abs_qty
+    } else if sign > 0 {
+        bounded_abs_qty
+    } else {
+        0
     }
 }
 
@@ -269,7 +374,7 @@ impl AlphaReDecision {
             input.recovery.target_signed_qty,
         );
         let raw_residual_signed_qty =
-            effective_desired_signed_qty.saturating_sub(input.recovery.confirmed_signed_qty);
+            effective_desired_signed_qty.saturating_sub(input.recovery.committed_signed_qty());
         let residual_signed_qty = if target_sign > 0 {
             raw_residual_signed_qty.max(0)
         } else if target_sign < 0 {
@@ -280,7 +385,7 @@ impl AlphaReDecision {
         if residual_signed_qty == 0 {
             return Self {
                 action: AlphaReDecisionAction::NoopAlreadySatisfied,
-                reason: Some("CONFIRMED_QTY_ALREADY_SATISFIES_DESIRED_QTY".to_string()),
+                reason: Some("LIVE_COMMITTED_QTY_ALREADY_SATISFIES_DESIRED_QTY".to_string()),
                 desired_signed_qty: input.market.desired_signed_qty,
                 effective_desired_signed_qty,
                 residual_signed_qty: 0,
@@ -365,7 +470,9 @@ mod tests {
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
         StrategyRecoveryPolicy,
     };
-    use crate::strategy::replay::{StrategyExecutionFactStatus, StrategyExecutionStatusTotals};
+    use crate::strategy::replay::{
+        StrategyExecutionFactStatus, StrategyExecutionLiveOrderState, StrategyExecutionStatusTotals,
+    };
 
     fn decision(
         cursor: u64,
@@ -391,6 +498,27 @@ mod tests {
             latest_event_at_ns: cursor * 10,
             latest_status: status,
             reason: None,
+            live_order: None,
+        }
+    }
+
+    fn live_order(
+        side: &str,
+        status: &str,
+        qty: u64,
+        filled_qty: u64,
+    ) -> StrategyExecutionLiveOrderState {
+        let remaining_qty = qty.saturating_sub(filled_qty.min(qty));
+        StrategyExecutionLiveOrderState {
+            order_id: "v3/sess-1/1".to_string(),
+            side: side.to_string(),
+            status: status.to_string(),
+            qty,
+            filled_qty: filled_qty.min(qty),
+            remaining_qty,
+            accepted_at_ns: 1_000,
+            last_update_at_ns: 2_000,
+            is_terminal: matches!(status, "FILLED" | "CANCELED" | "REJECTED"),
         }
     }
 
@@ -425,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_context_separates_confirmed_failed_unknown_and_unsent() {
+    fn recovery_context_separates_filled_open_failed_unknown_and_unsent() {
         let snapshot = StrategyExecutionCatchupLoopSnapshot {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
@@ -449,14 +577,47 @@ mod tests {
 
         let context = AlphaRecoveryContext::from_snapshot(snapshot, 100);
 
-        assert_eq!(context.confirmed_signed_qty, 40);
+        assert_eq!(context.filled_signed_qty, 0);
+        assert_eq!(context.open_signed_qty, 0);
         assert_eq!(context.failed_signed_qty, 20);
-        assert_eq!(context.unknown_signed_qty, 15);
+        assert_eq!(context.unknown_signed_qty, 55);
         assert_eq!(context.unsent_signed_qty, 25);
         assert!(context.requires_manual_intervention);
-        assert_eq!(context.decisions[0].class, AlphaDecisionClass::Confirmed);
+        assert_eq!(context.decisions[0].class, AlphaDecisionClass::Unknown);
         assert_eq!(context.decisions[1].class, AlphaDecisionClass::Failed);
         assert_eq!(context.decisions[2].class, AlphaDecisionClass::Unknown);
+    }
+
+    #[test]
+    fn recovery_context_reconciles_live_fill_and_open_qty() {
+        let mut reconciled = decision(1, StrategyExecutionFactStatus::LossSuspect, 20);
+        reconciled.live_order = Some(live_order("BUY", "PARTIALLY_FILLED", 20, 5));
+
+        let mut terminal = decision(2, StrategyExecutionFactStatus::DurableAccepted, 30);
+        terminal.live_order = Some(live_order("BUY", "FILLED", 30, 30));
+
+        let snapshot = StrategyExecutionCatchupLoopSnapshot {
+            execution_run_id: Some("run-1".to_string()),
+            intent_id: Some("intent-1".to_string()),
+            next_cursor: 2,
+            has_more: false,
+            total_fact_count: 2,
+            latest_status_totals: Default::default(),
+            decisions: vec![reconciled, terminal],
+        };
+
+        let context = AlphaRecoveryContext::from_snapshot(snapshot, 100);
+
+        assert_eq!(context.filled_signed_qty, 35);
+        assert_eq!(context.open_signed_qty, 15);
+        assert_eq!(context.failed_signed_qty, 0);
+        assert_eq!(context.unknown_signed_qty, 0);
+        assert_eq!(context.unsent_signed_qty, 50);
+        assert!(!context.requires_manual_intervention);
+        assert_eq!(context.decisions[0].class, AlphaDecisionClass::Open);
+        assert_eq!(context.decisions[0].filled_signed_qty, 5);
+        assert_eq!(context.decisions[0].open_signed_qty, 15);
+        assert_eq!(context.decisions[1].class, AlphaDecisionClass::Filled);
     }
 
     #[test]
@@ -465,7 +626,8 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
-            confirmed_signed_qty: 40,
+            filled_signed_qty: 40,
+            open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 10,
             unsent_signed_qty: 30,
@@ -508,7 +670,8 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
-            confirmed_signed_qty: 40,
+            filled_signed_qty: 40,
+            open_signed_qty: 0,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
             unsent_signed_qty: 40,
@@ -551,7 +714,8 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
-            confirmed_signed_qty: 40,
+            filled_signed_qty: 10,
+            open_signed_qty: 30,
             failed_signed_qty: 20,
             unknown_signed_qty: 0,
             unsent_signed_qty: 40,

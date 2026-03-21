@@ -1,7 +1,7 @@
 use super::intent::StrategyIntent;
 use super::replay::{
     StrategyExecutionCatchupInput, StrategyExecutionCatchupOrderState, StrategyExecutionFactStatus,
-    StrategyExecutionStatusTotals,
+    StrategyExecutionLiveOrderState, StrategyExecutionStatusTotals,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -82,6 +82,8 @@ pub struct StrategyExecutionDecisionState {
     pub latest_status: StrategyExecutionFactStatus,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_order: Option<StrategyExecutionLiveOrderState>,
 }
 
 impl StrategyExecutionDecisionState {
@@ -101,6 +103,7 @@ impl StrategyExecutionDecisionState {
             latest_event_at_ns: state.latest_event_at_ns,
             latest_status: state.latest_status,
             reason: state.reason.clone(),
+            live_order: state.live_order.clone(),
         }
     }
 }
@@ -276,6 +279,7 @@ mod tests {
             latest_event_at_ns: cursor * 100,
             latest_status: status,
             reason: None,
+            live_order: None,
         }
     }
 

@@ -162,6 +162,8 @@ pub struct StrategyExecutionCatchupOrderState {
     pub latest_status: StrategyExecutionFactStatus,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_order: Option<StrategyExecutionLiveOrderState>,
 }
 
 impl StrategyExecutionCatchupOrderState {
@@ -180,6 +182,50 @@ impl StrategyExecutionCatchupOrderState {
             latest_event_at_ns: item.fact.event_at_ns,
             latest_status: item.fact.status,
             reason: item.fact.reason.clone(),
+            live_order: None,
+        }
+    }
+
+    pub fn attach_live_order(&mut self, live_order: StrategyExecutionLiveOrderState) {
+        self.live_order = Some(live_order);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyExecutionLiveOrderState {
+    pub order_id: String,
+    pub side: String,
+    pub status: String,
+    pub qty: u64,
+    pub filled_qty: u64,
+    pub remaining_qty: u64,
+    pub accepted_at_ns: u64,
+    pub last_update_at_ns: u64,
+    pub is_terminal: bool,
+}
+
+impl StrategyExecutionLiveOrderState {
+    pub fn new(
+        order_id: impl Into<String>,
+        side: impl Into<String>,
+        status: impl Into<String>,
+        qty: u64,
+        filled_qty: u64,
+        accepted_at_ns: u64,
+        last_update_at_ns: u64,
+        is_terminal: bool,
+    ) -> Self {
+        Self {
+            order_id: order_id.into(),
+            side: side.into(),
+            status: status.into(),
+            qty,
+            filled_qty: filled_qty.min(qty),
+            remaining_qty: qty.saturating_sub(filled_qty.min(qty)),
+            accepted_at_ns,
+            last_update_at_ns,
+            is_terminal,
         }
     }
 }
@@ -229,37 +275,27 @@ impl StrategyExecutionCatchupInput {
         has_more: bool,
         facts: Vec<StrategyExecutionReplayItem>,
     ) -> Self {
-        let mut latest_by_order: HashMap<
-            StrategyExecutionOrderKey,
-            StrategyExecutionCatchupOrderState,
-        > = HashMap::new();
-        for item in &facts {
-            let key = if let Some(decision_key) = item.fact.decision_key.clone() {
-                StrategyExecutionOrderKey::Decision {
-                    execution_run_id: item.fact.execution_run_id.clone(),
-                    intent_id: item.fact.intent_id.clone(),
-                    decision_key,
-                }
-            } else if let Some(session_seq) = item.fact.session_seq {
-                StrategyExecutionOrderKey::SessionOrder {
-                    session_id: item.fact.session_id.clone(),
-                    session_seq,
-                }
-            } else if let Some(intent_id) = item.fact.intent_id.clone() {
-                StrategyExecutionOrderKey::IntentOrder {
-                    execution_run_id: item.fact.execution_run_id.clone(),
-                    intent_id,
-                }
-            } else {
-                StrategyExecutionOrderKey::Cursor(item.cursor)
-            };
-            latest_by_order.insert(
-                key,
-                StrategyExecutionCatchupOrderState::from_replay_item(item),
-            );
-        }
+        let latest_order_states = latest_order_states_from_replay_items(&facts);
+        Self::from_replay_items_with_latest_order_states(
+            execution_run_id,
+            intent_id,
+            requested_after_cursor,
+            next_cursor,
+            has_more,
+            facts,
+            latest_order_states,
+        )
+    }
 
-        let mut latest_order_states = latest_by_order.into_values().collect::<Vec<_>>();
+    pub fn from_replay_items_with_latest_order_states(
+        execution_run_id: Option<String>,
+        intent_id: Option<String>,
+        requested_after_cursor: u64,
+        next_cursor: Option<u64>,
+        has_more: bool,
+        facts: Vec<StrategyExecutionReplayItem>,
+        mut latest_order_states: Vec<StrategyExecutionCatchupOrderState>,
+    ) -> Self {
         latest_order_states.sort_by_key(|state| state.cursor);
 
         let mut latest_status_totals = StrategyExecutionStatusTotals::default();
@@ -282,11 +318,47 @@ impl StrategyExecutionCatchupInput {
     }
 }
 
+pub fn latest_order_states_from_replay_items(
+    facts: &[StrategyExecutionReplayItem],
+) -> Vec<StrategyExecutionCatchupOrderState> {
+    let mut latest_by_order: HashMap<
+        StrategyExecutionOrderKey,
+        StrategyExecutionCatchupOrderState,
+    > = HashMap::new();
+    for item in facts {
+        let key = if let Some(decision_key) = item.fact.decision_key.clone() {
+            StrategyExecutionOrderKey::Decision {
+                execution_run_id: item.fact.execution_run_id.clone(),
+                intent_id: item.fact.intent_id.clone(),
+                decision_key,
+            }
+        } else if let Some(session_seq) = item.fact.session_seq {
+            StrategyExecutionOrderKey::SessionOrder {
+                session_id: item.fact.session_id.clone(),
+                session_seq,
+            }
+        } else if let Some(intent_id) = item.fact.intent_id.clone() {
+            StrategyExecutionOrderKey::IntentOrder {
+                execution_run_id: item.fact.execution_run_id.clone(),
+                intent_id,
+            }
+        } else {
+            StrategyExecutionOrderKey::Cursor(item.cursor)
+        };
+        latest_by_order.insert(
+            key,
+            StrategyExecutionCatchupOrderState::from_replay_item(item),
+        );
+    }
+
+    latest_by_order.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        StrategyExecutionCatchupInput, StrategyExecutionFact, StrategyExecutionFactStatus,
-        StrategyExecutionReplayItem,
+        StrategyExecutionCatchupInput, StrategyExecutionCatchupOrderState, StrategyExecutionFact,
+        StrategyExecutionFactStatus, StrategyExecutionLiveOrderState, StrategyExecutionReplayItem,
     };
 
     #[test]
@@ -392,5 +464,45 @@ mod tests {
             catchup.latest_order_states[0].latest_status,
             StrategyExecutionFactStatus::DurableAccepted
         );
+    }
+
+    #[test]
+    fn catchup_order_state_attaches_live_order_snapshot() {
+        let mut state = StrategyExecutionCatchupOrderState {
+            cursor: 11,
+            session_id: "sess-1".to_string(),
+            session_seq: Some(7),
+            execution_run_id: Some("run-1".to_string()),
+            decision_key: Some("dec-1".to_string()),
+            decision_attempt_seq: Some(1),
+            intent_id: Some("intent-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            symbol: "AAPL".to_string(),
+            position_delta_qty: Some(10),
+            latest_event_at_ns: 100,
+            latest_status: StrategyExecutionFactStatus::Unconfirmed,
+            reason: None,
+            live_order: None,
+        };
+        state.attach_live_order(StrategyExecutionLiveOrderState::new(
+            "v3/sess-1/7",
+            "BUY",
+            "PARTIALLY_FILLED",
+            10,
+            4,
+            12_000_000,
+            34_000_000,
+            false,
+        ));
+
+        let live = state.live_order.expect("live order");
+        assert_eq!(live.order_id, "v3/sess-1/7");
+        assert_eq!(live.side, "BUY");
+        assert_eq!(live.status, "PARTIALLY_FILLED");
+        assert_eq!(live.filled_qty, 4);
+        assert_eq!(live.remaining_qty, 6);
+        assert_eq!(live.accepted_at_ns, 12_000_000);
+        assert_eq!(live.last_update_at_ns, 34_000_000);
+        assert!(!live.is_terminal);
     }
 }
