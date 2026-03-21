@@ -1,4 +1,5 @@
 pub mod algo;
+pub mod alpha_redecision;
 pub mod catchup;
 pub mod config;
 pub mod feedback;

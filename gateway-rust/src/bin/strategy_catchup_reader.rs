@@ -13,10 +13,12 @@ use tokio::net::TcpStream;
 mod order;
 mod strategy;
 
+use strategy::alpha_redecision::{
+    AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision, AlphaReDecisionAction,
+    AlphaReDecisionInput, AlphaRecoveryContext,
+};
 use strategy::catchup::{
-    StrategyExecutionCatchupLoop, StrategyExecutionFreshIntentParams,
-    StrategyExecutionFreshIntentProposal, StrategyExecutionRecoveryPlan,
-    StrategyExecutionRecoveryPolicy, StrategyExecutionUnknownQtyPolicy,
+    StrategyExecutionCatchupLoop, StrategyExecutionCatchupLoopSnapshot,
     target_signed_qty_for_intent,
 };
 use strategy::intent::StrategyIntent;
@@ -52,12 +54,16 @@ struct ReaderConfig {
     limit: usize,
     max_pages: Option<usize>,
     target_signed_qty: Option<i64>,
-    recovery_policy: StrategyExecutionRecoveryPolicy,
     template_intent_path: Option<String>,
-    proposal_intent_id: Option<String>,
-    proposal_decision_key: Option<String>,
-    proposal_created_at_ns: Option<u64>,
-    proposal_expires_at_ns: Option<u64>,
+    market_desired_signed_qty: Option<i64>,
+    market_observed_at_ns: Option<u64>,
+    market_max_decision_age_ns: Option<u64>,
+    market_snapshot_id: Option<String>,
+    market_signal_id: Option<String>,
+    next_intent_id: Option<String>,
+    next_decision_key: Option<String>,
+    next_created_at_ns: Option<u64>,
+    next_expires_at_ns: Option<u64>,
     adapt_proposal: bool,
     submit_proposal: bool,
 }
@@ -75,13 +81,15 @@ struct ReaderCursorState {
 struct ReaderOutput {
     scope_kind: String,
     scope_id: String,
-    snapshot: strategy::catchup::StrategyExecutionCatchupLoopSnapshot,
+    snapshot: StrategyExecutionCatchupLoopSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_plan: Option<StrategyExecutionRecoveryPlan>,
+    recovery_context: Option<AlphaRecoveryContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fresh_intent_proposal: Option<StrategyExecutionFreshIntentProposal>,
+    redecision_input: Option<AlphaReDecisionInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    proposal_execution: Option<ReaderProposalExecution>,
+    redecision: Option<AlphaReDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_result: Option<ReaderExecutionResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,10 +101,13 @@ struct ParsedHttpBaseUrl {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct ReaderProposalExecution {
-    adapt_http_status: u16,
-    adapt_ok: bool,
-    adapt_response: Value,
+struct ReaderExecutionResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapt_http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapt_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapt_response: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     submit_http_status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +116,20 @@ struct ReaderProposalExecution {
     submit_response: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped_reason: Option<String>,
+}
+
+impl ReaderExecutionResult {
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            adapt_http_status: None,
+            adapt_ok: None,
+            adapt_response: None,
+            submit_http_status: None,
+            submit_ok: None,
+            submit_response: None,
+            skipped_reason: Some(reason.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,37 +194,32 @@ async fn run() -> Result<(), String> {
         (None, None) => None,
     };
 
+    let now_ns = now_epoch_ns();
     let snapshot = loop_state.snapshot();
-    let recovery_plan = target_signed_qty.map(|target_signed_qty| {
-        loop_state.build_recovery_plan(target_signed_qty, config.recovery_policy)
-    });
-    let fresh_intent_proposal = match (template_intent.as_ref(), recovery_plan.as_ref()) {
-        (Some(template), Some(plan)) => Some(plan.propose_fresh_intent(
-            template,
-            build_fresh_intent_params(
-                template,
-                plan,
-                config.proposal_intent_id.as_deref(),
-                config.proposal_decision_key.as_deref(),
-                config.proposal_created_at_ns,
-                config.proposal_expires_at_ns,
-            )?,
-        )),
+    let recovery_context = target_signed_qty
+        .map(|signed_qty| AlphaRecoveryContext::from_snapshot(snapshot.clone(), signed_qty));
+    let redecision_input = match (template_intent.as_ref(), recovery_context.as_ref()) {
+        (Some(template), Some(recovery)) => {
+            build_redecision_input(template, recovery, &config, now_ns)?
+        }
         _ => None,
     };
-    let proposal_execution = if config.adapt_proposal {
-        match fresh_intent_proposal.as_ref() {
-            Some(proposal) if proposal.proposed => match proposal.intent.as_ref() {
-                Some(intent) => Some(
-                    execute_proposal_flow(&config.base_url, intent, config.submit_proposal).await?,
-                ),
-                None => None,
-            },
-            _ => None,
-        }
+    let redecision = redecision_input
+        .clone()
+        .map(|input| AlphaReDecision::evaluate(input, now_ns));
+    let execution_result = if config.adapt_proposal {
+        Some(
+            execute_redecision_flow(
+                &config.base_url,
+                redecision.as_ref(),
+                config.submit_proposal,
+            )
+            .await?,
+        )
     } else {
         None
     };
+
     let output = ReaderOutput {
         scope_kind: match &config.scope {
             ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
@@ -207,9 +227,10 @@ async fn run() -> Result<(), String> {
         },
         scope_id: config.scope.id().to_string(),
         snapshot,
-        recovery_plan,
-        fresh_intent_proposal,
-        proposal_execution,
+        recovery_context,
+        redecision_input,
+        redecision,
+        execution_result,
     };
     let raw = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
     println!("{raw}");
@@ -225,13 +246,16 @@ fn parse_args() -> Result<ReaderConfig, String> {
     let mut limit = 500usize;
     let mut max_pages = None;
     let mut target_signed_qty = None;
-    let mut unconfirmed = StrategyExecutionUnknownQtyPolicy::Hold;
-    let mut loss_suspect = StrategyExecutionUnknownQtyPolicy::Hold;
     let mut template_intent_path = None;
-    let mut proposal_intent_id = None;
-    let mut proposal_decision_key = None;
-    let mut proposal_created_at_ns = None;
-    let mut proposal_expires_at_ns = None;
+    let mut market_desired_signed_qty = None;
+    let mut market_observed_at_ns = None;
+    let mut market_max_decision_age_ns = None;
+    let mut market_snapshot_id = None;
+    let mut market_signal_id = None;
+    let mut next_intent_id = None;
+    let mut next_decision_key = None;
+    let mut next_created_at_ns = None;
+    let mut next_expires_at_ns = None;
     let mut adapt_proposal = false;
     let mut submit_proposal = false;
 
@@ -251,46 +275,50 @@ fn parse_args() -> Result<ReaderConfig, String> {
                 after_cursor = Some(parse_u64_arg(&mut args, "--after-cursor")?);
             }
             "--cursor-path" => cursor_path = Some(next_arg(&mut args, "--cursor-path")?),
-            "--limit" => {
-                limit = parse_usize_arg(&mut args, "--limit")?;
-            }
-            "--max-pages" => {
-                max_pages = Some(parse_usize_arg(&mut args, "--max-pages")?);
-            }
+            "--limit" => limit = parse_usize_arg(&mut args, "--limit")?,
+            "--max-pages" => max_pages = Some(parse_usize_arg(&mut args, "--max-pages")?),
             "--target-signed-qty" => {
                 target_signed_qty = Some(parse_i64_arg(&mut args, "--target-signed-qty")?);
             }
             "--template-intent" => {
                 template_intent_path = Some(next_arg(&mut args, "--template-intent")?);
             }
-            "--proposal-intent-id" => {
-                proposal_intent_id = Some(next_arg(&mut args, "--proposal-intent-id")?);
+            "--market-desired-signed-qty" => {
+                market_desired_signed_qty =
+                    Some(parse_i64_arg(&mut args, "--market-desired-signed-qty")?);
             }
-            "--proposal-decision-key" => {
-                proposal_decision_key = Some(next_arg(&mut args, "--proposal-decision-key")?);
+            "--market-observed-at-ns" => {
+                market_observed_at_ns = Some(parse_u64_arg(&mut args, "--market-observed-at-ns")?);
             }
-            "--proposal-created-at-ns" => {
-                proposal_created_at_ns =
-                    Some(parse_u64_arg(&mut args, "--proposal-created-at-ns")?);
+            "--market-max-decision-age-ns" => {
+                market_max_decision_age_ns =
+                    Some(parse_u64_arg(&mut args, "--market-max-decision-age-ns")?);
             }
-            "--proposal-expires-at-ns" => {
-                proposal_expires_at_ns =
-                    Some(parse_u64_arg(&mut args, "--proposal-expires-at-ns")?);
+            "--market-snapshot-id" => {
+                market_snapshot_id = Some(next_arg(&mut args, "--market-snapshot-id")?);
             }
-            "--adapt-proposal" => {
-                adapt_proposal = true;
+            "--market-signal-id" => {
+                market_signal_id = Some(next_arg(&mut args, "--market-signal-id")?);
             }
+            "--next-intent-id" | "--proposal-intent-id" => {
+                next_intent_id = Some(next_arg(&mut args, arg.as_str())?);
+            }
+            "--next-decision-key" | "--proposal-decision-key" => {
+                next_decision_key = Some(next_arg(&mut args, arg.as_str())?);
+            }
+            "--next-created-at-ns" | "--proposal-created-at-ns" => {
+                next_created_at_ns = Some(parse_u64_arg(&mut args, arg.as_str())?);
+            }
+            "--next-expires-at-ns" | "--proposal-expires-at-ns" => {
+                next_expires_at_ns = Some(parse_u64_arg(&mut args, arg.as_str())?);
+            }
+            "--adapt-proposal" => adapt_proposal = true,
             "--submit-proposal" => {
                 submit_proposal = true;
                 adapt_proposal = true;
             }
-            "--unconfirmed-policy" => {
-                unconfirmed =
-                    parse_unknown_qty_policy(&next_arg(&mut args, "--unconfirmed-policy")?)?;
-            }
-            "--loss-suspect-policy" => {
-                loss_suspect =
-                    parse_unknown_qty_policy(&next_arg(&mut args, "--loss-suspect-policy")?)?;
+            "--unconfirmed-policy" | "--loss-suspect-policy" => {
+                let _ = next_arg(&mut args, arg.as_str())?;
             }
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -307,8 +335,13 @@ fn parse_args() -> Result<ReaderConfig, String> {
         }
     };
 
-    if adapt_proposal && template_intent_path.is_none() {
-        return Err("--adapt-proposal requires --template-intent".to_string());
+    if adapt_proposal {
+        if template_intent_path.is_none() {
+            return Err("--adapt-proposal requires --template-intent".to_string());
+        }
+        if market_desired_signed_qty.is_none() {
+            return Err("--adapt-proposal requires --market-desired-signed-qty".to_string());
+        }
     }
 
     Ok(ReaderConfig {
@@ -319,15 +352,16 @@ fn parse_args() -> Result<ReaderConfig, String> {
         limit: limit.max(1),
         max_pages,
         target_signed_qty,
-        recovery_policy: StrategyExecutionRecoveryPolicy {
-            unconfirmed,
-            loss_suspect,
-        },
         template_intent_path,
-        proposal_intent_id,
-        proposal_decision_key,
-        proposal_created_at_ns,
-        proposal_expires_at_ns,
+        market_desired_signed_qty,
+        market_observed_at_ns,
+        market_max_decision_age_ns,
+        market_snapshot_id,
+        market_signal_id,
+        next_intent_id,
+        next_decision_key,
+        next_created_at_ns,
+        next_expires_at_ns,
         adapt_proposal,
         submit_proposal,
     })
@@ -356,17 +390,6 @@ fn parse_i64_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<
         .map_err(|err| format!("invalid value for {flag}: {err}"))
 }
 
-fn parse_unknown_qty_policy(raw: &str) -> Result<StrategyExecutionUnknownQtyPolicy, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "hold" => Ok(StrategyExecutionUnknownQtyPolicy::Hold),
-        "retry" => Ok(StrategyExecutionUnknownQtyPolicy::Retry),
-        "ignore" => Ok(StrategyExecutionUnknownQtyPolicy::Ignore),
-        _ => Err(format!(
-            "invalid policy: {raw} (expected hold|retry|ignore)"
-        )),
-    }
-}
-
 fn print_usage() {
     println!("strategy_catchup_reader");
     println!("usage:");
@@ -378,15 +401,14 @@ fn print_usage() {
     println!(
         "    [--cursor-path var/gateway/catchup.cursor.json] [--limit 500] [--max-pages 100] \\"
     );
+    println!("    [--target-signed-qty 100] [--template-intent /tmp/intent.json] \\");
     println!(
-        "    [--target-signed-qty 100] [--template-intent /tmp/intent.json] [--unconfirmed-policy hold|retry|ignore] \\"
+        "    [--market-desired-signed-qty 60] [--market-observed-at-ns NOW_NS] [--market-max-decision-age-ns 1000000] \\"
     );
-    println!(
-        "    [--proposal-intent-id fresh-intent-1] [--proposal-decision-key fresh-decision-1] \\"
-    );
-    println!("    [--proposal-created-at-ns 1000] [--proposal-expires-at-ns 2000] \\");
-    println!("    [--adapt-proposal] [--submit-proposal] \\");
-    println!("    [--loss-suspect-policy hold|retry|ignore]");
+    println!("    [--market-snapshot-id snap-1] [--market-signal-id signal-1] \\");
+    println!("    [--next-intent-id fresh-intent-1] [--next-decision-key fresh-decision-1] \\");
+    println!("    [--next-created-at-ns 1000] [--next-expires-at-ns 2000] \\");
+    println!("    [--adapt-proposal] [--submit-proposal]");
 }
 
 fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
@@ -400,32 +422,72 @@ fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
     Ok(intent)
 }
 
-fn build_fresh_intent_params(
+fn build_redecision_input(
     template: &StrategyIntent,
-    plan: &StrategyExecutionRecoveryPlan,
-    proposal_intent_id: Option<&str>,
-    proposal_decision_key: Option<&str>,
-    proposal_created_at_ns: Option<u64>,
-    proposal_expires_at_ns: Option<u64>,
-) -> Result<StrategyExecutionFreshIntentParams, String> {
-    let created_at_ns = proposal_created_at_ns.unwrap_or_else(now_epoch_ns);
-    let default_lifetime_ns = template
-        .expires_at_ns
-        .saturating_sub(template.created_at_ns)
-        .max(1);
-    let expires_at_ns =
-        proposal_expires_at_ns.unwrap_or_else(|| created_at_ns.saturating_add(default_lifetime_ns));
-    let suffix = plan.next_cursor.max(1);
-    let params = StrategyExecutionFreshIntentParams {
-        intent_id: proposal_intent_id
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{}::fresh::{suffix}", template.intent_id)),
-        decision_key: proposal_decision_key
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("fresh-{suffix}")),
+    recovery: &AlphaRecoveryContext,
+    config: &ReaderConfig,
+    now_ns: u64,
+) -> Result<Option<AlphaReDecisionInput>, String> {
+    let Some(market_desired_signed_qty) = config.market_desired_signed_qty else {
+        return Ok(None);
+    };
+    let market = build_market_context(template, config, market_desired_signed_qty, now_ns)?;
+    let next_intent = build_next_intent_params(template, recovery, config, now_ns)?;
+
+    Ok(Some(AlphaReDecisionInput {
+        template_intent: template.clone(),
+        recovery: recovery.clone(),
+        market,
+        next_intent,
+    }))
+}
+
+fn build_market_context(
+    template: &StrategyIntent,
+    config: &ReaderConfig,
+    desired_signed_qty: i64,
+    now_ns: u64,
+) -> Result<AlphaMarketContext, String> {
+    let max_decision_age_ns = config
+        .market_max_decision_age_ns
+        .or(template.max_decision_age_ns)
+        .ok_or_else(|| "MARKET_MAX_DECISION_AGE_NS_REQUIRED".to_string())?;
+    let market = AlphaMarketContext {
+        observed_at_ns: config.market_observed_at_ns.unwrap_or(now_ns),
+        desired_signed_qty,
+        max_decision_age_ns,
+        market_snapshot_id: config
+            .market_snapshot_id
+            .clone()
+            .or_else(|| template.market_snapshot_id.clone()),
+        signal_id: config
+            .market_signal_id
+            .clone()
+            .or_else(|| template.signal_id.clone()),
+    };
+    market.validate().map_err(|err| err.to_string())?;
+    Ok(market)
+}
+
+fn build_next_intent_params(
+    template: &StrategyIntent,
+    recovery: &AlphaRecoveryContext,
+    config: &ReaderConfig,
+    now_ns: u64,
+) -> Result<AlphaNextIntentParams, String> {
+    let suffix = recovery.next_cursor.max(1);
+    let params = AlphaNextIntentParams {
+        intent_id: config
+            .next_intent_id
+            .clone()
+            .unwrap_or_else(|| format!("{}::redecision::{suffix}", template.intent_id)),
+        decision_key: config
+            .next_decision_key
+            .clone()
+            .unwrap_or_else(|| format!("redecision-{suffix}")),
         decision_attempt_seq: 1,
-        created_at_ns,
-        expires_at_ns,
+        created_at_ns: config.next_created_at_ns.unwrap_or(now_ns),
+        expires_at_ns: config.next_expires_at_ns,
     };
     params.validate().map_err(|err| err.to_string())?;
     Ok(params)
@@ -488,21 +550,33 @@ async fn fetch_catchup_page(
         .map_err(|err| format!("decode catch-up page failed: {err}"))
 }
 
-async fn execute_proposal_flow(
+async fn execute_redecision_flow(
     base_url: &str,
-    intent: &StrategyIntent,
+    redecision: Option<&AlphaReDecision>,
     submit_proposal: bool,
-) -> Result<ReaderProposalExecution, String> {
+) -> Result<ReaderExecutionResult, String> {
+    let Some(redecision) = redecision else {
+        return Ok(ReaderExecutionResult::skipped("REDECISION_NOT_REQUESTED"));
+    };
+    if redecision.action != AlphaReDecisionAction::SubmitFreshIntent {
+        return Ok(ReaderExecutionResult::skipped(redecision_skip_reason(
+            redecision,
+        )));
+    }
+    let Some(intent) = redecision.proposed_intent.as_ref() else {
+        return Ok(ReaderExecutionResult::skipped("PROPOSED_INTENT_MISSING"));
+    };
+
     let parsed = parse_http_base_url(base_url)?;
     let adapt_response = post_strategy_intent_adapt(&parsed, intent).await?;
     let adapt_ok = (200..300).contains(&adapt_response.status_code);
     let adapt_body = decode_json_or_string(&adapt_response.body);
 
     if !submit_proposal {
-        return Ok(ReaderProposalExecution {
-            adapt_http_status: adapt_response.status_code,
-            adapt_ok,
-            adapt_response: adapt_body,
+        return Ok(ReaderExecutionResult {
+            adapt_http_status: Some(adapt_response.status_code),
+            adapt_ok: Some(adapt_ok),
+            adapt_response: Some(adapt_body),
             submit_http_status: None,
             submit_ok: None,
             submit_response: None,
@@ -511,10 +585,10 @@ async fn execute_proposal_flow(
     }
 
     if !adapt_ok {
-        return Ok(ReaderProposalExecution {
-            adapt_http_status: adapt_response.status_code,
-            adapt_ok,
-            adapt_response: adapt_body,
+        return Ok(ReaderExecutionResult {
+            adapt_http_status: Some(adapt_response.status_code),
+            adapt_ok: Some(adapt_ok),
+            adapt_response: Some(adapt_body),
             submit_http_status: None,
             submit_ok: None,
             submit_response: None,
@@ -526,14 +600,31 @@ async fn execute_proposal_flow(
     let submit_ok = (200..300).contains(&submit_response.status_code);
     let submit_body = decode_json_or_string(&submit_response.body);
 
-    Ok(ReaderProposalExecution {
-        adapt_http_status: adapt_response.status_code,
-        adapt_ok,
-        adapt_response: adapt_body,
+    Ok(ReaderExecutionResult {
+        adapt_http_status: Some(adapt_response.status_code),
+        adapt_ok: Some(adapt_ok),
+        adapt_response: Some(adapt_body),
         submit_http_status: Some(submit_response.status_code),
         submit_ok: Some(submit_ok),
         submit_response: Some(submit_body),
         skipped_reason: None,
+    })
+}
+
+fn redecision_skip_reason(redecision: &AlphaReDecision) -> String {
+    redecision.reason.clone().unwrap_or_else(|| {
+        match redecision.action {
+            AlphaReDecisionAction::InvalidInput => "INVALID_INPUT",
+            AlphaReDecisionAction::AbortAlphaStale => "STRATEGY_INTENT_ALPHA_STALE",
+            AlphaReDecisionAction::HoldUnknownExposure => "UNKNOWN_EXPOSURE_PRESENT",
+            AlphaReDecisionAction::AbortSideFlip => "SIDE_FLIP_REQUIRES_NEW_RUN",
+            AlphaReDecisionAction::NoopNoSignal => "NO_DESIRED_QTY",
+            AlphaReDecisionAction::NoopAlreadySatisfied => {
+                "CONFIRMED_QTY_ALREADY_SATISFIES_DESIRED_QTY"
+            }
+            AlphaReDecisionAction::SubmitFreshIntent => "SUBMIT_FRESH_INTENT",
+        }
+        .to_string()
     })
 }
 
@@ -730,11 +821,11 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReaderCursorState, ReaderScope, build_fresh_intent_params, decode_chunked_body,
+        ReaderConfig, ReaderCursorState, ReaderScope, build_redecision_input, decode_chunked_body,
         decode_json_or_string, parse_http_base_url, parse_http_response, persist_cursor_state,
     };
     use crate::order::{OrderType, TimeInForce};
-    use crate::strategy::catchup::StrategyExecutionRecoveryPlan;
+    use crate::strategy::alpha_redecision::AlphaRecoveryContext;
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
         StrategyRecoveryPolicy,
@@ -761,10 +852,38 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             decision_key: Some("decision-template-1".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(100),
+            max_decision_age_ns: Some(1_000),
+            market_snapshot_id: Some("market-template-1".to_string()),
+            signal_id: Some("signal-template-1".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 100,
             expires_at_ns: 1_100,
+        }
+    }
+
+    fn reader_config() -> ReaderConfig {
+        ReaderConfig {
+            base_url: "http://127.0.0.1:8081".to_string(),
+            scope: ReaderScope::ExecutionRunId("run-1".to_string()),
+            after_cursor: None,
+            cursor_path: None,
+            limit: 500,
+            max_pages: None,
+            target_signed_qty: None,
+            template_intent_path: None,
+            market_desired_signed_qty: Some(60),
+            market_observed_at_ns: Some(1_000),
+            market_max_decision_age_ns: None,
+            market_snapshot_id: None,
+            market_signal_id: None,
+            next_intent_id: None,
+            next_decision_key: None,
+            next_created_at_ns: Some(1_005),
+            next_expires_at_ns: None,
+            adapt_proposal: false,
+            submit_proposal: false,
         }
     }
 
@@ -813,16 +932,15 @@ mod tests {
     }
 
     #[test]
-    fn build_fresh_intent_params_uses_deterministic_defaults() {
-        let plan = StrategyExecutionRecoveryPlan {
+    fn build_redecision_input_uses_deterministic_defaults() {
+        let recovery = AlphaRecoveryContext {
             execution_run_id: Some("run-1".to_string()),
             intent_id: Some("intent-1".to_string()),
             target_signed_qty: 100,
             confirmed_signed_qty: 40,
-            retryable_signed_qty: 20,
-            blocked_signed_qty: 0,
-            ignored_signed_qty: 0,
-            fresh_signed_qty_capacity: 60,
+            failed_signed_qty: 20,
+            unknown_signed_qty: 0,
+            unsent_signed_qty: 40,
             requires_manual_intervention: false,
             next_cursor: 77,
             has_more: false,
@@ -830,15 +948,50 @@ mod tests {
             decisions: vec![],
         };
 
-        let params =
-            build_fresh_intent_params(&template_intent(), &plan, None, None, Some(1_000), None)
-                .expect("build params");
+        let input = build_redecision_input(&template_intent(), &recovery, &reader_config(), 1_500)
+            .expect("build input")
+            .expect("redecision input");
 
-        assert_eq!(params.intent_id, "template-intent-1::fresh::77");
-        assert_eq!(params.decision_key, "fresh-77");
-        assert_eq!(params.decision_attempt_seq, 1);
-        assert_eq!(params.created_at_ns, 1_000);
-        assert_eq!(params.expires_at_ns, 2_000);
+        assert_eq!(input.market.desired_signed_qty, 60);
+        assert_eq!(input.market.observed_at_ns, 1_000);
+        assert_eq!(input.market.max_decision_age_ns, 1_000);
+        assert_eq!(
+            input.market.market_snapshot_id.as_deref(),
+            Some("market-template-1")
+        );
+        assert_eq!(input.market.signal_id.as_deref(), Some("signal-template-1"));
+        assert_eq!(
+            input.next_intent.intent_id,
+            "template-intent-1::redecision::77"
+        );
+        assert_eq!(input.next_intent.decision_key, "redecision-77");
+        assert_eq!(input.next_intent.decision_attempt_seq, 1);
+        assert_eq!(input.next_intent.created_at_ns, 1_005);
+        assert_eq!(input.next_intent.expires_at_ns, None);
+    }
+
+    #[test]
+    fn build_redecision_input_returns_none_without_market_qty() {
+        let mut config = reader_config();
+        config.market_desired_signed_qty = None;
+        let recovery = AlphaRecoveryContext {
+            execution_run_id: Some("run-1".to_string()),
+            intent_id: Some("intent-1".to_string()),
+            target_signed_qty: 100,
+            confirmed_signed_qty: 40,
+            failed_signed_qty: 20,
+            unknown_signed_qty: 0,
+            unsent_signed_qty: 40,
+            requires_manual_intervention: false,
+            next_cursor: 77,
+            has_more: false,
+            latest_status_totals: Default::default(),
+            decisions: vec![],
+        };
+
+        let input =
+            build_redecision_input(&template_intent(), &recovery, &config, 1_500).expect("build");
+        assert!(input.is_none());
     }
 
     #[test]

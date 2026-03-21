@@ -9,3 +9,7 @@ pub mod catchup;
 #[allow(dead_code)]
 #[path = "../../strategy/intent.rs"]
 pub mod intent;
+
+#[allow(dead_code)]
+#[path = "../../strategy/alpha_redecision.rs"]
+pub mod alpha_redecision;

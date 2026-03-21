@@ -294,6 +294,10 @@ fn validate_intent_against_snapshot(
     Ok(())
 }
 
+fn validate_intent_freshness(intent: &StrategyIntent, now_ns: u64) -> Result<(), &'static str> {
+    intent.validate_alpha_freshness(now_ns)
+}
+
 fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
     let expire_at = if matches!(intent.time_in_force, TimeInForce::Gtd) {
         Some(intent.expires_at_ns / 1_000_000)
@@ -759,6 +763,9 @@ pub(super) async fn handle_post_strategy_intent_adapt(
 
     let snapshot = state.strategy_snapshot_store.snapshot();
     let now_ns = gateway_core::now_nanos();
+    validate_intent_freshness(&intent, now_ns).map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
     validate_intent_against_snapshot(&snapshot, &intent, now_ns).map_err(|reason| {
         let status = if reason == "STRATEGY_SNAPSHOT_STALE" {
             StatusCode::SERVICE_UNAVAILABLE
@@ -810,6 +817,9 @@ pub(super) async fn handle_post_strategy_intent_submit(
 
     let snapshot = state.strategy_snapshot_store.snapshot();
     let now_ns = gateway_core::now_nanos();
+    validate_intent_freshness(&request.intent, now_ns).map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
     validate_intent_against_snapshot(&snapshot, &request.intent, now_ns).map_err(|reason| {
         let status = if reason == "STRATEGY_SNAPSHOT_STALE" {
             StatusCode::SERVICE_UNAVAILABLE
@@ -1357,6 +1367,10 @@ mod tests {
                 execution_run_id: Some("run-1".to_string()),
                 decision_key: Some("decision-1".to_string()),
                 decision_attempt_seq: Some(1),
+                decision_basis_at_ns: Some(10),
+                max_decision_age_ns: Some(100),
+                market_snapshot_id: Some("market-1".to_string()),
+                signal_id: Some("signal-1".to_string()),
                 recovery_policy: Some(
                     crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
                 ),
@@ -1403,6 +1417,10 @@ mod tests {
                 execution_run_id: Some("run-1".to_string()),
                 decision_key: Some("decision-1".to_string()),
                 decision_attempt_seq: Some(1),
+                decision_basis_at_ns: Some(10),
+                max_decision_age_ns: Some(100),
+                market_snapshot_id: Some("market-1".to_string()),
+                signal_id: Some("signal-1".to_string()),
                 recovery_policy: Some(
                     crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
                 ),
@@ -1591,6 +1609,7 @@ mod tests {
     }
 
     fn strategy_intent_fixture() -> crate::strategy::intent::StrategyIntent {
+        let decision_basis_at_ns = gateway_core::now_nanos();
         crate::strategy::intent::StrategyIntent {
             schema_version: crate::strategy::intent::STRATEGY_INTENT_SCHEMA_VERSION,
             intent_id: "intent-1".to_string(),
@@ -1609,6 +1628,10 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             decision_key: Some("decision-1".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(decision_basis_at_ns),
+            max_decision_age_ns: Some(60_000_000_000),
+            market_snapshot_id: Some("market-1".to_string()),
+            signal_id: Some("signal-1".to_string()),
             recovery_policy: Some(crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 10,

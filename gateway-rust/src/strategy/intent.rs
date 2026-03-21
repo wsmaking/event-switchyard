@@ -102,6 +102,14 @@ pub struct StrategyIntent {
     #[serde(default)]
     pub decision_attempt_seq: Option<u64>,
     #[serde(default)]
+    pub decision_basis_at_ns: Option<u64>,
+    #[serde(default)]
+    pub max_decision_age_ns: Option<u64>,
+    #[serde(default)]
+    pub market_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub signal_id: Option<String>,
+    #[serde(default)]
     pub recovery_policy: Option<StrategyRecoveryPolicy>,
     #[serde(default)]
     pub algo: Option<AlgoExecutionSpec>,
@@ -158,11 +166,55 @@ impl StrategyIntent {
         if self.decision_attempt_seq.is_some() && decision_key.is_none() {
             return Err("DECISION_KEY_REQUIRED");
         }
+        if self.decision_basis_at_ns == Some(0) {
+            return Err("DECISION_BASIS_AT_NS_REQUIRED");
+        }
+        if self.max_decision_age_ns == Some(0) {
+            return Err("MAX_DECISION_AGE_NS_REQUIRED");
+        }
+        if self.decision_basis_at_ns.is_some() ^ self.max_decision_age_ns.is_some() {
+            return Err("DECISION_FRESHNESS_METADATA_INCOMPLETE");
+        }
+        if self
+            .market_snapshot_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("MARKET_SNAPSHOT_ID_REQUIRED");
+        }
+        if self
+            .signal_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("SIGNAL_ID_REQUIRED");
+        }
+        if (self.market_snapshot_id.is_some() || self.signal_id.is_some())
+            && self.decision_basis_at_ns.is_none()
+        {
+            return Err("DECISION_FRESHNESS_METADATA_INCOMPLETE");
+        }
         Ok(())
     }
 
     pub fn is_expired(&self, now_ns: u64) -> bool {
         now_ns >= self.expires_at_ns
+    }
+
+    pub fn decision_is_stale(&self, now_ns: u64) -> bool {
+        match (self.decision_basis_at_ns, self.max_decision_age_ns) {
+            (Some(basis_at_ns), Some(max_decision_age_ns)) if now_ns >= basis_at_ns => {
+                now_ns.saturating_sub(basis_at_ns) > max_decision_age_ns
+            }
+            _ => false,
+        }
+    }
+
+    pub fn validate_alpha_freshness(&self, now_ns: u64) -> Result<(), &'static str> {
+        if self.decision_is_stale(now_ns) {
+            return Err("STRATEGY_INTENT_ALPHA_STALE");
+        }
+        Ok(())
     }
 }
 
@@ -196,6 +248,10 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             decision_key: Some("decision-1".to_string()),
             decision_attempt_seq: Some(2),
+            decision_basis_at_ns: Some(11),
+            max_decision_age_ns: Some(50),
+            market_snapshot_id: Some("market-snap-1".to_string()),
+            signal_id: Some("signal-1".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: Some(AlgoExecutionSpec {
                 slice_count: Some(4),
@@ -239,6 +295,10 @@ mod tests {
         assert_eq!(parsed.execution_run_id.as_deref(), Some("run-1"));
         assert_eq!(parsed.decision_key.as_deref(), Some("decision-1"));
         assert_eq!(parsed.decision_attempt_seq, Some(2));
+        assert_eq!(parsed.decision_basis_at_ns, Some(11));
+        assert_eq!(parsed.max_decision_age_ns, Some(50));
+        assert_eq!(parsed.market_snapshot_id.as_deref(), Some("market-snap-1"));
+        assert_eq!(parsed.signal_id.as_deref(), Some("signal-1"));
         assert_eq!(
             parsed.recovery_policy,
             Some(StrategyRecoveryPolicy::NoAutoResume)
@@ -267,5 +327,28 @@ mod tests {
         let mut intent = intent_fixture();
         intent.decision_key = None;
         assert_eq!(intent.validate(), Err("DECISION_KEY_REQUIRED"));
+
+        let mut intent = intent_fixture();
+        intent.max_decision_age_ns = None;
+        assert_eq!(
+            intent.validate(),
+            Err("DECISION_FRESHNESS_METADATA_INCOMPLETE")
+        );
+
+        let mut intent = intent_fixture();
+        intent.signal_id = Some(" ".to_string());
+        assert_eq!(intent.validate(), Err("SIGNAL_ID_REQUIRED"));
+    }
+
+    #[test]
+    fn strategy_intent_detects_stale_alpha() {
+        let intent = intent_fixture();
+
+        assert!(!intent.decision_is_stale(61));
+        assert!(intent.decision_is_stale(62));
+        assert_eq!(
+            intent.validate_alpha_freshness(62),
+            Err("STRATEGY_INTENT_ALPHA_STALE")
+        );
     }
 }

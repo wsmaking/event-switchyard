@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 #[path = "../order/mod.rs"]
@@ -67,6 +68,10 @@ fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
 }
 
 fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
+    let decision_basis_at_ns = now_epoch_ns();
+    let max_decision_age_ns = 60_000_000_000u64;
+    let created_at_ns = decision_basis_at_ns.saturating_sub(1_000_000);
+    let expires_at_ns = decision_basis_at_ns.saturating_add(max_decision_age_ns);
     match profile {
         "aggressive_buy" => Ok(StrategyIntent {
             schema_version: STRATEGY_INTENT_SCHEMA_VERSION,
@@ -89,10 +94,14 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             execution_run_id: Some("run-export-1".to_string()),
             decision_key: Some("decision-export-1".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(decision_basis_at_ns),
+            max_decision_age_ns: Some(max_decision_age_ns),
+            market_snapshot_id: Some("market-export-1".to_string()),
+            signal_id: Some("signal-export-1".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
-            created_at_ns: 100,
-            expires_at_ns: 1_000,
+            created_at_ns,
+            expires_at_ns,
         }),
         "passive_sell" => Ok(StrategyIntent {
             schema_version: STRATEGY_INTENT_SCHEMA_VERSION,
@@ -115,10 +124,14 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             execution_run_id: Some("run-export-2".to_string()),
             decision_key: Some("decision-export-2".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(decision_basis_at_ns),
+            max_decision_age_ns: Some(max_decision_age_ns),
+            market_snapshot_id: Some("market-export-2".to_string()),
+            signal_id: Some("signal-export-2".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
-            created_at_ns: 200,
-            expires_at_ns: 1_200,
+            created_at_ns,
+            expires_at_ns,
         }),
         "default_compare" => Ok(StrategyIntent {
             schema_version: STRATEGY_INTENT_SCHEMA_VERSION,
@@ -141,13 +154,24 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             execution_run_id: Some("run-export-3".to_string()),
             decision_key: Some("decision-export-3".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(decision_basis_at_ns),
+            max_decision_age_ns: Some(max_decision_age_ns),
+            market_snapshot_id: Some("market-export-3".to_string()),
+            signal_id: Some("signal-export-3".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
-            created_at_ns: 300,
-            expires_at_ns: 1_300,
+            created_at_ns,
+            expires_at_ns,
         }),
         _ => Err(format!("unsupported profile: {profile}")),
     }
+}
+
+fn now_epoch_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn print_usage() {

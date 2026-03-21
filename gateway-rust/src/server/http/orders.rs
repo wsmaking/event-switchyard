@@ -3681,6 +3681,7 @@ mod tests {
     }
 
     fn strategy_intent_fixture() -> StrategyIntent {
+        let decision_basis_at_ns = now_nanos();
         StrategyIntent {
             schema_version: STRATEGY_INTENT_SCHEMA_VERSION,
             intent_id: "intent-1".to_string(),
@@ -3702,6 +3703,10 @@ mod tests {
             execution_run_id: Some("run-1".to_string()),
             decision_key: Some("decision-1".to_string()),
             decision_attempt_seq: Some(1),
+            decision_basis_at_ns: Some(decision_basis_at_ns),
+            max_decision_age_ns: Some(60_000_000_000),
+            market_snapshot_id: Some("market-1".to_string()),
+            signal_id: Some("signal-1".to_string()),
             recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
             algo: None,
             created_at_ns: 10,
@@ -6241,6 +6246,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strategy_intent_adapter_rejects_stale_alpha() {
+        let state = build_test_state();
+        let mut intent = strategy_intent_fixture();
+        intent.decision_basis_at_ns = Some(1);
+        intent.max_decision_age_ns = Some(1);
+
+        let err = super::super::strategy::handle_post_strategy_intent_adapt(
+            State(state.clone()),
+            Json(intent),
+        )
+        .await
+        .expect_err("stale alpha must fail");
+
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.1.0.reason, "STRATEGY_INTENT_ALPHA_STALE");
+    }
+
+    #[tokio::test]
     async fn strategy_intent_adapter_normalizes_passive_ioc_to_gtc() {
         let state = build_test_state();
         state
@@ -6423,6 +6446,31 @@ mod tests {
 
         writer_handle.abort();
         durable_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_rejects_stale_alpha() {
+        let (state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        let mut intent = strategy_intent_fixture();
+        intent.decision_basis_at_ns = Some(1);
+        intent.max_decision_age_ns = Some(1);
+
+        let err = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent,
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("stale alpha submit must fail");
+
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.1.0.reason, "STRATEGY_INTENT_ALPHA_STALE");
     }
 
     #[tokio::test]
