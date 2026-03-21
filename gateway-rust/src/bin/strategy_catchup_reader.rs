@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::{Duration, sleep};
 
 #[allow(dead_code)]
 #[path = "../order/mod.rs"]
@@ -64,6 +65,8 @@ struct ReaderConfig {
     next_decision_key: Option<String>,
     next_created_at_ns: Option<u64>,
     next_expires_at_ns: Option<u64>,
+    loop_interval_ms: Option<u64>,
+    loop_iterations: Option<usize>,
     adapt_proposal: bool,
     submit_proposal: bool,
 }
@@ -90,6 +93,14 @@ struct ReaderOutput {
     redecision: Option<AlphaReDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_result: Option<ReaderExecutionResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ReaderLoopTickOutput {
+    iteration: usize,
+    polled_at_ns: u64,
+    output: ReaderOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,8 +159,6 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let config = parse_args()?;
-    let mut loop_state = StrategyExecutionCatchupLoop::new();
-
     let mut next_cursor = if let Some(after_cursor) = config.after_cursor {
         after_cursor
     } else if let Some(cursor_path) = config.cursor_path.as_deref() {
@@ -158,6 +167,48 @@ async fn run() -> Result<(), String> {
         0
     };
 
+    if let Some(loop_interval_ms) = config.loop_interval_ms {
+        let mut iteration = 0usize;
+        loop {
+            if let Some(loop_iterations) = config.loop_iterations {
+                if iteration >= loop_iterations {
+                    break;
+                }
+            }
+
+            let (output, updated_cursor) = run_single_pass(&config, next_cursor).await?;
+            next_cursor = updated_cursor;
+            let tick = ReaderLoopTickOutput {
+                iteration: iteration.saturating_add(1),
+                polled_at_ns: now_epoch_ns(),
+                output,
+            };
+            let raw = serde_json::to_string(&tick).map_err(|err| err.to_string())?;
+            println!("{raw}");
+            iteration = iteration.saturating_add(1);
+
+            if let Some(loop_iterations) = config.loop_iterations {
+                if iteration >= loop_iterations {
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(loop_interval_ms.max(1))).await;
+        }
+        return Ok(());
+    }
+
+    let (output, _) = run_single_pass(&config, next_cursor).await?;
+    let raw = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
+    println!("{raw}");
+    Ok(())
+}
+
+async fn run_single_pass(
+    config: &ReaderConfig,
+    start_cursor: u64,
+) -> Result<(ReaderOutput, u64), String> {
+    let mut loop_state = StrategyExecutionCatchupLoop::new();
+    let mut next_cursor = start_cursor;
     let mut pages_read = 0usize;
     loop {
         if let Some(max_pages) = config.max_pages {
@@ -200,7 +251,7 @@ async fn run() -> Result<(), String> {
         .map(|signed_qty| AlphaRecoveryContext::from_snapshot(snapshot.clone(), signed_qty));
     let redecision_input = match (template_intent.as_ref(), recovery_context.as_ref()) {
         (Some(template), Some(recovery)) => {
-            build_redecision_input(template, recovery, &config, now_ns)?
+            build_redecision_input(template, recovery, config, now_ns)?
         }
         _ => None,
     };
@@ -220,21 +271,21 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let output = ReaderOutput {
-        scope_kind: match &config.scope {
-            ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
-            ReaderScope::IntentId(_) => "intentId".to_string(),
+    Ok((
+        ReaderOutput {
+            scope_kind: match &config.scope {
+                ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
+                ReaderScope::IntentId(_) => "intentId".to_string(),
+            },
+            scope_id: config.scope.id().to_string(),
+            snapshot,
+            recovery_context,
+            redecision_input,
+            redecision,
+            execution_result,
         },
-        scope_id: config.scope.id().to_string(),
-        snapshot,
-        recovery_context,
-        redecision_input,
-        redecision,
-        execution_result,
-    };
-    let raw = serde_json::to_string_pretty(&output).map_err(|err| err.to_string())?;
-    println!("{raw}");
-    Ok(())
+        next_cursor,
+    ))
 }
 
 fn parse_args() -> Result<ReaderConfig, String> {
@@ -256,6 +307,8 @@ fn parse_args() -> Result<ReaderConfig, String> {
     let mut next_decision_key = None;
     let mut next_created_at_ns = None;
     let mut next_expires_at_ns = None;
+    let mut loop_interval_ms = None;
+    let mut loop_iterations = None;
     let mut adapt_proposal = false;
     let mut submit_proposal = false;
 
@@ -312,6 +365,12 @@ fn parse_args() -> Result<ReaderConfig, String> {
             "--next-expires-at-ns" | "--proposal-expires-at-ns" => {
                 next_expires_at_ns = Some(parse_u64_arg(&mut args, arg.as_str())?);
             }
+            "--loop-interval-ms" => {
+                loop_interval_ms = Some(parse_u64_arg(&mut args, "--loop-interval-ms")?);
+            }
+            "--loop-iterations" => {
+                loop_iterations = Some(parse_usize_arg(&mut args, "--loop-iterations")?);
+            }
             "--adapt-proposal" => adapt_proposal = true,
             "--submit-proposal" => {
                 submit_proposal = true;
@@ -362,6 +421,8 @@ fn parse_args() -> Result<ReaderConfig, String> {
         next_decision_key,
         next_created_at_ns,
         next_expires_at_ns,
+        loop_interval_ms,
+        loop_iterations,
         adapt_proposal,
         submit_proposal,
     })
@@ -408,6 +469,7 @@ fn print_usage() {
     println!("    [--market-snapshot-id snap-1] [--market-signal-id signal-1] \\");
     println!("    [--next-intent-id fresh-intent-1] [--next-decision-key fresh-decision-1] \\");
     println!("    [--next-created-at-ns 1000] [--next-expires-at-ns 2000] \\");
+    println!("    [--loop-interval-ms 1000] [--loop-iterations 10] \\");
     println!("    [--adapt-proposal] [--submit-proposal]");
 }
 
@@ -882,6 +944,8 @@ mod tests {
             next_decision_key: None,
             next_created_at_ns: Some(1_005),
             next_expires_at_ns: None,
+            loop_interval_ms: None,
+            loop_iterations: None,
             adapt_proposal: false,
             submit_proposal: false,
         }
