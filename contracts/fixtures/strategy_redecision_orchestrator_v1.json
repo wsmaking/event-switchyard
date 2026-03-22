@@ -1,0 +1,16 @@
+{
+  "baseUrl": "http://127.0.0.1:8081",
+  "pollIntervalMs": 1000,
+  "limit": 500,
+  "stateDir": "var/gateway/strategy-redecision-orchestrator",
+  "runs": [
+    {
+      "name": "alpha-run-export-1",
+      "scopeKind": "EXECUTION_RUN_ID",
+      "scopeId": "run-export-1",
+      "templateIntentPath": "contracts/fixtures/strategy_intent_v2.json",
+      "marketInputPath": "contracts/fixtures/strategy_redecision_market_input_v1.json",
+      "executionMode": "DRY_RUN"
+    }
+  ]
+}

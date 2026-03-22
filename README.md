@@ -162,6 +162,15 @@ alpha 側では
 
 を 1 画面で見ます。
 
+### 5. 常駐 re-decision を回す
+
+[strategy_redecision_orchestrator.rs](gateway-rust/src/bin/strategy_redecision_orchestrator.rs)
+
+- catch-up cursor を永続化
+- market input を読む
+- `AlphaReDecision` を評価
+- 必要なら `adapt -> submit`
+
 ## リポジトリ見取り図
 
 - [gateway-rust](gateway-rust/)
@@ -234,7 +243,7 @@ curl -sS http://127.0.0.1:8081/strategy/intent/submit \
 cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_catchup_reader -- \
   --base-url http://127.0.0.1:8081 \
   --execution-run-id run-1 \
-  --template-intent contracts/fixtures/strategy_intent_v1.json \
+  --template-intent contracts/fixtures/strategy_intent_v2.json \
   --market-desired-signed-qty 60 \
   --market-max-decision-age-ns 1000000
 ```
@@ -246,9 +255,17 @@ cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_ops_tui -- \
   --base-url http://127.0.0.1:8081 \
   --execution-run-id run-1 \
   --parent-intent-id parent-1 \
-  --template-intent contracts/fixtures/strategy_intent_v1.json \
+  --template-intent contracts/fixtures/strategy_intent_v2.json \
   --market-desired-signed-qty 60 \
   --market-max-decision-age-ns 1000000
+```
+
+### 5. re-decision orchestrator
+
+```bash
+cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_redecision_orchestrator -- \
+  --config contracts/fixtures/strategy_redecision_orchestrator_v1.json \
+  --once
 ```
 
 ## 主な binary
@@ -261,6 +278,8 @@ cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_ops_tui -- \
   - cursor-tracking catch-up / re-decision reader
 - `strategy_ops_tui`
   - terminal operator monitor
+- `strategy_redecision_orchestrator`
+  - persistent catch-up / market input / adapt-submit orchestrator
 
 ## 現役 script
 
