@@ -3,6 +3,8 @@
 //! - 位置: `server/http/mod.rs` から呼ばれる入口ハンドラ群（コアフローの同期境界）。
 //! - 内包: 受理/取得/キャンセルとレスポンス型をこのファイルに集約。
 
+mod classic;
+
 use crate::audit::{self, AuditEvent};
 use crate::auth::{AuthError, AuthResult};
 use crate::backpressure::{BackpressureLevel, BackpressureMetrics, BackpressureReason};
@@ -29,6 +31,10 @@ use std::{
 use super::{
     AppState, AuthErrorResponse, V3OrderTask, maybe_append_strategy_execution_fact,
     publish_quant_feedback,
+};
+pub(super) use classic::{
+    handle_amend_order, handle_cancel_order, handle_get_order, handle_get_order_by_client_id,
+    handle_get_order_v2, handle_order, handle_order_v2, handle_replace_order,
 };
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
@@ -389,6 +395,96 @@ fn map_snapshot_status_to_v2(state: &AppState, snapshot: &mut OrderSnapshotRespo
         snapshot.status = "DURABLE".into();
     } else {
         snapshot.status = "PENDING".into();
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CancelResponse {
+    order_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AmendRequest {
+    pub(super) new_qty: u64,
+    pub(super) new_price: u64,
+    #[serde(default)]
+    pub(super) comment: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AmendResponse {
+    order_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// 注文スナップショットレスポンス
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct OrderSnapshotResponse {
+    order_id: String,
+    account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_order_id: Option<String>,
+    symbol: String,
+    side: String,
+    #[serde(rename = "type")]
+    order_type: String,
+    qty: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<u64>,
+    time_in_force: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expire_at: Option<u64>,
+    status: String,
+    accepted_at: u64,
+    last_update_at: u64,
+    filled_qty: u64,
+}
+
+/// クライアント注文ID照会レスポンス
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClientOrderStatusResponse {
+    client_order_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    order_id: Option<String>,
+    status: String,
+}
+
+impl From<OrderSnapshot> for OrderSnapshotResponse {
+    fn from(o: OrderSnapshot) -> Self {
+        Self {
+            order_id: o.order_id,
+            account_id: o.account_id,
+            client_order_id: o.client_order_id,
+            symbol: o.symbol,
+            side: o.side,
+            order_type: match o.order_type {
+                crate::order::OrderType::Limit => "LIMIT".into(),
+                crate::order::OrderType::Market => "MARKET".into(),
+            },
+            qty: o.qty,
+            price: o.price,
+            time_in_force: match o.time_in_force {
+                crate::order::TimeInForce::Gtc => "GTC".into(),
+                crate::order::TimeInForce::Gtd => "GTD".into(),
+                crate::order::TimeInForce::Ioc => "IOC".into(),
+                crate::order::TimeInForce::Fok => "FOK".into(),
+            },
+            expire_at: o.expire_at,
+            status: o.status.as_str().into(),
+            accepted_at: o.accepted_at,
+            last_update_at: o.last_update_at,
+            filled_qty: o.filled_qty,
+        }
     }
 }
 
@@ -2033,861 +2129,6 @@ pub(super) async fn handle_get_order_v3(
     Ok(Json(body))
 }
 
-/// 注文受付（POST /orders）
-/// - JWT検証 → Idempotency-Key → FastPath → 監査/Bus/Snapshot 保存
-pub(super) async fn handle_order(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<OrderRequest>,
-) -> OrderResponseResult {
-    handle_order_with_contract(state, headers, req, OrderIngressContract::Legacy).await
-}
-
-async fn handle_order_with_contract(
-    state: AppState,
-    headers: HeaderMap,
-    req: OrderRequest,
-    contract: OrderIngressContract,
-) -> OrderResponseResult {
-    if contract == OrderIngressContract::V2 {
-        state.v2_requests_total.fetch_add(1, Ordering::Relaxed);
-    }
-    let t0 = now_nanos();
-    let principal = authenticate_request(&state, &headers, t0)?;
-    let client_order_id = req.client_order_id.clone();
-    // 契約上は Idempotency-Key 必須。未指定時は client_order_id を補助キーとして使う。
-    let idempotency_key = build_idempotency_key(&headers, &req);
-
-    // 現在の契約では Idempotency-Key は必須。未指定は入口で即時拒否する。
-    if idempotency_key.is_none() {
-        record_ack(&state, t0);
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(OrderResponse::rejected("IDEMPOTENCY_REQUIRED")),
-        ));
-    }
-
-    if let Some(reason) = validate_order_request(&req) {
-        match reason {
-            "INVALID_QTY" => {
-                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
-            }
-            "INVALID_SYMBOL" => {
-                state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
-            }
-            "INVALID_PRICE" => {
-                state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-        record_ack(&state, t0);
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(OrderResponse::rejected(reason)),
-        ));
-    }
-
-    // account単位レート制限。超過時は業務処理に入る前に429で返す。
-    if let Some(ref rate_limiter) = state.rate_limiter {
-        if !rate_limiter.try_acquire(&principal.account_id) {
-            state.reject_rate_limit.fetch_add(1, Ordering::Relaxed);
-            record_ack(&state, t0);
-            return Ok((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(OrderResponse::rejected("RATE_LIMITED")),
-            ));
-        }
-    }
-
-    // inflight枠を予約できた場合のみ本処理へ進む。
-    let (mut inflight_guard, inflight) = match reserve_inflight(&state, t0).await {
-        Ok(v) => v,
-        Err((status, body)) => return Ok((status, body)),
-    };
-    // WAL状態/ディスク状態を含む追加の入口制御。
-    if let Err((status, body)) = apply_backpressure(&state, t0, inflight) {
-        return Ok((status, body));
-    }
-
-    // FastPath向けに固定長バイト配列へ変換
-    let symbol = FastPathEngine::symbol_to_bytes(&req.symbol);
-
-    let account_id = principal.account_id.clone();
-    let account_id_num: u64 = account_id.parse().unwrap_or(0);
-    let price = req.price.unwrap_or(0);
-
-    // Idempotency-Key必須の契約に基づき、同一キーの二重受付を防ぐ。
-    let key = idempotency_key
-        .as_ref()
-        .expect("idempotency key is validated above");
-    state.idempotency_checked.fetch_add(1, Ordering::Relaxed);
-    let order_id = format!("ord_{}", uuid::Uuid::new_v4());
-    let internal_order_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
-    let mut process_result = ProcessResult::ErrorQueueFull;
-
-    // 初回のみFastPathに流し、結果をsnapshot化して保存
-    let outcome = state
-        .sharded_store
-        .get_or_create_idempotency(&account_id, key, || {
-            let result = state.engine.process_order(
-                internal_order_id,
-                account_id_num,
-                symbol,
-                req.side_byte(),
-                req.qty as u32,
-                price,
-            );
-            process_result = result.clone();
-            if result == ProcessResult::Accepted {
-                Some(OrderSnapshot::new(
-                    order_id.clone(),
-                    account_id.clone(),
-                    req.symbol.clone(),
-                    req.side.clone(),
-                    req.order_type,
-                    req.qty,
-                    req.price,
-                    req.time_in_force,
-                    req.expire_at,
-                    req.client_order_id.clone(),
-                ))
-            } else {
-                None
-            }
-        });
-
-    // Idempotency判定の結果で、再送(Existing)か初回受理(Created)かを分岐する。
-    match outcome {
-        crate::store::IdempotencyOutcome::Existing(existing) => {
-            // 既存注文をそのまま返す。FastPath/WAL/Bus は再実行しない。
-            state.idempotency_hits.fetch_add(1, Ordering::Relaxed);
-            let accept_seq = state.order_id_map.to_internal(&existing.order_id);
-            let request_id = build_request_id(accept_seq);
-            let (status, response) =
-                map_existing_response(contract, &state, &existing, accept_seq, request_id);
-            record_ack(&state, t0);
-            Ok((status, Json(response)))
-        }
-        crate::store::IdempotencyOutcome::Created(snapshot) => {
-            // 初回受理。以降は「ID登録 -> 監査記録 -> (必要なら)Bus送信 -> ACK」の順で進める。
-            state.idempotency_creates.fetch_add(1, Ordering::Relaxed);
-            state.order_id_map.register_with_internal(
-                internal_order_id,
-                snapshot.order_id.clone(),
-                account_id,
-            );
-
-            let order_payload = serde_json::json!({
-                "symbol": snapshot.symbol.clone(),
-                "side": snapshot.side.clone(),
-                "type": match snapshot.order_type {
-                    crate::order::OrderType::Limit => "LIMIT",
-                    crate::order::OrderType::Market => "MARKET",
-                },
-                "qty": snapshot.qty,
-                "price": snapshot.price,
-                "timeInForce": match snapshot.time_in_force {
-                    crate::order::TimeInForce::Gtc => "GTC",
-                    crate::order::TimeInForce::Gtd => "GTD",
-                    crate::order::TimeInForce::Ioc => "IOC",
-                    crate::order::TimeInForce::Fok => "FOK",
-                },
-                "expireAt": snapshot.expire_at,
-                "clientOrderId": snapshot.client_order_id.clone(),
-            });
-            let bus_account_id = snapshot.account_id.clone();
-            let bus_order_id = snapshot.order_id.clone();
-            let bus_data = order_payload.clone();
-
-            // 受理イベントを監査ログ(WAL)へ追記する。
-            // t0 は入口時刻で、enqueue完了までの遅延計測に使う。
-            let audit_event_at = audit::now_millis();
-            let audit_event = AuditEvent {
-                event_type: "OrderAccepted".into(),
-                at: audit_event_at,
-                account_id: snapshot.account_id.clone(),
-                order_id: Some(snapshot.order_id.clone()),
-                data: order_payload,
-            };
-            let (timings, durable_receipt_rx) = if contract == OrderIngressContract::V2 {
-                let append = state.audit_log.append_with_durable_receipt(audit_event, t0);
-                (append.timings, append.durable_rx)
-            } else {
-                (state.audit_log.append_with_timings(audit_event, t0), None)
-            };
-            // WAL enqueue までの遅延を別ヒストグラムで観測する。
-            record_wal_enqueue(&state, t0, timings);
-            if contract == OrderIngressContract::V2 {
-                if timings.durable_done_ns > 0 {
-                    finalize_sync_durable_v2(
-                        &state,
-                        &snapshot,
-                        audit_event_at,
-                        t0,
-                        timings,
-                        &mut inflight_guard,
-                    );
-                } else if timings.enqueue_done_ns == 0 {
-                    // enqueueもdurableも0の場合は、WAL書き込み自体に失敗している。
-                    state.sharded_store.remove(
-                        &snapshot.order_id,
-                        &snapshot.account_id,
-                        Some(key.as_str()),
-                    );
-                    state.order_id_map.remove(internal_order_id);
-                    record_ack(&state, t0);
-                    return Ok((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
-                    ));
-                } else if state.audit_log.async_enabled() {
-                    if let Some(guard) = inflight_guard.as_mut() {
-                        // 非同期 durable 経路は notifier の on_commit で減算する。
-                        guard.disarm();
-                    }
-                    if let Some(rx) = durable_receipt_rx {
-                        let timeout =
-                            Duration::from_millis(state.v2_durable_wait_timeout_ms.max(1));
-                        match tokio::time::timeout(timeout, rx).await {
-                            Ok(Ok(receipt)) => {
-                                if receipt.durable_done_ns == 0 {
-                                    state.sharded_store.remove(
-                                        &snapshot.order_id,
-                                        &snapshot.account_id,
-                                        Some(key.as_str()),
-                                    );
-                                    state.order_id_map.remove(internal_order_id);
-                                    record_ack(&state, t0);
-                                    return Ok((
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
-                                    ));
-                                }
-                                finalize_sync_durable_v2(
-                                    &state,
-                                    &snapshot,
-                                    audit_event_at,
-                                    t0,
-                                    audit::AuditAppendTimings {
-                                        enqueue_done_ns: timings.enqueue_done_ns,
-                                        durable_done_ns: receipt.durable_done_ns,
-                                        fdatasync_ns: receipt.fdatasync_ns,
-                                    },
-                                    &mut inflight_guard,
-                                );
-                            }
-                            Ok(Err(_)) => {
-                                record_ack(&state, t0);
-                                return Ok((
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
-                                ));
-                            }
-                            Err(_) => {
-                                state
-                                    .v2_durable_wait_timeout_total
-                                    .fetch_add(1, Ordering::Relaxed);
-                                record_ack(&state, t0);
-                                return Ok((
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    Json(OrderResponse::rejected("DURABILITY_WAIT_TIMEOUT")),
-                                ));
-                            }
-                        }
-                    } else {
-                        // 非同期writerのreceiptを受け取れない場合は契約を満たせないため失敗扱い。
-                        state.sharded_store.remove(
-                            &snapshot.order_id,
-                            &snapshot.account_id,
-                            Some(key.as_str()),
-                        );
-                        state.order_id_map.remove(internal_order_id);
-                        record_ack(&state, t0);
-                        return Ok((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
-                        ));
-                    }
-                } else {
-                    // durable 化できなかった場合は作成済みエントリを巻き戻し、再試行可能にする。
-                    state.sharded_store.remove(
-                        &snapshot.order_id,
-                        &snapshot.account_id,
-                        Some(key.as_str()),
-                    );
-                    state.order_id_map.remove(internal_order_id);
-                    record_ack(&state, t0);
-                    return Ok((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(OrderResponse::rejected("WAL_DURABILITY_FAILED")),
-                    ));
-                }
-            } else if state.audit_log.async_enabled() {
-                if let Some(guard) = inflight_guard.as_mut() {
-                    // 非同期WAL時はDrop時releaseを止め、durable通知側のon_commitで減算する。
-                    guard.disarm();
-                }
-            }
-            if !state.bus_mode_outbox {
-                // Outboxモード以外は、この場でBusへ直接publishする。
-                state.bus_publisher.publish(BusEvent {
-                    event_type: "OrderAccepted".into(),
-                    at: crate::bus::format_event_time(audit::now_millis()),
-                    account_id: bus_account_id,
-                    order_id: Some(bus_order_id),
-                    data: bus_data,
-                });
-            }
-            // 受理経路の終端としてACK遅延を計測する。
-            record_ack(&state, t0);
-            let accept_seq = Some(internal_order_id);
-            let request_id = build_request_id(accept_seq);
-            let (status, response) =
-                map_created_response(contract, &snapshot, accept_seq, request_id);
-            Ok((status, Json(response)))
-        }
-        crate::store::IdempotencyOutcome::NotCreated => {
-            // 初回処理は走ったが受理されず、snapshotが作られなかったケース。
-            // FastPathの結果をHTTPステータス/エラー理由へ正規化して返す。
-            let (status, response) = match process_result {
-                // 数量が業務上限を超過。入力値エラーとして422を返す。
-                ProcessResult::RejectedMaxQty => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    OrderResponse::rejected("INVALID_QTY"),
-                ),
-                // 想定元本(数量×価格)が上限超過。リスク拒否として422を返す。
-                ProcessResult::RejectedMaxNotional => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    OrderResponse::rejected("RISK_REJECT"),
-                ),
-                // 日次制限に抵触。リスク拒否として422を返す。
-                ProcessResult::RejectedDailyLimit => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    OrderResponse::rejected("RISK_REJECT"),
-                ),
-                // 銘柄マスタに存在しない。入力不正として422を返す。
-                ProcessResult::RejectedUnknownSymbol => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    OrderResponse::rejected("INVALID_SYMBOL"),
-                ),
-                // FastPathキューが飽和。サーバー都合の一時失敗として503を返す。
-                ProcessResult::ErrorQueueFull => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    OrderResponse::rejected("QUEUE_REJECT"),
-                ),
-                // この分岐では本来到達しない想定。整合性破綻として500を返す。
-                ProcessResult::Accepted => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OrderResponse::rejected("ERROR"),
-                ),
-            };
-            // 拒否理由ごとのカウンタを更新し、後で運用メトリクスとして観測できるようにする。
-            match process_result {
-                // 数量上限違反の件数。
-                ProcessResult::RejectedMaxQty => {
-                    state.reject_invalid_qty.fetch_add(1, Ordering::Relaxed);
-                }
-                // リスク上限違反（想定元本/日次制限）の件数。
-                ProcessResult::RejectedMaxNotional | ProcessResult::RejectedDailyLimit => {
-                    state.reject_risk.fetch_add(1, Ordering::Relaxed);
-                }
-                // 未知銘柄で弾いた件数。
-                ProcessResult::RejectedUnknownSymbol => {
-                    state.reject_invalid_symbol.fetch_add(1, Ordering::Relaxed);
-                }
-                // キュー飽和で受理できなかった件数。
-                ProcessResult::ErrorQueueFull => {
-                    state.reject_queue_full.fetch_add(1, Ordering::Relaxed);
-                }
-                // 受理時は拒否カウンタを増やさない。
-                ProcessResult::Accepted => {}
-            }
-            if let Some(ref client_order_id) = client_order_id {
-                if process_result != ProcessResult::Accepted {
-                    // 同じclient_order_idの再送で「過去に拒否済み」と判定できるよう記録する。
-                    state
-                        .sharded_store
-                        .mark_rejected_client_order(&principal.account_id, client_order_id);
-                }
-            }
-            // 拒否経路でも入口から応答までのACK遅延を計測する。
-            record_ack(&state, t0);
-            Ok((status, Json(response)))
-        }
-    }
-}
-
-/// v2 注文受付（POST /v2/orders）
-/// - `PendingAccepted` の durable 完了まで待って `PENDING` で返す。
-pub(super) async fn handle_order_v2(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<OrderRequest>,
-) -> OrderResponseResult {
-    handle_order_with_contract(state, headers, req, OrderIngressContract::V2).await
-}
-
-/// 注文詳細取得（GET /orders/{order_id}）
-/// - 外部ID→account_id でシャード検索、所有権を検証
-pub(super) async fn handle_get_order(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(order_id): Path<String>,
-) -> Result<Json<OrderSnapshotResponse>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    // 呼び出し主体を認証し、account境界の判定に使う。
-    let principal = match state.jwt_auth.authenticate(auth_header) {
-        AuthResult::Ok(p) => p,
-        AuthResult::Err(e) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(AuthErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
-        }
-    };
-
-    // 可能ならIDマップ経由でaccountを先に特定し、シャード探索コストを下げる。
-    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
-    let order = if let Some(ref acc_id) = account_id_from_map {
-        state
-            .sharded_store
-            .find_by_id_with_account(&order_id, acc_id)
-    } else {
-        // マップ不在時は client_order_id 互換を含むフォールバック検索を行う。
-        state
-            .sharded_store
-            .find_by_client_order_id(&principal.account_id, &order_id)
-            .or_else(|| state.sharded_store.find_by_id(&order_id))
-    };
-
-    // 注文が見つからなければ404。
-    let order = match order {
-        Some(o) => o,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(AuthErrorResponse {
-                    error: "NOT_FOUND".into(),
-                }),
-            ));
-        }
-    };
-
-    // 他人の注文を推測できないよう、未存在と同じ404で隠蔽する。
-    if order.account_id != principal.account_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(AuthErrorResponse {
-                error: "NOT_FOUND".into(),
-            }),
-        ));
-    }
-
-    Ok(Json(OrderSnapshotResponse::from(order)))
-}
-
-/// v2 注文詳細取得（GET /v2/orders/{order_id}）
-/// - 状態を `PENDING/DURABLE/REJECTED` に正規化して返す。
-pub(super) async fn handle_get_order_v2(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(order_id): Path<String>,
-) -> Result<Json<OrderSnapshotResponse>, (StatusCode, Json<AuthErrorResponse>)> {
-    let inner_state = state.clone();
-    let Json(mut snapshot) = handle_get_order(State(inner_state), headers, Path(order_id)).await?;
-    map_snapshot_status_to_v2(&state, &mut snapshot);
-    Ok(Json(snapshot))
-}
-
-/// クライアント注文ID照会（GET /orders/client/{client_order_id}）
-/// - PENDING/DURABLE/REJECTED/UNKNOWN を返す
-pub(super) async fn handle_get_order_by_client_id(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(client_order_id): Path<String>,
-) -> Result<Json<ClientOrderStatusResponse>, (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    // 呼び出し主体を認証し、account境界の判定に使う。
-    let principal = match state.jwt_auth.authenticate(auth_header) {
-        AuthResult::Ok(p) => p,
-        AuthResult::Err(e) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(AuthErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
-        }
-    };
-
-    // 過去に拒否済みのclient_order_idは即時にREJECTEDを返す。
-    if state
-        .sharded_store
-        .is_rejected_client_order(&principal.account_id, &client_order_id)
-    {
-        let response = ClientOrderStatusResponse {
-            client_order_id,
-            order_id: None,
-            status: "REJECTED".into(),
-        };
-        return Ok(Json(response));
-    }
-
-    // 同一account配下のclient_order_idで注文を引く。
-    let order = state
-        .sharded_store
-        .find_by_client_order_id(&principal.account_id, &client_order_id);
-
-    let response = if let Some(order) = order {
-        // 状態は REJECTED / DURABLE / PENDING の優先順で返す。
-        let status = if order.status == crate::store::OrderStatus::Rejected {
-            "REJECTED"
-        } else if state
-            .sharded_store
-            .is_durable(&order.order_id, &order.account_id)
-        {
-            "DURABLE"
-        } else {
-            "PENDING"
-        };
-        ClientOrderStatusResponse {
-            client_order_id,
-            order_id: Some(order.order_id),
-            status: status.into(),
-        }
-    } else {
-        ClientOrderStatusResponse {
-            client_order_id,
-            order_id: None,
-            status: "UNKNOWN".into(),
-        }
-    };
-
-    // 照会結果を1件返す。
-    Ok(Json(response))
-}
-
-/// 注文訂正（POST /orders/{order_id}/amend）
-/// - 状態遷移: ACTIVE -> AMEND_REQUESTED
-/// - 監査/Bus に AmendRequested を記録
-pub(super) async fn handle_amend_order(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(order_id): Path<String>,
-    Json(req): Json<AmendRequest>,
-) -> Result<(StatusCode, Json<AmendResponse>), (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    let principal = match state.jwt_auth.authenticate(auth_header) {
-        AuthResult::Ok(p) => p,
-        AuthResult::Err(e) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(AuthErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
-        }
-    };
-
-    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
-    let order = if let Some(ref acc_id) = account_id_from_map {
-        state
-            .sharded_store
-            .find_by_id_with_account(&order_id, acc_id)
-    } else {
-        state.sharded_store.find_by_id(&order_id)
-    };
-
-    let order = match order {
-        Some(o) => o,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(AuthErrorResponse {
-                    error: "NOT_FOUND".into(),
-                }),
-            ));
-        }
-    };
-
-    if order.account_id != principal.account_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(AuthErrorResponse {
-                error: "NOT_FOUND".into(),
-            }),
-        ));
-    }
-
-    if order.status.is_terminal() || order.status == crate::store::OrderStatus::CancelRequested {
-        return Ok((
-            StatusCode::CONFLICT,
-            Json(AmendResponse {
-                order_id,
-                status: "REJECTED".into(),
-                reason: Some("ORDER_FINAL".into()),
-            }),
-        ));
-    }
-
-    if req.new_qty == 0 {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(AmendResponse {
-                order_id,
-                status: "REJECTED".into(),
-                reason: Some("INVALID_QTY".into()),
-            }),
-        ));
-    }
-
-    if req.new_price == 0 {
-        return Ok((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(AmendResponse {
-                order_id,
-                status: "REJECTED".into(),
-                reason: Some("INVALID_PRICE".into()),
-            }),
-        ));
-    }
-
-    if order.status == crate::store::OrderStatus::AmendRequested {
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(AmendResponse {
-                order_id,
-                status: "AMEND_REQUESTED".into(),
-                reason: None,
-            }),
-        ));
-    }
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let updated = state
-        .sharded_store
-        .update(&order.order_id, &order.account_id, |prev| {
-            let mut next = prev.clone();
-            next.qty = req.new_qty;
-            next.price = Some(req.new_price);
-            next.status = crate::store::OrderStatus::AmendRequested;
-            next.last_update_at = now_ms;
-            next
-        });
-
-    if updated.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(AuthErrorResponse {
-                error: "NOT_FOUND".into(),
-            }),
-        ));
-    }
-
-    let amend_data = serde_json::json!({
-        "newQty": req.new_qty,
-        "newPrice": req.new_price,
-        "comment": req.comment,
-    });
-    state.audit_log.append(AuditEvent {
-        event_type: "AmendRequested".into(),
-        at: audit::now_millis(),
-        account_id: order.account_id.clone(),
-        order_id: Some(order.order_id.clone()),
-        data: amend_data.clone(),
-    });
-    if !state.bus_mode_outbox {
-        state.bus_publisher.publish(BusEvent {
-            event_type: "AmendRequested".into(),
-            at: crate::bus::format_event_time(audit::now_millis()),
-            account_id: order.account_id.clone(),
-            order_id: Some(order.order_id.clone()),
-            data: amend_data,
-        });
-    }
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AmendResponse {
-            order_id,
-            status: "AMEND_REQUESTED".into(),
-            reason: None,
-        }),
-    ))
-}
-
-/// 注文置換（POST /orders/{order_id}/replace）
-/// - 現時点では amend と同じ契約で扱う
-pub(super) async fn handle_replace_order(
-    state: State<AppState>,
-    headers: HeaderMap,
-    order_id: Path<String>,
-    req: Json<AmendRequest>,
-) -> Result<(StatusCode, Json<AmendResponse>), (StatusCode, Json<AuthErrorResponse>)> {
-    handle_amend_order(state, headers, order_id, req).await
-}
-
-/// 注文キャンセル（POST /orders/{order_id}/cancel）
-/// - 状態遷移 → 監査/Bus に CancelRequested を記録
-pub(super) async fn handle_cancel_order(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(order_id): Path<String>,
-) -> Result<(StatusCode, Json<CancelResponse>), (StatusCode, Json<AuthErrorResponse>)> {
-    let auth_header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-
-    // 呼び出し主体を認証し、account境界の判定に使う。
-    let principal = match state.jwt_auth.authenticate(auth_header) {
-        AuthResult::Ok(p) => p,
-        AuthResult::Err(e) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(AuthErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
-        }
-    };
-
-    // 可能ならIDマップ経由でaccountを先に特定し、シャード探索コストを下げる。
-    let account_id_from_map = state.order_id_map.get_account_id_by_external(&order_id);
-    let order = if let Some(ref acc_id) = account_id_from_map {
-        state
-            .sharded_store
-            .find_by_id_with_account(&order_id, acc_id)
-    } else {
-        // マップ不在時は全体探索のフォールバックで注文を引く。
-        state.sharded_store.find_by_id(&order_id)
-    };
-
-    // 注文が見つからなければ404。
-    let order = match order {
-        Some(o) => o,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(AuthErrorResponse {
-                    error: "NOT_FOUND".into(),
-                }),
-            ));
-        }
-    };
-
-    // 他人の注文を推測できないよう、未存在と同じ404で隠蔽する。
-    if order.account_id != principal.account_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(AuthErrorResponse {
-                error: "NOT_FOUND".into(),
-            }),
-        ));
-    }
-
-    // すでに終端状態ならキャンセル不可。409で業務上の競合を返す。
-    if order.status.is_terminal() {
-        return Ok((
-            StatusCode::CONFLICT,
-            Json(CancelResponse {
-                order_id,
-                status: "REJECTED".into(),
-                reason: Some("ORDER_FINAL".into()),
-            }),
-        ));
-    }
-
-    // すでにキャンセル要求済みなら冪等に同じ結果を返す。
-    if order.status == crate::store::OrderStatus::CancelRequested {
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(CancelResponse {
-                order_id,
-                status: "CANCEL_REQUESTED".into(),
-                reason: None,
-            }),
-        ));
-    }
-
-    // 以降は CancelRequested へ状態遷移し、監査/配信イベントを残す。
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let _ = state
-        .sharded_store
-        .update(&order.order_id, &order.account_id, |prev| {
-            let mut next = prev.clone();
-            next.status = crate::store::OrderStatus::CancelRequested;
-            next.last_update_at = now_ms;
-            next
-        });
-
-    // 監査ログには必ず記録して、後続の追跡/復元に使う。
-    state.audit_log.append(AuditEvent {
-        event_type: "CancelRequested".into(),
-        at: audit::now_millis(),
-        account_id: order.account_id.clone(),
-        order_id: Some(order.order_id.clone()),
-        data: serde_json::json!({}),
-    });
-    if !state.bus_mode_outbox {
-        // Outboxモード以外はこの場でBusへ直接通知する。
-        state.bus_publisher.publish(BusEvent {
-            event_type: "CancelRequested".into(),
-            at: crate::bus::format_event_time(audit::now_millis()),
-            account_id: order.account_id.clone(),
-            order_id: Some(order.order_id.clone()),
-            data: serde_json::json!({}),
-        });
-    }
-
-    // キャンセル要求を受理したことを返す。
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(CancelResponse {
-            order_id,
-            status: "CANCEL_REQUESTED".into(),
-            reason: None,
-        }),
-    ))
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CancelResponse {
-    order_id: String,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AmendRequest {
-    new_qty: u64,
-    new_price: u64,
-    #[serde(default)]
-    comment: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AmendResponse {
-    order_id: String,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
 /// v3 入口の即時応答（VOLATILE_ACCEPT）
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3096,69 +2337,6 @@ pub(super) struct DurableOrderStatusResponse {
     received_at_ns: Option<u64>,
     updated_at_ns: u64,
     shard_id: u64,
-}
-
-/// 注文スナップショットレスポンス
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct OrderSnapshotResponse {
-    order_id: String,
-    account_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_order_id: Option<String>,
-    symbol: String,
-    side: String,
-    #[serde(rename = "type")]
-    order_type: String,
-    qty: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    price: Option<u64>,
-    time_in_force: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expire_at: Option<u64>,
-    status: String,
-    accepted_at: u64,
-    last_update_at: u64,
-    filled_qty: u64,
-}
-
-/// クライアント注文ID照会レスポンス
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ClientOrderStatusResponse {
-    client_order_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    order_id: Option<String>,
-    status: String,
-}
-
-impl From<OrderSnapshot> for OrderSnapshotResponse {
-    fn from(o: OrderSnapshot) -> Self {
-        Self {
-            order_id: o.order_id,
-            account_id: o.account_id,
-            client_order_id: o.client_order_id,
-            symbol: o.symbol,
-            side: o.side,
-            order_type: match o.order_type {
-                crate::order::OrderType::Limit => "LIMIT".into(),
-                crate::order::OrderType::Market => "MARKET".into(),
-            },
-            qty: o.qty,
-            price: o.price,
-            time_in_force: match o.time_in_force {
-                crate::order::TimeInForce::Gtc => "GTC".into(),
-                crate::order::TimeInForce::Gtd => "GTD".into(),
-                crate::order::TimeInForce::Ioc => "IOC".into(),
-                crate::order::TimeInForce::Fok => "FOK".into(),
-            },
-            expire_at: o.expire_at,
-            status: o.status.as_str().into(),
-            accepted_at: o.accepted_at,
-            last_update_at: o.last_update_at,
-            filled_qty: o.filled_qty,
-        }
-    }
 }
 
 #[cfg(test)]
