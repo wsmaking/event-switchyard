@@ -1651,6 +1651,9 @@ pub(super) struct AppState {
     pub(super) v3_replay_position_applied_total: Arc<AtomicU64>,
     pub(super) v3_replay_session_seq_seeded_total: Arc<AtomicU64>,
     pub(super) v3_replay_session_shard_seeded_total: Arc<AtomicU64>,
+    pub(super) v3_startup_rebuild_in_progress: Arc<AtomicBool>,
+    pub(super) v3_startup_rebuild_started_at_ns: Arc<AtomicU64>,
+    pub(super) v3_startup_rebuild_completed_at_ns: Arc<AtomicU64>,
     pub(super) v3_durable_confirm_soft_reject_age_us: u64,
     pub(super) v3_durable_confirm_hard_reject_age_us: u64,
     pub(super) v3_durable_confirm_guard_soft_slack_pct: u64,
@@ -1773,6 +1776,29 @@ impl AppState {
             self.v3_rejected_hard_total.as_ref(),
             shard_id,
         );
+    }
+
+    #[inline]
+    pub(super) fn v3_startup_rebuild_in_progress(&self) -> bool {
+        self.v3_startup_rebuild_in_progress.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn mark_v3_startup_rebuild_started(&self, at_ns: u64) {
+        self.v3_startup_rebuild_started_at_ns
+            .store(at_ns, Ordering::Relaxed);
+        self.v3_startup_rebuild_completed_at_ns
+            .store(0, Ordering::Relaxed);
+        self.v3_startup_rebuild_in_progress
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn mark_v3_startup_rebuild_completed(&self, at_ns: u64) {
+        self.v3_startup_rebuild_completed_at_ns
+            .store(at_ns, Ordering::Relaxed);
+        self.v3_startup_rebuild_in_progress
+            .store(false, Ordering::Relaxed);
     }
 
     #[inline]
@@ -2625,6 +2651,67 @@ fn rebuild_strategy_runtime_from_wal(
     stats
 }
 
+fn record_startup_rebuild_stats(
+    state: &AppState,
+    v3_stats: V3RebuildStats,
+    strategy_stats: StrategyRuntimeRebuildStats,
+    elapsed_ms: u64,
+    max_lines: usize,
+) {
+    state
+        .v3_confirm_rebuild_restored_total
+        .store(v3_stats.confirm_restored, Ordering::Relaxed);
+    state
+        .v3_confirm_rebuild_elapsed_ms
+        .store(elapsed_ms, Ordering::Relaxed);
+    state
+        .v3_replay_position_applied_total
+        .store(v3_stats.position_applied, Ordering::Relaxed);
+    state
+        .v3_replay_session_seq_seeded_total
+        .store(v3_stats.session_seq_seeded, Ordering::Relaxed);
+    state
+        .v3_replay_session_shard_seeded_total
+        .store(v3_stats.session_shard_seeded, Ordering::Relaxed);
+    info!(
+        restored = v3_stats.confirm_restored,
+        position_applied = v3_stats.position_applied,
+        session_seq_seeded = v3_stats.session_seq_seeded,
+        session_shard_seeded = v3_stats.session_shard_seeded,
+        elapsed_ms = elapsed_ms,
+        max_lines = max_lines,
+        "v3 runtime state rebuilt from WAL"
+    );
+    info!(
+        parent_restored = strategy_stats.parent_restored,
+        durable_child_replayed = strategy_stats.durable_child_replayed,
+        resumed_children = strategy_stats.resumed_children,
+        elapsed_ms = elapsed_ms,
+        max_lines = max_lines,
+        "strategy algo runtime rebuilt from WAL"
+    );
+}
+
+fn run_startup_rebuild_sync(
+    state: &AppState,
+    max_lines: usize,
+) -> (V3RebuildStats, StrategyRuntimeRebuildStats, u64) {
+    let rebuild_t0 = Instant::now();
+    let v3_stats = rebuild_v3_confirm_store_from_wal(state, max_lines);
+    let strategy_stats = rebuild_strategy_runtime_from_wal(state, max_lines);
+    let elapsed_ms = rebuild_t0.elapsed().as_millis() as u64;
+    (v3_stats, strategy_stats, elapsed_ms)
+}
+
+async fn run_startup_rebuild_task(state: AppState, max_lines: usize) {
+    info!(max_lines = max_lines, "startup WAL rebuild started");
+    let (v3_stats, strategy_stats, elapsed_ms) =
+        tokio::task::block_in_place(|| run_startup_rebuild_sync(&state, max_lines));
+    record_startup_rebuild_stats(&state, v3_stats, strategy_stats, elapsed_ms, max_lines);
+    state.mark_v3_startup_rebuild_completed(gateway_core::now_nanos());
+    info!(elapsed_ms = elapsed_ms, "startup WAL rebuild completed");
+}
+
 fn parse_v3_symbol_limits(
     default_max_order_qty: u64,
     default_max_notional: u64,
@@ -3272,6 +3359,8 @@ pub async fn run(
             .min(v3_durable_confirm_hard_reject_age_us);
     }
     let v3_confirm_rebuild_on_start = parse_bool_env("V3_CONFIRM_REBUILD_ON_START").unwrap_or(true);
+    let v3_confirm_rebuild_async_on_start =
+        parse_bool_env("V3_CONFIRM_REBUILD_ASYNC_ON_START").unwrap_or(v3_confirm_rebuild_on_start);
     let v3_confirm_rebuild_max_lines = std::env::var("V3_CONFIRM_REBUILD_MAX_LINES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -3618,6 +3707,9 @@ pub async fn run(
         v3_replay_position_applied_total: Arc::new(AtomicU64::new(0)),
         v3_replay_session_seq_seeded_total: Arc::new(AtomicU64::new(0)),
         v3_replay_session_shard_seeded_total: Arc::new(AtomicU64::new(0)),
+        v3_startup_rebuild_in_progress: Arc::new(AtomicBool::new(false)),
+        v3_startup_rebuild_started_at_ns: Arc::new(AtomicU64::new(0)),
+        v3_startup_rebuild_completed_at_ns: Arc::new(AtomicU64::new(0)),
         v3_durable_confirm_soft_reject_age_us,
         v3_durable_confirm_hard_reject_age_us,
         v3_durable_confirm_guard_soft_slack_pct,
@@ -3697,36 +3789,6 @@ pub async fn run(
         "v3 worker topology tuning"
     );
 
-    if v3_confirm_rebuild_on_start {
-        let rebuild_t0 = Instant::now();
-        let rebuild_stats = rebuild_v3_confirm_store_from_wal(&state, v3_confirm_rebuild_max_lines);
-        let elapsed_ms = rebuild_t0.elapsed().as_millis() as u64;
-        state
-            .v3_confirm_rebuild_restored_total
-            .store(rebuild_stats.confirm_restored, Ordering::Relaxed);
-        state
-            .v3_confirm_rebuild_elapsed_ms
-            .store(elapsed_ms, Ordering::Relaxed);
-        state
-            .v3_replay_position_applied_total
-            .store(rebuild_stats.position_applied, Ordering::Relaxed);
-        state
-            .v3_replay_session_seq_seeded_total
-            .store(rebuild_stats.session_seq_seeded, Ordering::Relaxed);
-        state
-            .v3_replay_session_shard_seeded_total
-            .store(rebuild_stats.session_shard_seeded, Ordering::Relaxed);
-        info!(
-            restored = rebuild_stats.confirm_restored,
-            position_applied = rebuild_stats.position_applied,
-            session_seq_seeded = rebuild_stats.session_seq_seeded,
-            session_shard_seeded = rebuild_stats.session_shard_seeded,
-            elapsed_ms = elapsed_ms,
-            max_lines = v3_confirm_rebuild_max_lines,
-            "v3 runtime state rebuilt from WAL"
-        );
-    }
-
     for (shard_id, v3_rx) in v3_rxs.into_iter().enumerate() {
         let writer_state = state.clone();
         let affinity_cpu = affinity_cpu_for_worker(&v3_shard_affinity_cpus, shard_id);
@@ -3798,20 +3860,6 @@ pub async fn run(
         tokio::spawn(async move {
             run_durable_notifier(rx, durable_state).await;
         });
-    }
-
-    if v3_confirm_rebuild_on_start {
-        let rebuild_t0 = Instant::now();
-        let strategy_rebuild_stats =
-            rebuild_strategy_runtime_from_wal(&state, v3_confirm_rebuild_max_lines);
-        info!(
-            parent_restored = strategy_rebuild_stats.parent_restored,
-            durable_child_replayed = strategy_rebuild_stats.durable_child_replayed,
-            resumed_children = strategy_rebuild_stats.resumed_children,
-            elapsed_ms = rebuild_t0.elapsed().as_millis() as u64,
-            max_lines = v3_confirm_rebuild_max_lines,
-            "strategy algo runtime rebuilt from WAL"
-        );
     }
 
     let v3_http_enable = parse_bool_env("V3_HTTP_ENABLE");
@@ -3944,11 +3992,33 @@ pub async fn run(
             get(handle_get_order_v3),
         );
     }
+    let app_state = state.clone();
     let app = app.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
+
+    if v3_confirm_rebuild_on_start {
+        app_state.mark_v3_startup_rebuild_started(gateway_core::now_nanos());
+        if v3_confirm_rebuild_async_on_start {
+            tokio::spawn(run_startup_rebuild_task(
+                app_state.clone(),
+                v3_confirm_rebuild_max_lines,
+            ));
+        } else {
+            let (v3_stats, strategy_stats, elapsed_ms) =
+                run_startup_rebuild_sync(&app_state, v3_confirm_rebuild_max_lines);
+            record_startup_rebuild_stats(
+                &app_state,
+                v3_stats,
+                strategy_stats,
+                elapsed_ms,
+                v3_confirm_rebuild_max_lines,
+            );
+            app_state.mark_v3_startup_rebuild_completed(gateway_core::now_nanos());
+        }
+    }
 
     axum::serve(listener, app).await?;
 

@@ -17,7 +17,11 @@ use super::AppState;
 /// - キュー長と主要レイテンシを返却
 pub(super) async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
-        status: "OK".into(),
+        status: if state.v3_startup_rebuild_in_progress() {
+            "STARTING".into()
+        } else {
+            "OK".into()
+        },
         queue_len: state.engine.queue_len(),
         latency_p50_ns: state.engine.latency_p50(),
         latency_p99_ns: state.engine.latency_p99(),
@@ -420,6 +424,17 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         .load(Ordering::Relaxed);
     let v3_replay_session_shard_seeded_total = state
         .v3_replay_session_shard_seeded_total
+        .load(Ordering::Relaxed);
+    let v3_startup_rebuild_in_progress = if state.v3_startup_rebuild_in_progress() {
+        1
+    } else {
+        0
+    };
+    let v3_startup_rebuild_started_at_ns = state
+        .v3_startup_rebuild_started_at_ns
+        .load(Ordering::Relaxed);
+    let v3_startup_rebuild_completed_at_ns = state
+        .v3_startup_rebuild_completed_at_ns
         .load(Ordering::Relaxed);
     let v3_durable_confirm_soft_reject_age_us = state.v3_durable_confirm_soft_reject_age_us;
     let v3_durable_confirm_hard_reject_age_us = state.v3_durable_confirm_hard_reject_age_us;
@@ -1979,7 +1994,16 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
          gateway_v3_replay_session_seq_seeded_total {}\n\
          # HELP gateway_v3_replay_session_shard_seeded_total Total /v3 session shard bindings seeded from WAL replay at startup\n\
          # TYPE gateway_v3_replay_session_shard_seeded_total counter\n\
-         gateway_v3_replay_session_shard_seeded_total {}\n",
+         gateway_v3_replay_session_shard_seeded_total {}\n\
+         # HELP gateway_v3_startup_rebuild_in_progress Whether startup WAL rebuild is currently in progress (1/0)\n\
+         # TYPE gateway_v3_startup_rebuild_in_progress gauge\n\
+         gateway_v3_startup_rebuild_in_progress {}\n\
+         # HELP gateway_v3_startup_rebuild_started_at_ns Last startup WAL rebuild start timestamp in nanoseconds\n\
+         # TYPE gateway_v3_startup_rebuild_started_at_ns gauge\n\
+         gateway_v3_startup_rebuild_started_at_ns {}\n\
+         # HELP gateway_v3_startup_rebuild_completed_at_ns Last startup WAL rebuild completion timestamp in nanoseconds\n\
+         # TYPE gateway_v3_startup_rebuild_completed_at_ns gauge\n\
+         gateway_v3_startup_rebuild_completed_at_ns {}\n",
         v3_confirm_store_size,
         v3_confirm_store_lanes,
         v3_confirm_lane_skew_pct,
@@ -1992,6 +2016,9 @@ pub(super) async fn handle_metrics(State(state): State<AppState>) -> String {
         v3_replay_position_applied_total,
         v3_replay_session_seq_seeded_total,
         v3_replay_session_shard_seeded_total,
+        v3_startup_rebuild_in_progress,
+        v3_startup_rebuild_started_at_ns,
+        v3_startup_rebuild_completed_at_ns,
     ));
     snapshot.push_str(
         "# HELP gateway_v3_confirm_oldest_inflight_us_per_lane Oldest /v3 inflight confirm age per lane in microseconds\n\

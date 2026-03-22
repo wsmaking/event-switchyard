@@ -1072,6 +1072,15 @@ pub(super) async fn handle_post_strategy_intent_submit(
     (StatusCode, Json<StrategyIntentSubmitResponse>),
     (StatusCode, Json<StrategyConfigErrorResponse>),
 > {
+    if state.v3_startup_rebuild_in_progress() {
+        let snapshot = state.strategy_snapshot_store.snapshot();
+        return Err(snapshot_error(
+            &state,
+            &snapshot,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STRATEGY_STARTUP_REBUILD_IN_PROGRESS",
+        ));
+    }
     request.intent.validate().map_err(|reason| {
         let snapshot = state.strategy_snapshot_store.snapshot();
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)

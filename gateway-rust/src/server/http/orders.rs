@@ -964,6 +964,15 @@ fn process_order_v3_hot_path_with_input(
 ) -> V3HotPathOutcome {
     let t0_tsc = state.capture_v3_tsc_stamp();
     let hotpath_sampled = state.v3_hotpath_sampled();
+    if state.v3_startup_rebuild_in_progress() {
+        return V3HotPathOutcome::rejected(
+            StatusCode::SERVICE_UNAVAILABLE,
+            V3_TCP_KIND_REJECTED,
+            "REJECTED",
+            "STARTUP_REBUILD_IN_PROGRESS",
+            t0,
+        );
+    }
     let ingress = &state.v3_ingress;
     let shard_id = ingress.shard_for_session(session_id);
     if ingress.maybe_recover_shard(shard_id, t0) {
@@ -3415,6 +3424,9 @@ mod tests {
             v3_replay_position_applied_total: Arc::new(AtomicU64::new(0)),
             v3_replay_session_seq_seeded_total: Arc::new(AtomicU64::new(0)),
             v3_replay_session_shard_seeded_total: Arc::new(AtomicU64::new(0)),
+            v3_startup_rebuild_in_progress: Arc::new(AtomicBool::new(false)),
+            v3_startup_rebuild_started_at_ns: Arc::new(AtomicU64::new(0)),
+            v3_startup_rebuild_completed_at_ns: Arc::new(AtomicU64::new(0)),
             v3_durable_confirm_soft_reject_age_us: 0,
             v3_durable_confirm_hard_reject_age_us: 0,
             v3_durable_confirm_guard_soft_slack_pct: 0,
@@ -5386,6 +5398,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v3_rejects_when_startup_rebuild_is_in_progress() {
+        let state = build_test_state();
+        state
+            .v3_startup_rebuild_in_progress
+            .store(true, Ordering::Relaxed);
+
+        let (status, Json(resp)) = handle_order_v3(
+            State(state),
+            headers("v3-startup-rebuild", Some("idem_v3_startup_rebuild")),
+            Json(request_with_client_id("cid_v3_startup_rebuild")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("v3 order submit failed"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.reason.as_deref(), Some("STARTUP_REBUILD_IN_PROGRESS"));
+    }
+
+    #[tokio::test]
     async fn v3_rejects_soft_when_durable_controller_level_is_soft() {
         let mut state = build_test_state();
         state.v3_durable_admission_controller_enabled = true;
@@ -6471,6 +6502,31 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(err.1.0.reason, "STRATEGY_INTENT_ALPHA_STALE");
+    }
+
+    #[tokio::test]
+    async fn strategy_intent_submit_rejects_while_startup_rebuild_is_in_progress() {
+        let (state, _ingress_rx, _durable_rxs) =
+            build_test_state_with_v3_pipeline(500, 60_000, 20, 1, 1_024);
+        state
+            .v3_startup_rebuild_in_progress
+            .store(true, Ordering::Relaxed);
+
+        let err = super::super::strategy::handle_post_strategy_intent_submit(
+            State(state.clone()),
+            Json(super::super::strategy::StrategyIntentSubmitRequest {
+                intent: strategy_intent_fixture(),
+                shadow_run_id: None,
+                predicted_policy: None,
+                predicted_outcome: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("startup rebuild must block strategy submit");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.reason, "STRATEGY_STARTUP_REBUILD_IN_PROGRESS");
     }
 
     #[tokio::test]
