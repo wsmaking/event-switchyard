@@ -26,3 +26,6 @@ pub mod redecision_support;
 
 #[allow(dead_code)]
 pub mod persistence;
+
+#[allow(dead_code)]
+pub mod scope;

@@ -31,27 +31,7 @@ use strategy::redecision_support::{
     redecision_skip_reason as shared_redecision_skip_reason,
 };
 use strategy::replay::StrategyExecutionCatchupInput;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ReaderScope {
-    ExecutionRunId(String),
-    IntentId(String),
-}
-
-impl ReaderScope {
-    fn endpoint_path(&self) -> &'static str {
-        match self {
-            Self::ExecutionRunId(_) => "/strategy/catchup/execution",
-            Self::IntentId(_) => "/strategy/catchup/intent",
-        }
-    }
-
-    fn id(&self) -> &str {
-        match self {
-            Self::ExecutionRunId(value) | Self::IntentId(value) => value,
-        }
-    }
-}
+use strategy::scope::StrategyTargetScope as ReaderScope;
 
 #[derive(Debug, Clone)]
 struct ReaderConfig {
@@ -259,10 +239,7 @@ async fn run_single_pass(
 
     Ok((
         ReaderOutput {
-            scope_kind: match &config.scope {
-                ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
-                ReaderScope::IntentId(_) => "intentId".to_string(),
-            },
+            scope_kind: config.scope.label().to_string(),
             scope_id: config.scope.id().to_string(),
             snapshot,
             recovery_context,
@@ -500,19 +477,11 @@ fn now_epoch_ns() -> u64 {
 }
 
 fn load_cursor_state(path: &str, scope: &ReaderScope) -> Result<ReaderCursorState, String> {
-    let expected_kind = match scope {
-        ReaderScope::ExecutionRunId(_) => "executionRunId",
-        ReaderScope::IntentId(_) => "intentId",
-    };
-    load_shared_cursor_state(path, expected_kind, scope.id())
+    load_shared_cursor_state(path, scope.label(), scope.id())
 }
 
 fn persist_cursor_state(path: &str, scope: &ReaderScope, next_cursor: u64) -> Result<(), String> {
-    let scope_kind = match scope {
-        ReaderScope::ExecutionRunId(_) => "executionRunId",
-        ReaderScope::IntentId(_) => "intentId",
-    };
-    persist_shared_cursor_state(path, scope_kind, scope.id(), next_cursor)
+    persist_shared_cursor_state(path, scope.label(), scope.id(), next_cursor)
 }
 
 async fn fetch_catchup_page(

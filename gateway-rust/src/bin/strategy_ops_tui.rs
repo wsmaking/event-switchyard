@@ -33,6 +33,7 @@ use strategy::redecision_support::{
     load_template_intent as load_shared_template_intent,
 };
 use strategy::replay::{StrategyExecutionCatchupInput, StrategyExecutionFactStatus};
+use strategy::scope::StrategyTargetScope as DashboardScope;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8081";
 const DEFAULT_LIMIT: usize = 500;
@@ -61,34 +62,6 @@ const METRIC_NAMES: &[&str] = &[
     "gateway_strategy_runtime_paused_parent_count",
     "gateway_quant_feedback_queue_depth",
 ];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DashboardScope {
-    ExecutionRunId(String),
-    IntentId(String),
-}
-
-impl DashboardScope {
-    fn endpoint_path(&self) -> &'static str {
-        match self {
-            Self::ExecutionRunId(_) => "/strategy/catchup/execution",
-            Self::IntentId(_) => "/strategy/catchup/intent",
-        }
-    }
-
-    fn id(&self) -> &str {
-        match self {
-            Self::ExecutionRunId(value) | Self::IntentId(value) => value,
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ExecutionRunId(_) => "executionRunId",
-            Self::IntentId(_) => "intentId",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct TuiConfig {
