@@ -6563,7 +6563,7 @@ mod tests {
         let audit_log = Arc::new(AuditLog::new(&wal_path).expect("create audit log"));
         let state = build_test_state_with_audit_log(audit_log);
 
-        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        let stats = super::super::startup_rebuild::rebuild_strategy_runtime_from_wal(&state, 1024);
         assert_eq!(stats.parent_restored, 1);
         assert_eq!(stats.durable_child_replayed, 1);
         assert_eq!(stats.resumed_children, 0);
@@ -6601,7 +6601,7 @@ mod tests {
             })
             .expect("store snapshot");
 
-        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        let stats = super::super::startup_rebuild::rebuild_strategy_runtime_from_wal(&state, 1024);
         assert_eq!(stats.parent_restored, 1);
         assert_eq!(stats.resumed_children, 1);
 
@@ -6649,7 +6649,7 @@ mod tests {
         let (state, _ingress_rx, _durable_rxs) =
             build_test_state_with_v3_pipeline_and_audit_log(audit_log, 500, 60_000, 20, 1, 1_024);
 
-        let stats = super::super::rebuild_strategy_runtime_from_wal(&state, 1024);
+        let stats = super::super::startup_rebuild::rebuild_strategy_runtime_from_wal(&state, 1024);
         assert_eq!(stats.parent_restored, 1);
         assert_eq!(stats.resumed_children, 0);
 
