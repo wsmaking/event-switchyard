@@ -4,6 +4,7 @@ pub mod catchup;
 pub mod config;
 pub mod feedback;
 pub mod intent;
+pub mod market_input;
 pub mod replay;
 pub mod runtime;
 pub mod shadow;

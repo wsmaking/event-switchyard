@@ -23,6 +23,7 @@ use strategy::catchup::{
     target_signed_qty_for_intent,
 };
 use strategy::intent::StrategyIntent;
+use strategy::market_input::StrategyMarketInput;
 use strategy::replay::StrategyExecutionCatchupInput;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8081";
@@ -72,6 +73,8 @@ impl Default for ExecutionMode {
 struct OrchestratorConfig {
     #[serde(default = "default_base_url")]
     base_url: String,
+    #[serde(default)]
+    market_input_base_url: Option<String>,
     #[serde(default = "default_poll_interval_ms")]
     poll_interval_ms: u64,
     #[serde(default = "default_limit")]
@@ -90,7 +93,10 @@ struct OrchestratorRunConfig {
     scope_kind: OrchestratorScopeKind,
     scope_id: String,
     template_intent_path: String,
-    market_input_path: String,
+    #[serde(default)]
+    market_input_path: Option<String>,
+    #[serde(default)]
+    market_input_url: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -143,20 +149,6 @@ struct OrchestratorPersistentRunState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct MarketInputFile {
-    desired_signed_qty: i64,
-    #[serde(default)]
-    observed_at_ns: Option<u64>,
-    #[serde(default)]
-    max_decision_age_ns: Option<u64>,
-    #[serde(default)]
-    market_snapshot_id: Option<String>,
-    #[serde(default)]
-    signal_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 struct OrchestratorExecutionResult {
     mode: ExecutionMode,
     executed: bool,
@@ -201,7 +193,7 @@ struct OrchestratorRunOutput {
     scope_id: String,
     next_cursor: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    market_input: Option<MarketInputFile>,
+    market_input: Option<StrategyMarketInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot: Option<StrategyExecutionCatchupLoopSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,7 +393,7 @@ async fn process_run(
         return Ok(output);
     }
 
-    let market_input = match load_json_file::<MarketInputFile>(&run.market_input_path) {
+    let market_input = match load_market_input(config, run, &scope).await {
         Ok(value) => value,
         Err(err) => {
             output.execution_result = OrchestratorExecutionResult::skipped(
@@ -498,7 +490,7 @@ fn build_redecision_input(
     template: &StrategyIntent,
     recovery: &AlphaRecoveryContext,
     run: &OrchestratorRunConfig,
-    market_input: &MarketInputFile,
+    market_input: &StrategyMarketInput,
     now_ns: u64,
 ) -> Result<AlphaReDecisionInput, String> {
     let market = build_market_context(template, market_input, now_ns)?;
@@ -513,7 +505,7 @@ fn build_redecision_input(
 
 fn build_market_context(
     template: &StrategyIntent,
-    market_input: &MarketInputFile,
+    market_input: &StrategyMarketInput,
     now_ns: u64,
 ) -> Result<AlphaMarketContext, String> {
     let max_decision_age_ns = market_input
@@ -689,6 +681,17 @@ fn load_config(path: &str) -> Result<OrchestratorConfig, String> {
     if config.poll_interval_ms == 0 {
         return Err("pollIntervalMs must be greater than zero".to_string());
     }
+    for run in &config.runs {
+        if run.market_input_path.is_none()
+            && run.market_input_url.is_none()
+            && config.market_input_base_url.is_none()
+        {
+            return Err(format!(
+                "run {} must set marketInputPath, marketInputUrl, or config.marketInputBaseUrl",
+                run.name
+            ));
+        }
+    }
     Ok(config)
 }
 
@@ -703,6 +706,56 @@ fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
 fn load_json_file<T: DeserializeOwned>(path: &str) -> Result<T, String> {
     let raw = fs::read_to_string(path).map_err(|err| format!("read {path} failed: {err}"))?;
     serde_json::from_str(&raw).map_err(|err| format!("parse {path} failed: {err}"))
+}
+
+async fn load_market_input(
+    config: &OrchestratorConfig,
+    run: &OrchestratorRunConfig,
+    scope: &RunScope,
+) -> Result<StrategyMarketInput, String> {
+    let input = if let Some(url) = market_input_url(config, run, scope)? {
+        fetch_market_input_http(&url).await?
+    } else if let Some(path) = run.market_input_path.as_deref() {
+        load_json_file::<StrategyMarketInput>(path)?
+    } else {
+        return Err("market input source not configured".to_string());
+    };
+    input.validate().map_err(|err| err.to_string())?;
+    Ok(input)
+}
+
+fn market_input_url(
+    config: &OrchestratorConfig,
+    run: &OrchestratorRunConfig,
+    scope: &RunScope,
+) -> Result<Option<String>, String> {
+    if let Some(url) = run.market_input_url.as_ref() {
+        return Ok(Some(url.clone()));
+    }
+    let Some(base) = config.market_input_base_url.as_ref() else {
+        return Ok(None);
+    };
+    let base = base.trim_end_matches('/');
+    let scope_segment = match scope.kind {
+        OrchestratorScopeKind::ExecutionRunId => "execution",
+        OrchestratorScopeKind::IntentId => "intent",
+    };
+    Ok(Some(format!(
+        "{base}/alpha-input/{scope_segment}/{}",
+        encode_path_segment(&scope.id)
+    )))
+}
+
+async fn fetch_market_input_http(url: &str) -> Result<StrategyMarketInput, String> {
+    let parsed = parse_http_base_url(url)?;
+    let path = if parsed.base_path.is_empty() {
+        "/".to_string()
+    } else {
+        parsed.base_path.clone()
+    };
+    let raw = http_get_body(&parsed, &path).await?;
+    serde_json::from_slice::<StrategyMarketInput>(&raw)
+        .map_err(|err| format!("decode market input failed: {err}"))
 }
 
 fn resolve_run_paths(config: &OrchestratorConfig, run: &OrchestratorRunConfig) -> RunPaths {
@@ -746,6 +799,20 @@ fn sanitize_file_component(raw: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn encode_path_segment(raw: &str) -> String {
+    let mut encoded = String::new();
+    for byte in raw.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            encoded.push(ch);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn load_persistent_state(
@@ -1104,15 +1171,16 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionMode, MarketInputFile, OrchestratorConfig, OrchestratorPersistentRunState,
-        OrchestratorRunConfig, OrchestratorScopeKind, RunScope, decode_chunked_body,
-        load_persistent_state, parse_http_base_url, parse_http_response, persist_json_file,
-        proposal_already_executed, resolve_run_paths, sanitize_file_component,
+        ExecutionMode, OrchestratorConfig, OrchestratorPersistentRunState, OrchestratorRunConfig,
+        OrchestratorScopeKind, RunScope, decode_chunked_body, encode_path_segment, load_config,
+        load_persistent_state, market_input_url, parse_http_base_url, parse_http_response,
+        persist_json_file, proposal_already_executed, resolve_run_paths, sanitize_file_component,
     };
     use crate::order::{OrderType, TimeInForce};
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
     };
+    use crate::strategy::market_input::StrategyMarketInput;
     use serde_json::json;
     use std::fs;
 
@@ -1148,6 +1216,7 @@ mod tests {
     fn resolve_run_paths_defaults_under_state_dir() {
         let config = OrchestratorConfig {
             base_url: "http://127.0.0.1:8081".to_string(),
+            market_input_base_url: None,
             poll_interval_ms: 1_000,
             limit: 500,
             max_pages: None,
@@ -1159,7 +1228,8 @@ mod tests {
             scope_kind: OrchestratorScopeKind::ExecutionRunId,
             scope_id: "run-1".to_string(),
             template_intent_path: "intent.json".to_string(),
-            market_input_path: "market.json".to_string(),
+            market_input_path: Some("market.json".to_string()),
+            market_input_url: None,
             enabled: true,
             target_signed_qty: None,
             limit: None,
@@ -1260,9 +1330,84 @@ mod tests {
             "marketSnapshotId": "snap-1",
             "signalId": "signal-1"
         });
-        let parsed: MarketInputFile =
+        let parsed: StrategyMarketInput =
             serde_json::from_value(raw).expect("market input should deserialize");
         assert_eq!(parsed.desired_signed_qty, 60);
         assert_eq!(parsed.observed_at_ns, Some(1000));
+    }
+
+    #[test]
+    fn encode_path_segment_percent_encodes_separators() {
+        assert_eq!(encode_path_segment("run::1/a"), "run%3A%3A1%2Fa");
+    }
+
+    #[test]
+    fn market_input_url_uses_config_base_url_and_scope() {
+        let config = OrchestratorConfig {
+            base_url: "http://127.0.0.1:8081".to_string(),
+            market_input_base_url: Some("http://127.0.0.1:18082".to_string()),
+            poll_interval_ms: 1_000,
+            limit: 500,
+            max_pages: None,
+            state_dir: "var/test/orchestrator".to_string(),
+            runs: vec![],
+        };
+        let run = OrchestratorRunConfig {
+            name: "alpha".to_string(),
+            scope_kind: OrchestratorScopeKind::ExecutionRunId,
+            scope_id: "run::1".to_string(),
+            template_intent_path: "intent.json".to_string(),
+            market_input_path: None,
+            market_input_url: None,
+            enabled: true,
+            target_signed_qty: None,
+            limit: None,
+            max_pages: None,
+            execution_mode: ExecutionMode::DryRun,
+            cursor_path: None,
+            state_path: None,
+            status_path: None,
+            next_intent_id: None,
+            next_decision_key: None,
+            next_created_at_ns: None,
+            next_expires_at_ns: None,
+        };
+
+        let url = market_input_url(
+            &config,
+            &run,
+            &RunScope::new(OrchestratorScopeKind::ExecutionRunId, "run::1".to_string()),
+        )
+        .expect("url")
+        .expect("must be present");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:18082/alpha-input/execution/run%3A%3A1"
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_missing_market_input_source() {
+        let path = std::env::temp_dir().join(format!(
+            "strategy_redecision_orchestrator_config_{}.json",
+            std::process::id()
+        ));
+        let raw = json!({
+            "baseUrl": "http://127.0.0.1:8081",
+            "pollIntervalMs": 1000,
+            "limit": 500,
+            "stateDir": "var/test/orchestrator",
+            "runs": [{
+                "name": "alpha",
+                "scopeKind": "EXECUTION_RUN_ID",
+                "scopeId": "run-1",
+                "templateIntentPath": "intent.json"
+            }]
+        });
+        fs::write(&path, serde_json::to_string(&raw).expect("json")).expect("write config");
+        let path_string = path.to_string_lossy().to_string();
+        let err = load_config(&path_string).expect_err("config must fail");
+        assert!(err.contains("marketInputPath, marketInputUrl, or config.marketInputBaseUrl"));
+        let _ = fs::remove_file(path);
     }
 }

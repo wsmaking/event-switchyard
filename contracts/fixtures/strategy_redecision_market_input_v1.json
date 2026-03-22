@@ -1,6 +1,6 @@
 {
   "desiredSignedQty": 60,
-  "maxDecisionAgeNs": 1000000000,
+  "maxDecisionAgeNs": 10000000000,
   "marketSnapshotId": "market-demo-1",
   "signalId": "signal-demo-1"
 }

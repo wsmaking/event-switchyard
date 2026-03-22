@@ -13,3 +13,7 @@ pub mod intent;
 #[allow(dead_code)]
 #[path = "../../strategy/alpha_redecision.rs"]
 pub mod alpha_redecision;
+
+#[allow(dead_code)]
+#[path = "../../strategy/market_input.rs"]
+pub mod market_input;

@@ -167,9 +167,17 @@ alpha 側では
 [strategy_redecision_orchestrator.rs](gateway-rust/src/bin/strategy_redecision_orchestrator.rs)
 
 - catch-up cursor を永続化
-- market input を読む
+- execution 側の market input ingress から現在の signal を読む
 - `AlphaReDecision` を評価
 - 必要なら `adapt -> submit`
+
+### 6. market input ingress
+
+[strategy_market_input_server.rs](gateway-rust/src/bin/strategy_market_input_server.rs)
+
+- execution / intent scope ごとの最新 market input を保持
+- orchestrator が HTTP で取得
+- alpha producer は `PUT /alpha-input/...` で更新
 
 ## リポジトリ見取り図
 
@@ -262,6 +270,21 @@ cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_ops_tui -- \
 
 ### 5. re-decision orchestrator
 
+まず market input ingress を起動して current signal を投入します。
+
+```bash
+cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_market_input_server -- \
+  --listen 127.0.0.1:18082
+```
+
+```bash
+curl -sS -X PUT http://127.0.0.1:18082/alpha-input/execution/run-export-1 \
+  -H 'content-type: application/json' \
+  --data-binary @contracts/fixtures/strategy_redecision_market_input_v1.json
+```
+
+その上で orchestrator を回します。
+
 ```bash
 cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_redecision_orchestrator -- \
   --config contracts/fixtures/strategy_redecision_orchestrator_v1.json \
@@ -280,6 +303,8 @@ cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_redecision_orch
   - terminal operator monitor
 - `strategy_redecision_orchestrator`
   - persistent catch-up / market input / adapt-submit orchestrator
+- `strategy_market_input_server`
+  - execution-side market decision ingress
 
 ## 現役 script
 
