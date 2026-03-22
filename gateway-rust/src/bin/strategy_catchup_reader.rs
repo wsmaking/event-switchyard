@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::fs;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, sleep};
 
@@ -22,6 +20,10 @@ use strategy::http_client::{
     decode_json_or_string, fetch_catchup_page as fetch_strategy_catchup_page, parse_http_base_url,
 };
 use strategy::intent::StrategyIntent;
+use strategy::persistence::{
+    CursorState as ReaderCursorState, load_cursor_state as load_shared_cursor_state,
+    persist_cursor_state as persist_shared_cursor_state,
+};
 use strategy::redecision_support::{
     AlphaMarketOverrides, AlphaNextIntentOverrides,
     build_optional_redecision_input as build_shared_optional_redecision_input,
@@ -74,14 +76,6 @@ struct ReaderConfig {
     loop_iterations: Option<usize>,
     adapt_proposal: bool,
     submit_proposal: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ReaderCursorState {
-    scope_kind: String,
-    scope_id: String,
-    next_cursor: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -506,35 +500,19 @@ fn now_epoch_ns() -> u64 {
 }
 
 fn load_cursor_state(path: &str, scope: &ReaderScope) -> Result<ReaderCursorState, String> {
-    let raw = fs::read_to_string(path).map_err(|err| format!("read cursor file failed: {err}"))?;
-    let state: ReaderCursorState =
-        serde_json::from_str(&raw).map_err(|err| format!("parse cursor file failed: {err}"))?;
     let expected_kind = match scope {
         ReaderScope::ExecutionRunId(_) => "executionRunId",
         ReaderScope::IntentId(_) => "intentId",
     };
-    if state.scope_kind != expected_kind || state.scope_id != scope.id() {
-        return Err("cursor file scope mismatch".to_string());
-    }
-    Ok(state)
+    load_shared_cursor_state(path, expected_kind, scope.id())
 }
 
 fn persist_cursor_state(path: &str, scope: &ReaderScope, next_cursor: u64) -> Result<(), String> {
-    let state = ReaderCursorState {
-        scope_kind: match scope {
-            ReaderScope::ExecutionRunId(_) => "executionRunId".to_string(),
-            ReaderScope::IntentId(_) => "intentId".to_string(),
-        },
-        scope_id: scope.id().to_string(),
-        next_cursor,
+    let scope_kind = match scope {
+        ReaderScope::ExecutionRunId(_) => "executionRunId",
+        ReaderScope::IntentId(_) => "intentId",
     };
-    let raw = serde_json::to_string_pretty(&state).map_err(|err| err.to_string())?;
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-        }
-    }
-    fs::write(path, raw + "\n").map_err(|err| format!("write cursor file failed: {err}"))
+    persist_shared_cursor_state(path, scope_kind, scope.id(), next_cursor)
 }
 
 async fn fetch_catchup_page(

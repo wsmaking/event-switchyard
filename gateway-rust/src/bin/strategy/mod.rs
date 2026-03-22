@@ -23,3 +23,6 @@ pub mod http_client;
 
 #[allow(dead_code)]
 pub mod redecision_support;
+
+#[allow(dead_code)]
+pub mod persistence;

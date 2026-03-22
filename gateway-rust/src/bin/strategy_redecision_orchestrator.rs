@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{Duration, sleep};
 
@@ -24,6 +23,10 @@ use strategy::http_client::{
 };
 use strategy::intent::StrategyIntent;
 use strategy::market_input::StrategyMarketInput;
+use strategy::persistence::{
+    CursorState as ReaderCursorState, read_json_file as read_shared_json_file,
+    write_json_file as write_shared_json_file,
+};
 use strategy::redecision_support::{
     AlphaMarketOverrides, AlphaNextIntentOverrides,
     build_redecision_input as build_shared_redecision_input,
@@ -127,14 +130,6 @@ struct OrchestratorRunConfig {
     next_created_at_ns: Option<u64>,
     #[serde(default)]
     next_expires_at_ns: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ReaderCursorState {
-    scope_kind: String,
-    scope_id: String,
-    next_cursor: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -640,8 +635,7 @@ fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
 }
 
 fn load_json_file<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-    let raw = fs::read_to_string(path).map_err(|err| format!("read {path} failed: {err}"))?;
-    serde_json::from_str(&raw).map_err(|err| format!("parse {path} failed: {err}"))
+    read_shared_json_file(path)
 }
 
 async fn load_market_input(
@@ -793,14 +787,7 @@ fn persist_artifacts(
 }
 
 fn persist_json_file<T: Serialize>(path: &str, value: &T) -> Result<(), String> {
-    let raw = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("create parent dir for {path} failed: {err}"))?;
-        }
-    }
-    fs::write(path, raw + "\n").map_err(|err| format!("write {path} failed: {err}"))
+    write_shared_json_file(path, value)
 }
 
 fn parse_args() -> Result<OrchestratorCliConfig, String> {
