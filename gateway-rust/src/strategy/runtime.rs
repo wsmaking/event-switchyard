@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::order::OrderRequest;
 
 use super::algo::{AlgoExecutionPlan, AlgoExecutionSlice};
-use super::intent::{ExecutionPolicyKind, StrategyRecoveryPolicy};
+use super::intent::ExecutionPolicyKind;
 use super::shadow::ShadowPolicyView;
 
 pub const STRATEGY_ALGO_RUNTIME_SCHEMA_VERSION: u16 = 1;
@@ -28,6 +28,14 @@ pub enum AlgoChildStatus {
     DurableAccepted,
     Rejected,
     Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlgoRuntimeMode {
+    GatewayManagedResume,
+    #[serde(alias = "NO_AUTO_RESUME")]
+    PauseOnRestart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,7 +94,8 @@ pub struct AlgoParentExecution {
     #[serde(default)]
     pub execution_run_id: Option<String>,
     pub policy: ExecutionPolicyKind,
-    pub recovery_policy: StrategyRecoveryPolicy,
+    #[serde(rename = "runtimeMode", alias = "recoveryPolicy")]
+    pub runtime_mode: AlgoRuntimeMode,
     pub total_qty: u64,
     pub child_count: u32,
     pub status: AlgoParentStatus,
@@ -116,7 +125,7 @@ impl AlgoParentExecution {
         symbol: String,
         model_id: Option<String>,
         execution_run_id: Option<String>,
-        recovery_policy: StrategyRecoveryPolicy,
+        runtime_mode: AlgoRuntimeMode,
         base_order_request: OrderRequest,
         effective_risk_budget_ref: Option<String>,
         actual_policy: Option<ShadowPolicyView>,
@@ -132,7 +141,7 @@ impl AlgoParentExecution {
             model_id,
             execution_run_id,
             policy: plan.policy,
-            recovery_policy,
+            runtime_mode,
             total_qty: plan.total_qty,
             child_count: plan.child_count,
             status: AlgoParentStatus::Scheduled,
@@ -199,12 +208,12 @@ impl AlgoParentExecution {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlgoParentExecution, AlgoParentStatus};
+    use super::{AlgoParentExecution, AlgoParentStatus, AlgoRuntimeMode};
     use crate::order::{OrderRequest, OrderType, TimeInForce};
     use crate::strategy::algo::{
         AlgoExecutionPlan, AlgoExecutionSlice, STRATEGY_ALGO_PLAN_SCHEMA_VERSION,
     };
-    use crate::strategy::intent::{ExecutionPolicyKind, StrategyRecoveryPolicy};
+    use crate::strategy::intent::ExecutionPolicyKind;
 
     #[test]
     fn parent_execution_builds_from_plan() {
@@ -245,7 +254,7 @@ mod tests {
             "AAPL".to_string(),
             Some("model-1".to_string()),
             Some("run-1".to_string()),
-            StrategyRecoveryPolicy::GatewayManagedResume,
+            AlgoRuntimeMode::GatewayManagedResume,
             OrderRequest {
                 symbol: "AAPL".to_string(),
                 side: "BUY".to_string(),
@@ -269,6 +278,10 @@ mod tests {
 
         assert_eq!(execution.parent_intent_id, "intent-1");
         assert_eq!(execution.status, AlgoParentStatus::Scheduled);
+        assert_eq!(
+            execution.runtime_mode,
+            AlgoRuntimeMode::GatewayManagedResume
+        );
         assert_eq!(execution.child_count, 2);
         assert_eq!(execution.slices.len(), 2);
         assert_eq!(execution.accepted_child_count(), 0);

@@ -2626,8 +2626,8 @@ fn rebuild_strategy_runtime_from_wal(
             continue;
         }
         if matches!(
-            runtime.recovery_policy,
-            crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume
+            runtime.runtime_mode,
+            crate::strategy::runtime::AlgoRuntimeMode::PauseOnRestart
         ) {
             let paused_at_ns = gateway_core::now_nanos();
             if state.strategy_runtime_store.pause_parent_on_restart(

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "intentId": "export-aggressive-buy-1",
+  "accountId": "acc-export-1",
+  "sessionId": "sess-export-1",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "type": "LIMIT",
+  "qty": 100,
+  "limitPrice": 101,
+  "timeInForce": "IOC",
+  "urgency": "HIGH",
+  "executionPolicy": "AGGRESSIVE",
+  "riskBudgetRef": {
+    "budgetId": "budget-export-1",
+    "version": 3
+  },
+  "modelId": "model-export-1",
+  "executionRunId": "run-export-1",
+  "decisionKey": "decision-export-1",
+  "decisionAttemptSeq": 1,
+  "decisionBasisAtNs": 1774144948500636000,
+  "maxDecisionAgeNs": 60000000000,
+  "marketSnapshotId": "market-export-1",
+  "signalId": "signal-export-1",
+  "algo": null,
+  "createdAtNs": 1774144948499636000,
+  "expiresAtNs": 1774145008500636000
+}

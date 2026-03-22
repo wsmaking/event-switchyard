@@ -123,7 +123,8 @@ struct SimpleHttpResponse {
 struct AlgoRuntimeView {
     parent_intent_id: String,
     policy: String,
-    recovery_policy: String,
+    #[serde(alias = "recoveryPolicy")]
+    runtime_mode: String,
     total_qty: u64,
     child_count: u32,
     status: String,
@@ -742,7 +743,7 @@ fn render_runtime_panel(
         runtime.parent_intent_id,
         paint_runtime_status(colors_enabled, &runtime.status, runtime.status.clone()),
         runtime.policy,
-        runtime.recovery_policy,
+        runtime.runtime_mode,
         runtime.total_qty,
         runtime.child_count,
         format_age_ns(now_ns, runtime.last_updated_at_ns),
@@ -972,7 +973,7 @@ fn print_usage() {
         DEFAULT_LIMIT, DEFAULT_POLL_INTERVAL_MS, DEFAULT_MAX_DECISIONS
     );
     println!(
-        "    [--target-signed-qty 100] [--template-intent contracts/fixtures/strategy_intent_v1.json] \\"
+        "    [--target-signed-qty 100] [--template-intent contracts/fixtures/strategy_intent_v2.json] \\"
     );
     println!(
         "    [--market-desired-signed-qty 60] [--market-observed-at-ns NOW_NS] [--market-max-decision-age-ns 1000000] \\"

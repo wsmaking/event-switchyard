@@ -1,8 +1,9 @@
 use crate::order::{OrderType, TimeInForce};
 use serde::{Deserialize, Serialize};
 
-pub const STRATEGY_INTENT_SCHEMA_VERSION: u16 = 1;
+pub const STRATEGY_INTENT_SCHEMA_VERSION: u16 = 2;
 
+// Legacy top-level contract field kept only to reject stale clients explicitly.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum StrategyRecoveryPolicy {
@@ -109,8 +110,8 @@ pub struct StrategyIntent {
     pub market_snapshot_id: Option<String>,
     #[serde(default)]
     pub signal_id: Option<String>,
-    #[serde(default)]
-    pub recovery_policy: Option<StrategyRecoveryPolicy>,
+    #[serde(default, rename = "recoveryPolicy", skip_serializing)]
+    pub(crate) recovery_policy: Option<StrategyRecoveryPolicy>,
     #[serde(default)]
     pub algo: Option<AlgoExecutionSpec>,
     pub created_at_ns: u64,
@@ -142,6 +143,9 @@ impl StrategyIntent {
         }
         if self.expires_at_ns <= self.created_at_ns {
             return Err("INVALID_EXPIRY");
+        }
+        if self.recovery_policy.is_some() {
+            return Err("STRATEGY_RECOVERY_POLICY_DEPRECATED");
         }
         if self.order_type == OrderType::Limit && self.limit_price.unwrap_or(0) == 0 {
             return Err("LIMIT_PRICE_REQUIRED");
@@ -222,7 +226,6 @@ impl StrategyIntent {
 mod tests {
     use super::{
         AlgoExecutionSpec, ExecutionPolicyKind, IntentUrgency, RiskBudgetRef, StrategyIntent,
-        StrategyRecoveryPolicy,
     };
     use crate::order::{OrderType, TimeInForce};
 
@@ -252,7 +255,7 @@ mod tests {
             max_decision_age_ns: Some(50),
             market_snapshot_id: Some("market-snap-1".to_string()),
             signal_id: Some("signal-1".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: Some(AlgoExecutionSpec {
                 slice_count: Some(4),
                 slice_interval_ns: Some(100),
@@ -288,6 +291,7 @@ mod tests {
         let raw = serde_json::to_string(&intent).expect("serialize intent");
         let parsed: StrategyIntent = serde_json::from_str(&raw).expect("deserialize intent");
 
+        assert!(!raw.contains("recoveryPolicy"));
         assert_eq!(parsed.intent_id, "intent-1");
         assert_eq!(parsed.execution_policy, ExecutionPolicyKind::Passive);
         assert_eq!(parsed.urgency, IntentUrgency::High);
@@ -299,10 +303,7 @@ mod tests {
         assert_eq!(parsed.max_decision_age_ns, Some(50));
         assert_eq!(parsed.market_snapshot_id.as_deref(), Some("market-snap-1"));
         assert_eq!(parsed.signal_id.as_deref(), Some("signal-1"));
-        assert_eq!(
-            parsed.recovery_policy,
-            Some(StrategyRecoveryPolicy::NoAutoResume)
-        );
+        assert_eq!(parsed.recovery_policy, None);
         assert_eq!(parsed.risk_budget_ref.as_ref().map(|v| v.version), Some(7));
         assert_eq!(
             parsed.algo.as_ref().and_then(|algo| algo.slice_count),
@@ -338,6 +339,40 @@ mod tests {
         let mut intent = intent_fixture();
         intent.signal_id = Some(" ".to_string());
         assert_eq!(intent.validate(), Err("SIGNAL_ID_REQUIRED"));
+    }
+
+    #[test]
+    fn strategy_intent_rejects_legacy_recovery_policy_field() {
+        let raw = r#"{
+            "schemaVersion": 2,
+            "intentId": "intent-legacy-1",
+            "accountId": "acc-1",
+            "sessionId": "sess-1",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "type": "LIMIT",
+            "qty": 100,
+            "limitPrice": 15000,
+            "timeInForce": "IOC",
+            "urgency": "HIGH",
+            "executionPolicy": "AGGRESSIVE",
+            "executionRunId": "run-1",
+            "decisionKey": "decision-1",
+            "decisionAttemptSeq": 1,
+            "decisionBasisAtNs": 11,
+            "maxDecisionAgeNs": 50,
+            "marketSnapshotId": "market-snap-1",
+            "signalId": "signal-1",
+            "recoveryPolicy": "NO_AUTO_RESUME",
+            "createdAtNs": 10,
+            "expiresAtNs": 20
+        }"#;
+        let parsed: StrategyIntent = serde_json::from_str(raw).expect("deserialize legacy intent");
+
+        assert_eq!(
+            parsed.validate(),
+            Err("STRATEGY_RECOVERY_POLICY_DEPRECATED")
+        );
     }
 
     #[test]

@@ -895,7 +895,6 @@ mod tests {
     };
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
-        StrategyRecoveryPolicy,
     };
     use serde_json::Value;
     use std::fs;
@@ -923,7 +922,7 @@ mod tests {
             max_decision_age_ns: Some(1_000),
             market_snapshot_id: Some("market-template-1".to_string()),
             signal_id: Some("signal-template-1".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns: 100,
             expires_at_ns: 1_100,

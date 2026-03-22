@@ -3180,10 +3180,10 @@ mod tests {
     };
     use crate::strategy::intent::{
         AlgoExecutionSpec, ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION,
-        StrategyIntent, StrategyRecoveryPolicy,
+        StrategyIntent,
     };
     use crate::strategy::runtime::{
-        AlgoChildStatus, AlgoParentExecution, AlgoParentStatus,
+        AlgoChildStatus, AlgoParentExecution, AlgoParentStatus, AlgoRuntimeMode,
         STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE,
     };
     use crate::strategy::shadow::ShadowScoreComponent;
@@ -3719,7 +3719,7 @@ mod tests {
             max_decision_age_ns: Some(60_000_000_000),
             market_snapshot_id: Some("market-1".to_string()),
             signal_id: Some("signal-1".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns: 10,
             expires_at_ns: 123_000_000,
@@ -3770,7 +3770,7 @@ mod tests {
             "AAPL".to_string(),
             Some("model-1".to_string()),
             Some("run-1".to_string()),
-            StrategyRecoveryPolicy::GatewayManagedResume,
+            AlgoRuntimeMode::GatewayManagedResume,
             OrderRequest {
                 symbol: "AAPL".to_string(),
                 side: "BUY".to_string(),
@@ -6638,7 +6638,7 @@ mod tests {
         let wal_path =
             std::env::temp_dir().join(format!("gateway-rust-strategy-pause-{}.log", now_nanos()));
         let mut runtime = replay_runtime_fixture(1, 0);
-        runtime.recovery_policy = StrategyRecoveryPolicy::NoAutoResume;
+        runtime.runtime_mode = AlgoRuntimeMode::PauseOnRestart;
         fs::write(
             &wal_path,
             format!("{}\n", strategy_runtime_snapshot_line(&runtime, 1)),

@@ -24,7 +24,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let mut output_path = "contracts/fixtures/strategy_intent_v1.json".to_string();
+    let mut output_path = "contracts/fixtures/strategy_intent_v2.json".to_string();
     let mut profile = "aggressive_buy".to_string();
     let mut pretty = true;
 
@@ -180,7 +180,7 @@ fn print_usage() {
     println!(
         "  cargo run --manifest-path gateway-rust/Cargo.toml --bin export_strategy_intent -- \\"
     );
-    println!("    [--output contracts/fixtures/strategy_intent_v1.json] \\");
+    println!("    [--output contracts/fixtures/strategy_intent_v2.json] \\");
     println!("    [--profile aggressive_buy|passive_sell|default_compare] [--compact]");
 }
 

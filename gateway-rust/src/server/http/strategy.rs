@@ -15,14 +15,15 @@ use crate::order::{OrderRequest, OrderType, TimeInForce};
 use crate::store::strategy_shadow_store::StrategyShadowScoreSample;
 use crate::strategy::algo::{AlgoExecutionPlan, build_algo_execution_plan};
 use crate::strategy::config::ExecutionConfigSnapshot;
-use crate::strategy::intent::{IntentUrgency, StrategyIntent, StrategyRecoveryPolicy};
+use crate::strategy::intent::{IntentUrgency, StrategyIntent};
 use crate::strategy::replay::{
     STRATEGY_EXECUTION_FACT_EVENT_TYPE, StrategyExecutionCatchupInput,
     StrategyExecutionCatchupOrderState, StrategyExecutionFact, StrategyExecutionLiveOrderState,
     StrategyExecutionReplayItem,
 };
 use crate::strategy::runtime::{
-    AlgoChildExecution, AlgoParentExecution, STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE,
+    AlgoChildExecution, AlgoParentExecution, AlgoRuntimeMode,
+    STRATEGY_ALGO_RUNTIME_SNAPSHOT_EVENT_TYPE,
 };
 use crate::strategy::shadow::{
     SHADOW_RECORD_SCHEMA_VERSION, ShadowOutcomeView, ShadowPolicyView, ShadowRecord,
@@ -341,37 +342,20 @@ fn adapt_order_request(intent: &StrategyIntent) -> OrderRequest {
     }
 }
 
-fn effective_recovery_policy(
-    intent: &StrategyIntent,
-    algo_plan: &AlgoExecutionPlan,
-) -> StrategyRecoveryPolicy {
-    match intent.recovery_policy {
-        Some(StrategyRecoveryPolicy::NoAutoResume) => StrategyRecoveryPolicy::NoAutoResume,
-        _ => {
-            if matches!(
-                algo_plan.policy,
-                crate::strategy::intent::ExecutionPolicyKind::Twap
-                    | crate::strategy::intent::ExecutionPolicyKind::Vwap
-                    | crate::strategy::intent::ExecutionPolicyKind::Pov
-            ) {
-                StrategyRecoveryPolicy::GatewayManagedResume
-            } else {
-                StrategyRecoveryPolicy::NoAutoResume
-            }
+fn effective_algo_runtime_mode(algo_plan: &AlgoExecutionPlan) -> AlgoRuntimeMode {
+    match algo_plan.policy {
+        crate::strategy::intent::ExecutionPolicyKind::Twap
+        | crate::strategy::intent::ExecutionPolicyKind::Vwap
+        | crate::strategy::intent::ExecutionPolicyKind::Pov => {
+            AlgoRuntimeMode::GatewayManagedResume
         }
+        _ => AlgoRuntimeMode::PauseOnRestart,
     }
 }
 
-fn validate_requested_recovery_policy(
-    intent: &StrategyIntent,
-    algo_plan: Option<&AlgoExecutionPlan>,
-) -> Result<(), &'static str> {
-    if matches!(
-        intent.recovery_policy,
-        Some(StrategyRecoveryPolicy::GatewayManagedResume)
-    ) && algo_plan.is_none()
-    {
-        return Err("STRATEGY_GATEWAY_MANAGED_RESUME_REQUIRES_EXECUTION_ALGO");
+fn validate_legacy_recovery_policy(intent: &StrategyIntent) -> Result<(), &'static str> {
+    if intent.recovery_policy.is_some() {
+        return Err("STRATEGY_RECOVERY_POLICY_DEPRECATED");
     }
     Ok(())
 }
@@ -521,7 +505,7 @@ fn build_algo_parent_execution(
         request.intent.symbol.clone(),
         request.intent.model_id.clone(),
         request.intent.execution_run_id.clone(),
-        effective_recovery_policy(&request.intent, algo_plan),
+        effective_algo_runtime_mode(algo_plan),
         base_order_request,
         effective_risk_budget_ref,
         Some(effective_policy.clone()),
@@ -1045,7 +1029,7 @@ pub(super) async fn handle_post_strategy_intent_adapt(
             .map_err(|reason| {
                 snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
             })?;
-    validate_requested_recovery_policy(&intent, algo_plan.as_ref()).map_err(|reason| {
+    validate_legacy_recovery_policy(&intent).map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
 
@@ -1114,7 +1098,7 @@ pub(super) async fn handle_post_strategy_intent_submit(
     .map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
-    validate_requested_recovery_policy(&request.intent, algo_plan.as_ref()).map_err(|reason| {
+    validate_legacy_recovery_policy(&request.intent).map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
     let order_request = applied_policy.order_request.clone();
@@ -1228,7 +1212,7 @@ pub(super) async fn handle_post_strategy_intent_shadow(
         snapshot_error(&state, &snapshot, status, reason)
     })?;
     let effective_policy = resolve_effective_policy(&snapshot, &request.intent);
-    let algo_plan = build_algo_execution_plan(
+    let _algo_plan = build_algo_execution_plan(
         &request.intent,
         effective_policy.execution_policy.as_ref(),
         now_ns,
@@ -1236,7 +1220,7 @@ pub(super) async fn handle_post_strategy_intent_shadow(
     .map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
-    validate_requested_recovery_policy(&request.intent, algo_plan.as_ref()).map_err(|reason| {
+    validate_legacy_recovery_policy(&request.intent).map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
 
@@ -1662,9 +1646,7 @@ mod tests {
                 max_decision_age_ns: Some(100),
                 market_snapshot_id: Some("market-1".to_string()),
                 signal_id: Some("signal-1".to_string()),
-                recovery_policy: Some(
-                    crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
-                ),
+                recovery_policy: None,
                 algo: None,
                 created_at_ns: 10,
                 expires_at_ns: 20,
@@ -1712,9 +1694,7 @@ mod tests {
                 max_decision_age_ns: Some(100),
                 market_snapshot_id: Some("market-1".to_string()),
                 signal_id: Some("signal-1".to_string()),
-                recovery_policy: Some(
-                    crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume,
-                ),
+                recovery_policy: None,
                 algo: None,
                 created_at_ns: 10,
                 expires_at_ns: 20,
@@ -1726,6 +1706,7 @@ mod tests {
         .expect("serialize submit request");
 
         assert!(raw.contains("\"shadowRunId\":\"shadow-1\""));
+        assert!(!raw.contains("recoveryPolicy"));
     }
 
     #[test]
@@ -2209,44 +2190,37 @@ mod tests {
     }
 
     #[test]
-    fn gateway_managed_resume_is_rejected_for_alpha_intents() {
+    fn legacy_recovery_policy_is_rejected_for_alpha_intents() {
         let mut intent = strategy_intent_fixture();
         intent.recovery_policy =
             Some(crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume);
 
         assert_eq!(
-            super::validate_requested_recovery_policy(&intent, None),
-            Err("STRATEGY_GATEWAY_MANAGED_RESUME_REQUIRES_EXECUTION_ALGO")
+            super::validate_legacy_recovery_policy(&intent),
+            Err("STRATEGY_RECOVERY_POLICY_DEPRECATED")
         );
     }
 
     #[test]
-    fn gateway_managed_resume_is_allowed_for_algo_runtime() {
+    fn legacy_recovery_policy_is_rejected_for_algo_intents_too() {
         let mut intent = strategy_intent_fixture();
         intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
         intent.recovery_policy =
             Some(crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume);
-        let plan = algo_plan_fixture();
 
         assert_eq!(
-            super::validate_requested_recovery_policy(&intent, Some(&plan)),
-            Ok(())
-        );
-        assert_eq!(
-            super::effective_recovery_policy(&intent, &plan),
-            crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume
+            super::validate_legacy_recovery_policy(&intent),
+            Err("STRATEGY_RECOVERY_POLICY_DEPRECATED")
         );
     }
 
     #[test]
-    fn algo_defaults_to_gateway_managed_resume_without_explicit_setting() {
-        let mut intent = strategy_intent_fixture();
-        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
+    fn algo_defaults_to_gateway_managed_runtime_mode() {
         let plan = algo_plan_fixture();
 
         assert_eq!(
-            super::effective_recovery_policy(&intent, &plan),
-            crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume
+            super::effective_algo_runtime_mode(&plan),
+            crate::strategy::runtime::AlgoRuntimeMode::GatewayManagedResume
         );
     }
 }

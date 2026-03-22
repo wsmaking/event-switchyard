@@ -513,10 +513,10 @@ mod tests {
         AlgoExecutionPlan, AlgoExecutionSlice, STRATEGY_ALGO_PLAN_SCHEMA_VERSION,
     };
     use crate::strategy::intent::ExecutionPolicyKind;
-    use crate::strategy::runtime::{AlgoParentExecution, AlgoParentStatus};
+    use crate::strategy::runtime::{AlgoParentExecution, AlgoParentStatus, AlgoRuntimeMode};
     use crate::{
         order::{OrderRequest, OrderType, TimeInForce},
-        strategy::{intent::StrategyRecoveryPolicy, runtime::AlgoChildStatus},
+        strategy::runtime::AlgoChildStatus,
     };
 
     fn runtime_fixture() -> AlgoParentExecution {
@@ -555,7 +555,7 @@ mod tests {
             "AAPL".to_string(),
             Some("model-1".to_string()),
             Some("run-1".to_string()),
-            StrategyRecoveryPolicy::GatewayManagedResume,
+            AlgoRuntimeMode::GatewayManagedResume,
             OrderRequest {
                 symbol: "AAPL".to_string(),
                 side: "BUY".to_string(),

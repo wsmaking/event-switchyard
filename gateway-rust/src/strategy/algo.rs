@@ -202,7 +202,6 @@ mod tests {
     use crate::strategy::config::ExecutionPolicyConfig;
     use crate::strategy::intent::{
         AlgoExecutionSpec, ExecutionPolicyKind, IntentUrgency, StrategyIntent,
-        StrategyRecoveryPolicy,
     };
 
     fn intent_fixture(policy: ExecutionPolicyKind) -> StrategyIntent {
@@ -228,7 +227,7 @@ mod tests {
             max_decision_age_ns: None,
             market_snapshot_id: None,
             signal_id: None,
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns: 10,
             expires_at_ns: 1_000_000,
