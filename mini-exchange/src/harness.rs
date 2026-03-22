@@ -4,7 +4,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const QUANT_STRATEGY_INTENT_SCHEMA_VERSION: u16 = 1;
+pub const QUANT_STRATEGY_INTENT_SCHEMA_VERSION: u16 = 2;
+pub const QUANT_STRATEGY_INTENT_LEGACY_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_SLICE_COUNT: usize = 4;
 pub const DEFAULT_PARTICIPATION_BPS: u64 = 2_500;
 
@@ -183,7 +184,7 @@ impl PolicyMaterialization {
 
 impl QuantStrategyIntent {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema_version != QUANT_STRATEGY_INTENT_SCHEMA_VERSION {
+        if !is_supported_quant_strategy_intent_schema_version(self.schema_version) {
             return Err("UNSUPPORTED_SCHEMA_VERSION");
         }
         if self.intent_id.trim().is_empty() {
@@ -219,7 +220,7 @@ impl QuantStrategyIntent {
 
 impl QuantCleanStrategyIntent {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema_version != QUANT_STRATEGY_INTENT_SCHEMA_VERSION {
+        if !is_supported_quant_strategy_intent_schema_version(self.schema_version) {
             return Err("UNSUPPORTED_SCHEMA_VERSION");
         }
         if self.intent_id.trim().is_empty() {
@@ -251,6 +252,13 @@ impl QuantCleanStrategyIntent {
         }
         Ok(())
     }
+}
+
+fn is_supported_quant_strategy_intent_schema_version(schema_version: u16) -> bool {
+    matches!(
+        schema_version,
+        QUANT_STRATEGY_INTENT_SCHEMA_VERSION | QUANT_STRATEGY_INTENT_LEGACY_SCHEMA_VERSION
+    )
 }
 
 impl TryFrom<&QuantStrategyIntent> for StrategyIntent {
@@ -779,10 +787,10 @@ fn top3_opposite_depth(snapshot: &BookSnapshot, side: Side) -> u64 {
 mod tests {
     use super::{
         DEFAULT_PARTICIPATION_BPS, DEFAULT_SLICE_COUNT, ExecutionPolicy, PolicyScenarioReport,
-        QUANT_STRATEGY_INTENT_SCHEMA_VERSION, QuantCleanExecutionPolicyKind,
-        QuantCleanStrategyIntent, QuantStrategyIntent, StrategyIntent, evaluate_policies,
-        evaluate_quant_clean_intent, evaluate_quant_intent, materialize_order,
-        policies_for_quant_clean_intent,
+        QUANT_STRATEGY_INTENT_LEGACY_SCHEMA_VERSION, QUANT_STRATEGY_INTENT_SCHEMA_VERSION,
+        QuantCleanExecutionPolicyKind, QuantCleanStrategyIntent, QuantStrategyIntent,
+        StrategyIntent, evaluate_policies, evaluate_quant_clean_intent, evaluate_quant_intent,
+        materialize_order, policies_for_quant_clean_intent,
     };
     use crate::{OrderInput, OrderType, Side};
 
@@ -859,6 +867,22 @@ mod tests {
             created_at_ns: 9,
             expires_at_ns: 99,
         }
+    }
+
+    #[test]
+    fn quant_clean_intent_accepts_legacy_schema_version() {
+        let mut intent = quant_clean_intent_fixture();
+        intent.schema_version = QUANT_STRATEGY_INTENT_LEGACY_SCHEMA_VERSION;
+
+        assert_eq!(intent.validate(), Ok(()));
+    }
+
+    #[test]
+    fn quant_clean_intent_rejects_unknown_schema_version() {
+        let mut intent = quant_clean_intent_fixture();
+        intent.schema_version = 99;
+
+        assert_eq!(intent.validate(), Err("UNSUPPORTED_SCHEMA_VERSION"));
     }
 
     #[test]
