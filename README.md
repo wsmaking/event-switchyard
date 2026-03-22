@@ -1,40 +1,280 @@
-# Event Switchyard（Rust/v3 Low-Latency）
+# Event Switchyard
 
 このリポジトリの正本 README は本ファイルのみ。
 
-## 現在の主軸
-- 実運用・性能検証の主軸: Rust 実装（`gateway-rust/`）
-- hot path: `POST /v3/orders`（latency-first, volatile accept）
-- durability-first の別系統は `v2`/`/orders` で分離運用
+## 現在のシステム
 
-## 正本ドキュメント
-- 契約: `docs/ops/contract_draft.md`
-- 現行可視化: `docs/ops/current_design_visualization.md`
-- 最新実測集約: `docs/ops/current_design_visualization.md` の `2.2.11 最新実測集約（単一正本）`
-- durable設計: `docs/ops/durable_path_design.md`
-- durable可視化: `docs/ops/durable_path_visualization.md`
-- 進捗: `docs/ops/phase_progress.md`
-- 最速学習: `docs/ops/catchup_fasttrack.md`
-- docs索引: `docs/ops/INDEX.md`
+主軸は Rust 実装の [gateway-rust](gateway-rust/) です。いまの system は、単純な低遅延注文 gateway だけではなく、次の 3 層を持っています。
 
-補足:
-- 旧資料は `docs/old/` と `docs/ops/old/` に退避済み。
+- `v3 hot path`
+  - `POST /v3/orders`
+  - latency-first の volatile accept 経路
+- `classic order path`
+  - `POST /orders`
+  - 照会、cancel、replace、amend を持つ durable 寄り経路
+- `strategy / quant layer`
+  - `StrategyIntent` の `adapt / submit / shadow`
+  - execution algo runtime
+  - replay / catch-up
+  - alpha re-decision
+
+要するに、現在の gateway は
+
+- 高速な v3 受注
+- strategy intent の dry-run / actual submit
+- `TWAP / VWAP / POV` の parent-child runtime
+- restart 後の replay / catch-up
+- terminal UI での運用監視
+
+までを扱います。
+
+## いま重要な境界
+
+### execution algo
+
+`TWAP / VWAP / POV` は `adapt` で plan を返し、`submit` で parent runtime を作って child order を自動発注します。
+
+- parent runtime は Gateway が保持
+- child feedback は parent に集約
+- restart 後は `GatewayManagedResume` で scheduled child を再開可能
+
+### short-lived alpha
+
+短命な alpha 系 intent は `NoAutoResume` 前提です。
+
+- Gateway は restart 後に古い intent を勝手に再送しない
+- `StrategyExecutionFact` を replay / catch-up で返す
+- 上流 execution engine が `RecoveryContext + current market` で再判断する
+
+この設計の中心は、
+
+- `注文事実` は Gateway が持つ
+- `次に何を打つか` は execution 側が決める
+
+です。
+
+## 主な HTTP endpoint
+
+### core
+
+- `GET /health`
+- `GET /metrics`
+
+### v3
+
+- `POST /v3/orders`
+- `GET /v3/orders/{session_id}/{session_seq}`
+
+### classic orders
+
+- `POST /orders`
+- `GET /orders/{order_id}`
+- `GET /orders/client/{client_order_id}`
+- `POST /orders/{order_id}/cancel`
+- `POST /orders/{order_id}/replace`
+- `POST /orders/{order_id}/amend`
+
+### strategy
+
+- `GET /strategy/config`
+- `PUT /strategy/config`
+- `POST /strategy/intent/adapt`
+- `POST /strategy/intent/submit`
+- `POST /strategy/intent/shadow`
+- `POST /strategy/shadow`
+- `GET /strategy/shadow/{shadow_run_id}/summary`
+- `GET /strategy/shadow/{shadow_run_id}/{intent_id}`
+- `GET /strategy/runtime/{parent_intent_id}`
+- `GET /strategy/replay/execution/{execution_run_id}`
+- `GET /strategy/catchup/execution/{execution_run_id}`
+- `GET /strategy/replay/intent/{intent_id}`
+- `GET /strategy/catchup/intent/{intent_id}`
+
+## strategy runtime と recovery の見方
+
+### adapt / submit
+
+- `adapt`
+  - dry-run
+  - effective policy や `algoPlan` を返す
+- `submit`
+  - actual submit
+  - v3 または algo runtime に接続される
+
+### replay / catch-up
+
+`StrategyExecutionFact` の status は次の 5 つです。
+
+- `REJECTED`
+- `UNCONFIRMED`
+- `DURABLE_ACCEPTED`
+- `DURABLE_REJECTED`
+- `LOSS_SUSPECT`
+
+`catch-up` は raw fact だけでなく latest state を返します。execution 側はこれを `RecoveryContext` に集約し、`filled / open / failed / unknown / unsent` を分けて再判断します。
+
+### alpha re-decision
+
+alpha 側では
+
+- `UNCONFIRMED / LOSS_SUSPECT` があれば hold
+- stale な market basis なら abort
+- `filled + open` を引いた residual にだけ fresh intent を作る
+
+が基本です。
+
+## operator surface
+
+現状の運用面は 4 つです。
+
+### 1. runtime の進行を見る
+
+`/strategy/runtime/{parent_intent_id}`
+
+- algo parent status
+- child の `SCHEDULED / DISPATCHING / VOLATILE_ACCEPTED / DURABLE_ACCEPTED / REJECTED / SKIPPED`
+
+### 2. raw fact を見る
+
+`/strategy/replay/*`
+
+- 監査
+- デバッグ
+- fact の時系列確認
+
+### 3. recovery / re-decision を見る
+
+`/strategy/catchup/*` と [strategy_catchup_reader.rs](gateway-rust/src/bin/strategy_catchup_reader.rs)
+
+- latest decision state
+- recovery context
+- re-decision input / result
+
+### 4. 常時監視する
+
+[strategy_ops_tui.rs](gateway-rust/src/bin/strategy_ops_tui.rs)
+
+- catch-up latest state
+- `AlphaRecoveryContext`
+- `AlphaReDecision`
+- algo runtime child progress
+- selected metrics
+
+を 1 画面で見ます。
 
 ## リポジトリ見取り図
-- Rust gateway: `gateway-rust/`
-- 共通コア: `gateway-core/`
-- 運用スクリプト: `scripts/ops/`
-- 契約/可視化: `docs/ops/`
-- 学習/補助設計: `docs/arch/`
-- 旧 Kotlin/Java 比較資産: `app/`, `gateway/`, `backoffice/`
 
-## 現役スクリプト（最小）
+- [gateway-rust](gateway-rust/)
+  - 主実装
+- [gateway-core](gateway-core/)
+  - 共通コア
+- [scripts/ops](scripts/ops/)
+  - gate, load, quant, monitoring script
+- [docs/ops](docs/ops/)
+  - 契約、設計、運用正本
+- [mini-exchange](mini-exchange/)
+  - quant evaluation 用市場モデル
+- [app](app/), [gateway](gateway/), [backoffice](backoffice/)
+  - 旧比較資産
+
+## quick start
+
+### 1. build
+
+```bash
+cargo build --manifest-path gateway-rust/Cargo.toml --release
+```
+
+Kafka bus を有効化する場合だけ:
+
+```bash
+cargo build --manifest-path gateway-rust/Cargo.toml --release --features kafka-bus
+```
+
+### 2. start
+
+```bash
+GATEWAY_PORT=8081 \
+GATEWAY_TCP_PORT=0 \
+JWT_HS256_SECRET=secret123 \
+KAFKA_ENABLE=0 \
+FASTPATH_DRAIN_ENABLE=1 \
+FASTPATH_DRAIN_WORKERS=4 \
+./gateway-rust/target/release/gateway-rust
+```
+
+### 3. health / metrics
+
+```bash
+curl -sS http://127.0.0.1:8081/health
+curl -sS http://127.0.0.1:8081/metrics | head
+```
+
+## strategy quick start
+
+### 1. adapt
+
+```bash
+curl -sS http://127.0.0.1:8081/strategy/intent/adapt \
+  -H 'content-type: application/json' \
+  --data-binary @/tmp/strategy_intent.json
+```
+
+### 2. submit
+
+```bash
+curl -sS http://127.0.0.1:8081/strategy/intent/submit \
+  -H 'content-type: application/json' \
+  --data-binary @/tmp/strategy_submit.json
+```
+
+### 3. catch-up reader
+
+```bash
+cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_catchup_reader -- \
+  --base-url http://127.0.0.1:8081 \
+  --execution-run-id run-1 \
+  --template-intent contracts/fixtures/strategy_intent_v1.json \
+  --market-desired-signed-qty 60 \
+  --market-max-decision-age-ns 1000000
+```
+
+### 4. TUI
+
+```bash
+cargo run --manifest-path gateway-rust/Cargo.toml --bin strategy_ops_tui -- \
+  --base-url http://127.0.0.1:8081 \
+  --execution-run-id run-1 \
+  --parent-intent-id parent-1 \
+  --template-intent contracts/fixtures/strategy_intent_v1.json \
+  --market-desired-signed-qty 60 \
+  --market-max-decision-age-ns 1000000
+```
+
+## 主な binary
+
+- `gateway-rust`
+  - main gateway
+- `export_strategy_intent`
+  - strategy intent fixture/export helper
+- `strategy_catchup_reader`
+  - cursor-tracking catch-up / re-decision reader
+- `strategy_ops_tui`
+  - terminal operator monitor
+
+## 現役 script
+
+### v3 / perf
+
 - `scripts/ops/build_gateway_rust_release.sh`
 - `scripts/ops/check_v3_local_strict_gate.sh`
 - `scripts/ops/check_v3_stable_gate.sh`
 - `scripts/ops/check_v3_absolute_gate.sh`
 - `scripts/ops/check_v3_capability_gate.sh`
 - `scripts/ops/check_v3_durable_tail_gate.sh`
+- `scripts/ops/check_v3_crash_replay_gate.sh`
+- `scripts/ops/check_v3_long_soak_gate.sh`
+- `scripts/ops/check_v3_replica_gate.sh`
 - `scripts/ops/run_v3_absolute_gate_loop.sh`
 - `scripts/ops/run_v3_open_loop_probe.sh`
 - `scripts/ops/run_v3_phase2_compare.sh`
@@ -44,415 +284,90 @@
 - `scripts/ops/open_loop_v3_tcp_load.py`
 - `scripts/ops/perf_noise_guard.sh`
 - `scripts/ops/wrk_gateway_rust.sh`
-- `scripts/ops/wrk_orders.lua`
 
-補足:
-- 上記以外の旧スクリプトは `scripts/old/`, `scripts/ops/old/`, `scripts/tools/old/`, `tools/old/` に退避。
+### quant / strategy
 
-## クイックスタート（Rust）
-### 1. ビルド
-```bash
-cd gateway-rust
-cargo build --release
-cd ..
-```
+- `scripts/ops/check_quant_eval_gate.sh`
+- `scripts/ops/check_quant_eval_ci_gate.sh`
+- `scripts/ops/check_quant_policy_runtime_gate.sh`
+- `scripts/ops/check_quant_policy_durable_gate.sh`
+- `scripts/ops/export_quant_strategy_intent_fixture.sh`
+- `scripts/ops/export_quant_strategy_intent_snapshot.sh`
+- `scripts/ops/export_quant_strategy_intent_batch.sh`
+- `scripts/ops/run_quant_gateway_capture_batch.sh`
+- `scripts/ops/run_collect_quant_feedback_shadow_from_gateway.sh`
+- `scripts/ops/collect_quant_feedback_shadow_from_gateway.py`
+- `scripts/ops/run_join_quant_feedback_with_mini_exchange.sh`
+- `scripts/ops/run_join_quant_feedback_with_mini_exchange_batch.sh`
+- `scripts/ops/join_quant_feedback_with_mini_exchange.py`
+- `scripts/ops/join_quant_feedback_with_mini_exchange_batch.py`
+- `scripts/ops/run_mini_exchange_quant_bridge.sh`
+- `scripts/ops/run_mini_exchange_quant_batch.sh`
 
-補足:
-- 既定ビルドは Kafka 依存を含まない（`kafka-bus` feature OFF）。
-- Kafka 連携を有効化してビルドする場合のみ:
-```bash
-cd gateway-rust
-cargo build --release --features kafka-bus
-cd ..
-```
+### AI assist
 
-### 2. 起動（ローカル検証）
-```bash
-GATEWAY_PORT=29001 \
-GATEWAY_TCP_PORT=0 \
-JWT_HS256_SECRET=secret123 \
-KAFKA_ENABLE=0 \
-FASTPATH_DRAIN_ENABLE=1 \
-FASTPATH_DRAIN_WORKERS=4 \
-./gateway-rust/target/release/gateway-rust
-```
+- `scripts/ops/run_ai_perf_probe.py`
+- `scripts/ops/ai_incident_agent.py`
+- `scripts/ops/ai_triage_notify.py`
+- `scripts/ops/ai_rag_index.py`
+- `scripts/ops/ai_rag_query.py`
 
-### 3. ヘルス/メトリクス確認
-```bash
-curl -sS http://127.0.0.1:29001/health
-curl -sS http://127.0.0.1:29001/metrics
-```
+## monitoring
 
-## API（現行）
-### v3（hot path）
-- `POST /v3/orders`
-- `GET /v3/orders/{sessionId}/{sessionSeq}`
-- `V3_TCP_ENABLE=1` + `V3_TCP_PORT=<port>` で v3専用TCP入口を有効化
-- v3 TCP frame は JWT token をpayload内に含める（Authorizationヘッダ不要）
+Prometheus / Grafana は `docker-compose.yml` の monitoring profile で起動します。
 
-### Durable系
-- `POST /orders`
-- `GET /orders/{order_id}`
-- `GET /orders/client/{client_order_id}`
-- `POST /orders/{order_id}/cancel`
-
-## v3 の制御要点
-- 同期境界: `parse -> risk -> try_enqueue -> response`
-- 返却: `202 VOLATILE_ACCEPT`
-- 水位制御: SOFT/HARD/KILL（`429/503/kill`）
-- 異常時: `LOSS_SUSPECT` を残し、`session -> shard -> global` 昇格
-- 入口分離:
-  - `V3_HTTP_INGRESS_ENABLE=false` で HTTP受注を無効化
-  - `V3_HTTP_CONFIRM_ENABLE=true` で confirm照会は HTTP 維持可能
-  - `V3_TCP_ENABLE=true` + `V3_TCP_PORT=<port>` で v3 TCP受注を有効化
-  - `V3_TCP_AUTH_STICKY_CONTEXT=true` で接続内同一JWTの再検証を省略（デフォルト有効）
-  - `scripts/ops/run_v3_open_loop_probe.sh` の既定は `V3_INGRESS_TRANSPORT=tcp`（HTTPで測る場合のみ `V3_INGRESS_TRANSPORT=http` を明示）
-
-## よく使う検証コマンド
-### local strict gate（Linux未確保時）
-```bash
-scripts/ops/check_v3_local_strict_gate.sh
-```
-
-### stable gate（10k/300s）
-```bash
-scripts/ops/check_v3_stable_gate.sh
-```
-
-### absolute gate（Linux専用）
-```bash
-scripts/ops/check_v3_absolute_gate.sh
-```
-
-### capability gate（能力側）
-```bash
-scripts/ops/check_v3_capability_gate.sh
-```
-
-### phase2比較
-```bash
-RUNS=5 WARMUP_RUNS=1 scripts/ops/run_v3_phase2_compare.sh
-```
-
-### open-loop probe
-```bash
-TARGET_RPS=10000 DURATION=300 scripts/ops/run_v3_open_loop_probe.sh
-```
-
-## プリセット実行（v3）
-- 使えるプリセット一覧:
-```bash
-scripts/ops/v3_preset_env.sh --list
-```
-- ラッパー実行（推奨）:
-```bash
-scripts/ops/run_v3_preset.sh hft_best strict
-scripts/ops/run_v3_preset.sh hft_capacity capability
-scripts/ops/run_v3_preset.sh http_compare probe
-```
-- 既存スクリプトに直接適用:
-```bash
-V3_OPS_PRESET=hft_best scripts/ops/check_v3_local_strict_gate.sh
-V3_OPS_PRESET=hft_diagnostic scripts/ops/run_v3_open_loop_probe.sh
-```
-- 代表プリセット:
-  - `hft_best`: 実務寄り strict（TCP, 10k, us+ns gate）
-  - `hft_capacity`: 能力確認（45k帯）
-  - `hft_diagnostic`: 切り分け用（gate強制OFF寄り）
-  - `http_compare`: HTTP経路比較
-- HFT向け追加オプション（Linux）:
-```bash
-# ACK経路をdurableガードから分離（レイテンシ優先）
-export V3_DURABLE_ACK_PATH_GUARD_ENABLED=false
-# TCP busy-poll（SO_BUSY_POLL, us）
-export V3_TCP_BUSY_POLL_US=50
-# 接続内同一JWTの認証コンテキストを固定（デフォルト true）
-export V3_TCP_AUTH_STICKY_CONTEXT=true
-# 負荷ワーカーをアカウント固定にして接続局所性を上げる（デフォルト true）
-export V3_TCP_STICKY_ACCOUNT_PER_WORKER=true
-# shard worker / durable worker / tcp ingress のスレッドCPU固定（Linux, 任意）
-export V3_SHARD_AFFINITY_CPUS=2-5
-export V3_DURABLE_AFFINITY_CPUS=6-9
-export V3_TCP_SERVER_AFFINITY_CPUS=10
-# rdtscp 二重計時（Phase 3）
-export V3_TSC_TIMING_ENABLE=true
-export V3_TSC_MISMATCH_THRESHOLD_PCT=20
-# worker実行モデル A/B（true=専用current-thread runtime, false=tokio::spawn）
-export V3_DEDICATED_WORKER_RUNTIME=false
-# ホットパス計測ヒストグラムのサンプリング間隔（1=全件）
-export V3_HOTPATH_HISTOGRAM_SAMPLE_RATE=8
-# プロセスのCPU固定（taskset）
-export V3_GATEWAY_TASKSET_CPUS=2-9
-scripts/ops/run_v3_open_loop_probe.sh
-```
-
-## 主要メトリクス（v3）
-- `gateway_live_ack_accepted_p99_ns`
-- `gateway_live_ack_p99_us`
-- `gateway_live_ack_accepted_p99_us`
-- `gateway_v3_live_ack_accepted_p99_ns`
-- `gateway_v3_hotpath_accepted_p99_ns`
-- `gateway_v3_hotpath_accepted_tsc_p99_ns`
-- `gateway_v3_tsc_timing_enabled`
-- `gateway_v3_hotpath_histogram_sample_rate`
-- `gateway_v3_thread_affinity_apply_failure_total`
-- `gateway_v3_durable_ack_path_guard_enabled`
-- `gateway_v3_accepted_rate`
-- `gateway_v3_rejected_soft_total`
-- `gateway_v3_rejected_hard_total`
-- `gateway_v3_rejected_killed_total`
-- `gateway_v3_loss_suspect_total`
-- `gateway_v3_stage_parse_p99_us`
-- `gateway_v3_stage_risk_p99_us`
-- `gateway_v3_stage_enqueue_p99_us`
-- `gateway_v3_stage_serialize_p99_us`
-
-## モニタリング（Grafana + Prometheus）
-
-### 環境共通の検証手順（macOS / Linux）
-
-前提:
-- Docker + `docker compose` が使えること（Linux は Docker 20.10+ 推奨）
-- Python 3.10+（`scripts/ops/open_loop_v3_load.py` 実行用）
-- Windows は WSL2 上で実行する想定
-
-0. 検証対象の Gateway endpoint を決める（既定: `127.0.0.1:8081`）
-```bash
-export GATEWAY_HOST=127.0.0.1
-export GATEWAY_PORT=8081
-```
-- Prometheus の既定 scrape 先は `host.docker.internal:8081`。
-- `GATEWAY_PORT` を変える場合は `monitoring/prometheus.yml` も同じポートに合わせる。
-
-1. Gateway が `/health` と `/metrics` を返す状態にする
-```bash
-curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/health"
-curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | head
-```
-
-2. Prometheus + Grafana を起動する（composeファイルを明示）
 ```bash
 docker compose -f docker-compose.yml --profile monitoring up -d prometheus grafana
-```
-
-3. Monitoring 側の起動確認
-```bash
 curl -sS http://127.0.0.1:9090/-/ready
 curl -sS http://127.0.0.1:3000/api/health
 ```
 
-4. Prometheus ターゲット確認
-```bash
-curl -sS 'http://127.0.0.1:9090/api/v1/targets?state=active'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="event-switchyard-gateway"}'
-```
-- `event-switchyard-gateway (host.docker.internal:8081)` が `health: up` ならOK。
-- `hft-fast-path (host.docker.internal:8080)` は Kotlin 側未起動なら `down` で正常。
+よく見るもの:
 
-5. 負荷前メトリクス確認
-```bash
-curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | grep -E '^(gateway_v3_accepted_total|gateway_v3_rejected_soft_total|gateway_v3_rejected_hard_total|gateway_v3_rejected_killed_total|gateway_v3_accepted_rate) '
-```
+- `gateway_v3_hotpath_accepted_p99_ns`
+- `gateway_v3_durable_confirm_p99_us`
+- `gateway_v3_loss_suspect_total`
+- `gateway_strategy_runtime_parent_count`
+- `gateway_quant_feedback_queue_depth`
 
-6. 再計測を実行
-- 推奨（最善条件の再計測 + gate判定 + summary出力）:
-```bash
-export PORT="${GATEWAY_PORT}" DURATION=60 TARGET_RPS=10000 TARGET_COMPLETED_RPS=10000 \
-  TARGET_ACK_ACCEPTED_P99_US=40 TARGET_ACCEPTED_RATE=0.99 \
-  TARGET_ACK_ACCEPTED_P99_NS=40000 V3_INGRESS_TRANSPORT=tcp \
-  TARGET_DURABLE_CONFIRM_P99_US=120000000 WARN_DURABLE_CONFIRM_P99_US=120000000 \
-  ENFORCE_GATE=1 V3_DURABLE_ADMISSION_FSYNC_ONLY_SOFT_SUSTAIN_TICKS=0 \
-  V3_DURABLE_ADMISSION_FSYNC_ONLY_HARD_SUSTAIN_TICKS=0 BUILD_RELEASE=0
-scripts/ops/run_v3_open_loop_probe.sh
-```
-- 手元 Gateway に対して軽く負荷だけ流したい場合:
-```bash
-scripts/ops/open_loop_v3_load.py --host "${GATEWAY_HOST}" --port "${GATEWAY_PORT}" --duration-sec 20 --target-rps 1000 --workers 32 --accounts 16
-```
+## AI triage
 
-7. 負荷後メトリクス確認（増分確認）
-```bash
-curl -sS "http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics" | grep -E '^(gateway_v3_accepted_total|gateway_v3_rejected_soft_total|gateway_v3_rejected_hard_total|gateway_v3_rejected_killed_total|gateway_v3_accepted_rate) '
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_rejected_hard_total[1m])'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_accepted_total[1m])'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increase(gateway_v3_accepted_total[15m])'
-```
-
-注記:
-- `gateway_v3_accepted_rate` は累積カウンタ比率（process start以降）なので、過去runの影響を受ける。
-- 「直近の受理状況」を見るときは `rate(gateway_v3_accepted_total[1m])` と reject系 `rate(...)` を併用する。
-- `run_v3_open_loop_probe.sh` は run 終了時に Gateway を停止するため、`up` は `0` に戻る。計測有無は `increase(...[15m])` で確認する。
-- `TARGET_ACK_ACCEPTED_P99_NS` は任意ゲート（default `0`=無効）。`40us` 相当は `40000ns`。
-
-### Grafana で確認
-1. `http://localhost:3000` を開く
-2. ログイン: `admin` / `admin`
-3. 時間範囲を `Last 15 minutes` に設定
-4. ダッシュボード:
-   - `http://localhost:3000/d/hft-fast-path/hft-fast-path-real-time-performance`
-   - `http://localhost:3000/d/gateway-ops/gateway-operations`
-5. クエリを直接確認する場合:
-   - 左メニュー `Explore` を開く
-   - クエリ行 `A` の右隣 datasource が `Prometheus` になっていることを確認
-   - `Prometheus disabled` と表示される場合は datasource プルダウンから `Prometheus` を選択
-   - クエリ例:
-     - `rate(gateway_v3_accepted_total[1m])`
-     - `rate(gateway_v3_rejected_hard_total[1m])`
-     - `increase(gateway_v3_accepted_total[15m])`
-     - `gateway_live_ack_accepted_p99_ns`
-     - `gateway_live_ack_accepted_p99_us`
-
-### トラブルシュート
-
-#### 1) Grafanaに何も表示されない
-- Prometheusで直接クエリ:
-```bash
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="event-switchyard-gateway"}'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=rate(gateway_v3_accepted_total[1m])'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=increase(gateway_v3_accepted_total[15m])'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=gateway_live_ack_accepted_p99_ns'
-curl -sS -G 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=gateway_live_ack_accepted_p99_us'
-```
-- ここで値が返るなら、Grafana側の時間範囲/ダッシュボード選択の問題。
-
-#### 2) `event-switchyard-gateway` が `down`
-- まず Gateway が `http://${GATEWAY_HOST}:${GATEWAY_PORT}/metrics` で応答するか確認。
-- ポートが `8081` 以外なら `monitoring/prometheus.yml` の target を修正し、Prometheus再起動:
-```bash
-docker compose -f docker-compose.yml --profile monitoring restart prometheus
-```
-
-#### 3) 古いダッシュボード定義が残る
-- monitoring volume を初期化して再作成:
-```bash
-docker compose -f docker-compose.yml --profile monitoring down -v
-docker compose -f docker-compose.yml --profile monitoring up -d prometheus grafana
-```
-
-#### 4) `/v3/orders` が `500 {"error":"SecretNotConfigured"}` を返す
-- Gateway起動時に `JWT_HS256_SECRET` が未設定。
-- 例（accepted確認を優先する簡易起動）:
-```bash
-cd gateway-rust
-JWT_HS256_SECRET=secret123 V3_DURABLE_ADMISSION_CONTROLLER_ENABLED=0 ./target/release/gateway-rust
-```
-
-### Grafanaログインできない場合
-```bash
-docker exec hft-grafana grafana cli admin reset-admin-password admin
-```
-
-### 停止
-```bash
-docker compose -f docker-compose.yml --profile monitoring down
-```
-
-## AI Triage（Gate失敗時の自動原因分析）
-
-Gate失敗時に自動実行され、Grafanaにannotationとして投稿される。
+gate 失敗時の補助分析は以下で手動実行できます。
 
 ```bash
-# 手動実行
 python3 scripts/ops/ai_incident_agent.py --run-name <RUN_NAME> --results-dir var/results
-
-# Grafanaに手動投稿
 python3 scripts/ops/ai_triage_notify.py --triage-json var/results/<RUN_NAME>.triage.json
 ```
 
-環境変数:
-- `AI_TRIAGE_PROVIDER`: `mock`(default) / `openai` / `claude`（`anthropic` も可）
-- `AI_LLM_NETWORK_ENABLED`: `0`(default)。`0` の間は課金系LLM呼び出しをブロックして `mock` / deterministic fallback で動作
-- `OPENAI_API_KEY`: `openai` 利用時に必要
-- `ANTHROPIC_API_KEY`: `claude` / `anthropic` 利用時に必要
-- `AI_TRIAGE_GRAFANA`: `1`(default) / `0`で無効化
-- `GRAFANA_URL`, `GRAFANA_USER`, `GRAFANA_PASSWORD`: Grafana接続先
+## まず読む文書
 
-### CPUカウンタ付き実行（Mac/Linux共通）
-
-`run_ai_perf_probe.py` は「負荷実行 + CPU/電力カウンタ収集 + triage」を1回で実行する。
-
-```bash
-# 1) RAG index更新（docs + summary + metrics + perf）
-python3 scripts/ops/ai_rag_index.py --docs-dir docs/ops --results-dir var/results --db-path var/ai_index/docs.sqlite
-
-# 2) 環境非依存でまず確実に動かす（counterなし）
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode none \
-  --provider mock \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-```
-
-OS別カウンタ収集:
-
-```bash
-# Linux: perf stat
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode linux-perf \
-  --provider mock \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-
-# macOS: powermetrics（権限により collection_ok=false になる場合あり）
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode mac-powermetrics \
-  --provider mock \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-```
-
-OpenAIで解析する場合:
-
-```bash
-export OPENAI_API_KEY=...your_key...
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode auto \
-  --provider openai \
-  --model gpt-5-nano \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-```
-
-Claudeで解析する場合:
-
-```bash
-export ANTHROPIC_API_KEY=...your_key...
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode auto \
-  --provider claude \
-  --model claude-sonnet-4-20250514 \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-```
-
-出力物:
-- `var/results/<RUN_NAME>.perf.json`
-- `var/results/<RUN_NAME>.triage.json`（`--skip-ai` なし時）
-- `var/results/<RUN_NAME>.perf_stat.csv`（Linux `perf` 使用時）
-- `var/results/<RUN_NAME>.powermetrics.txt` / `.powermetrics.err.txt`（macOS `powermetrics` 使用時）
-- `var/results/<RUN_NAME>.timeseries.jsonl`（`run_v3_open_loop_probe.sh` 実行時、時系列サンプリング）
-
-時系列サンプリング制御（`run_v3_open_loop_probe.sh`）:
-- `ENABLE_TIMESERIES`（default: `1`）
-- `TIMESERIES_INTERVAL_MS`（default: `500`）
-- `TIMESERIES_METRICS`（default: root-cause判定向け主要メトリクス）
-
-ベースライン比較（差分%）:
-
-```bash
-python3 scripts/ops/run_ai_perf_probe.py \
-  --counter-mode auto \
-  --baseline-run-name <BASELINE_RUN_NAME> \
-  --provider mock \
-  -- scripts/ops/run_v3_open_loop_probe.sh
-```
-
-設計: `docs/ops/ai_rag_agent_triage_design.md`
+- [docs/ops/INDEX.md](docs/ops/INDEX.md)
+- [docs/ops/catchup_fasttrack.md](docs/ops/catchup_fasttrack.md)
+- [docs/ops/contract_draft.md](docs/ops/contract_draft.md)
+- [docs/ops/current_design_visualization.md](docs/ops/current_design_visualization.md)
+- [docs/ops/quant_runtime_status_20260320.md](docs/ops/quant_runtime_status_20260320.md)
+- [docs/ops/quant_dynamic_verification_and_catchup.md](docs/ops/quant_dynamic_verification_and_catchup.md)
+- [docs/ops/quant_alpha_redecision_replay_catchup_design_20260320.md](docs/ops/quant_alpha_redecision_replay_catchup_design_20260320.md)
+- [docs/ops/1hour_securities_business_replay_scenarios_amendments.md](docs/ops/1hour_securities_business_replay_scenarios_amendments.md)
 
 ## 運用上の注意
-- `ack_p99` 単独で品質判定しない。
-- `accepted_rate` と `ack_accepted_p99` を必ず併記する。
-- ベンチ結果は `var/results/` と正本ドキュメントに紐付けて残す。
 
-## READMEポリシー
-- 本リポジトリの管理対象 README は `README.md`（本ファイル）を正本とする。
-- サブディレクトリ README は廃止し、必要情報は本ファイルか `docs/ops/` 正本へ集約する。
-- 退避した旧 README:
-  - `docs/old/adr_decisions_readme_legacy.md`
-  - `docs/old/frontend_readme_legacy.md`
-  - `docs/old/gateway_rust_readme_legacy.md`
+- `ack p99` 単独で品質判定しない
+- `accepted_rate` と reject rate を必ず併記する
+- alpha re-decision では `unknown exposure` を過小評価しない
+- `SubmitFreshIntent` は `機械的なやり直し` ではなく `current market を入れた再判断`
+- benchmark / gate 結果は `var/results/` と正本 docs に紐付けて残す
+
+## 公開方針
+
+このリポジトリは、技術実績の共有および説明のために一時的に公開しています。
+
+## ライセンス
+
+ソースコードの使用、改変、再配布、商用利用は許可していません。詳細は [LICENSE](LICENSE) を参照してください。
+
+## README policy
+
+- 管理対象 README は `README.md` を正本とする
+- サブディレクトリ README は廃止し、必要情報は本ファイルか `docs/ops/` 正本へ集約する
+- 旧資料は `docs/old/` と `docs/ops/old/` に退避済み
