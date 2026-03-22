@@ -2,7 +2,7 @@ use super::catchup::{
     StrategyExecutionCatchupLoopSnapshot, StrategyExecutionDecisionState,
     target_signed_qty_for_intent,
 };
-use super::intent::{StrategyIntent, StrategyRecoveryPolicy};
+use super::intent::StrategyIntent;
 use super::replay::{StrategyExecutionFactStatus, StrategyExecutionStatusTotals};
 use serde::{Deserialize, Serialize};
 
@@ -523,7 +523,7 @@ impl AlphaReDecision {
         intent.max_decision_age_ns = Some(input.market.max_decision_age_ns);
         intent.market_snapshot_id = input.market.market_snapshot_id.clone();
         intent.signal_id = input.market.signal_id.clone();
-        intent.recovery_policy = Some(StrategyRecoveryPolicy::NoAutoResume);
+        intent.recovery_policy = None;
         intent.qty = residual_signed_qty.unsigned_abs();
         intent.algo = None;
         intent.created_at_ns = input.next_intent.created_at_ns;
@@ -586,7 +586,6 @@ mod tests {
     };
     use crate::strategy::intent::{
         ExecutionPolicyKind, IntentUrgency, STRATEGY_INTENT_SCHEMA_VERSION, StrategyIntent,
-        StrategyRecoveryPolicy,
     };
     use crate::strategy::replay::{
         StrategyExecutionFactStatus, StrategyExecutionLiveOrderState, StrategyExecutionStatusTotals,
@@ -663,7 +662,7 @@ mod tests {
             max_decision_age_ns: Some(1_000),
             market_snapshot_id: Some("market-template".to_string()),
             signal_id: Some("signal-template".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns: 100,
             expires_at_ns: 1_100,
@@ -914,9 +913,6 @@ mod tests {
         assert_eq!(intent.max_decision_age_ns, Some(100));
         assert_eq!(intent.market_snapshot_id.as_deref(), Some("market-7"));
         assert_eq!(intent.signal_id.as_deref(), Some("signal-7"));
-        assert_eq!(
-            intent.recovery_policy,
-            Some(StrategyRecoveryPolicy::NoAutoResume)
-        );
+        assert_eq!(intent.recovery_policy, None);
     }
 }

@@ -13,7 +13,7 @@ mod strategy_intent;
 use order::{OrderType, TimeInForce};
 use strategy_intent::{
     ExecutionPolicyKind, IntentUrgency, RiskBudgetRef, STRATEGY_INTENT_SCHEMA_VERSION,
-    StrategyIntent, StrategyRecoveryPolicy,
+    StrategyIntent,
 };
 
 fn main() {
@@ -98,7 +98,7 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             max_decision_age_ns: Some(max_decision_age_ns),
             market_snapshot_id: Some("market-export-1".to_string()),
             signal_id: Some("signal-export-1".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns,
             expires_at_ns,
@@ -128,7 +128,7 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             max_decision_age_ns: Some(max_decision_age_ns),
             market_snapshot_id: Some("market-export-2".to_string()),
             signal_id: Some("signal-export-2".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns,
             expires_at_ns,
@@ -158,7 +158,7 @@ fn fixture_for_profile(profile: &str) -> Result<StrategyIntent, String> {
             max_decision_age_ns: Some(max_decision_age_ns),
             market_snapshot_id: Some("market-export-3".to_string()),
             signal_id: Some("signal-export-3".to_string()),
-            recovery_policy: Some(StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns,
             expires_at_ns,

@@ -345,18 +345,35 @@ fn effective_recovery_policy(
     intent: &StrategyIntent,
     algo_plan: &AlgoExecutionPlan,
 ) -> StrategyRecoveryPolicy {
-    intent.recovery_policy.unwrap_or({
-        if matches!(
-            algo_plan.policy,
-            crate::strategy::intent::ExecutionPolicyKind::Twap
-                | crate::strategy::intent::ExecutionPolicyKind::Vwap
-                | crate::strategy::intent::ExecutionPolicyKind::Pov
-        ) {
-            StrategyRecoveryPolicy::GatewayManagedResume
-        } else {
-            StrategyRecoveryPolicy::NoAutoResume
+    match intent.recovery_policy {
+        Some(StrategyRecoveryPolicy::NoAutoResume) => StrategyRecoveryPolicy::NoAutoResume,
+        _ => {
+            if matches!(
+                algo_plan.policy,
+                crate::strategy::intent::ExecutionPolicyKind::Twap
+                    | crate::strategy::intent::ExecutionPolicyKind::Vwap
+                    | crate::strategy::intent::ExecutionPolicyKind::Pov
+            ) {
+                StrategyRecoveryPolicy::GatewayManagedResume
+            } else {
+                StrategyRecoveryPolicy::NoAutoResume
+            }
         }
-    })
+    }
+}
+
+fn validate_requested_recovery_policy(
+    intent: &StrategyIntent,
+    algo_plan: Option<&AlgoExecutionPlan>,
+) -> Result<(), &'static str> {
+    if matches!(
+        intent.recovery_policy,
+        Some(StrategyRecoveryPolicy::GatewayManagedResume)
+    ) && algo_plan.is_none()
+    {
+        return Err("STRATEGY_GATEWAY_MANAGED_RESUME_REQUIRES_EXECUTION_ALGO");
+    }
+    Ok(())
 }
 
 fn normalize_resting_time_in_force(order_request: &mut OrderRequest) -> bool {
@@ -1028,6 +1045,9 @@ pub(super) async fn handle_post_strategy_intent_adapt(
             .map_err(|reason| {
                 snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
             })?;
+    validate_requested_recovery_policy(&intent, algo_plan.as_ref()).map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
 
     let policy_adjustments = applied_policy.adjustment_strings();
     let order_request = applied_policy.order_request;
@@ -1083,6 +1103,9 @@ pub(super) async fn handle_post_strategy_intent_submit(
         now_ns,
     )
     .map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
+    validate_requested_recovery_policy(&request.intent, algo_plan.as_ref()).map_err(|reason| {
         snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
     let order_request = applied_policy.order_request.clone();
@@ -1194,6 +1217,18 @@ pub(super) async fn handle_post_strategy_intent_shadow(
             StatusCode::UNPROCESSABLE_ENTITY
         };
         snapshot_error(&state, &snapshot, status, reason)
+    })?;
+    let effective_policy = resolve_effective_policy(&snapshot, &request.intent);
+    let algo_plan = build_algo_execution_plan(
+        &request.intent,
+        effective_policy.execution_policy.as_ref(),
+        now_ns,
+    )
+    .map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
+    })?;
+    validate_requested_recovery_policy(&request.intent, algo_plan.as_ref()).map_err(|reason| {
+        snapshot_error(&state, &snapshot, StatusCode::UNPROCESSABLE_ENTITY, reason)
     })?;
 
     let replaced = upsert_shadow_record_for_intent(
@@ -2032,10 +2067,23 @@ mod tests {
             max_decision_age_ns: Some(60_000_000_000),
             market_snapshot_id: Some("market-1".to_string()),
             signal_id: Some("signal-1".to_string()),
-            recovery_policy: Some(crate::strategy::intent::StrategyRecoveryPolicy::NoAutoResume),
+            recovery_policy: None,
             algo: None,
             created_at_ns: 10,
             expires_at_ns: 123_000_000,
+        }
+    }
+
+    fn algo_plan_fixture() -> crate::strategy::algo::AlgoExecutionPlan {
+        crate::strategy::algo::AlgoExecutionPlan {
+            schema_version: crate::strategy::algo::STRATEGY_ALGO_PLAN_SCHEMA_VERSION,
+            parent_intent_id: "intent-1".to_string(),
+            policy: crate::strategy::intent::ExecutionPolicyKind::Twap,
+            total_qty: 100,
+            child_count: 4,
+            start_at_ns: 10,
+            slice_interval_ns: 1_000,
+            slices: vec![],
         }
     }
 
@@ -2149,5 +2197,47 @@ mod tests {
 
         assert_eq!(applied.order_request.qty, 100);
         assert!(applied.adjustments.is_empty());
+    }
+
+    #[test]
+    fn gateway_managed_resume_is_rejected_for_alpha_intents() {
+        let mut intent = strategy_intent_fixture();
+        intent.recovery_policy =
+            Some(crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume);
+
+        assert_eq!(
+            super::validate_requested_recovery_policy(&intent, None),
+            Err("STRATEGY_GATEWAY_MANAGED_RESUME_REQUIRES_EXECUTION_ALGO")
+        );
+    }
+
+    #[test]
+    fn gateway_managed_resume_is_allowed_for_algo_runtime() {
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
+        intent.recovery_policy =
+            Some(crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume);
+        let plan = algo_plan_fixture();
+
+        assert_eq!(
+            super::validate_requested_recovery_policy(&intent, Some(&plan)),
+            Ok(())
+        );
+        assert_eq!(
+            super::effective_recovery_policy(&intent, &plan),
+            crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume
+        );
+    }
+
+    #[test]
+    fn algo_defaults_to_gateway_managed_resume_without_explicit_setting() {
+        let mut intent = strategy_intent_fixture();
+        intent.execution_policy = crate::strategy::intent::ExecutionPolicyKind::Twap;
+        let plan = algo_plan_fixture();
+
+        assert_eq!(
+            super::effective_recovery_policy(&intent, &plan),
+            crate::strategy::intent::StrategyRecoveryPolicy::GatewayManagedResume
+        );
     }
 }
