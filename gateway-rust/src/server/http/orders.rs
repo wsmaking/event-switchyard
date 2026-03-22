@@ -6448,7 +6448,7 @@ mod tests {
         }
         assert!(completed, "expected algo runtime to complete");
 
-        let Json(runtime_resp) = super::super::strategy::handle_get_strategy_runtime(
+        let Json(runtime_resp) = super::super::strategy_read::handle_get_strategy_runtime(
             State(state.clone()),
             Path("intent-1".to_string()),
         )

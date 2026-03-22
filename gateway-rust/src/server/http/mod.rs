@@ -28,6 +28,7 @@ mod orders;
 mod sse;
 mod startup_rebuild;
 mod strategy;
+mod strategy_read;
 
 use axum::{
     Router,
@@ -90,12 +91,14 @@ use startup_rebuild::{
 };
 use strategy::{
     append_algo_runtime_snapshot, handle_get_shadow_record, handle_get_shadow_run_summary,
-    handle_get_strategy_catchup_by_execution_run_id, handle_get_strategy_catchup_by_intent_id,
-    handle_get_strategy_config, handle_get_strategy_replay_by_execution_run_id,
-    handle_get_strategy_replay_by_intent_id, handle_get_strategy_runtime,
-    handle_post_shadow_record, handle_post_strategy_intent_adapt,
+    handle_get_strategy_config, handle_post_shadow_record, handle_post_strategy_intent_adapt,
     handle_post_strategy_intent_shadow, handle_post_strategy_intent_submit,
     handle_put_strategy_config,
+};
+use strategy_read::{
+    handle_get_strategy_catchup_by_execution_run_id, handle_get_strategy_catchup_by_intent_id,
+    handle_get_strategy_replay_by_execution_run_id, handle_get_strategy_replay_by_intent_id,
+    handle_get_strategy_runtime,
 };
 
 /// /v3/orders の single-writer に流す最小タスク。
