@@ -1,14 +1,18 @@
 use chrono::{DateTime, Local, Utc};
+use libc::{self, termios as Termios};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Read, Write};
+use std::os::fd::AsRawFd;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{Duration, sleep};
+use tokio::sync::mpsc;
+use tokio::time::{Duration, interval};
 
 #[allow(dead_code)]
 #[path = "../order/mod.rs"]
@@ -16,7 +20,9 @@ mod order;
 mod strategy;
 
 use strategy::alpha_redecision::{
-    AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision, AlphaRecoveryContext,
+    AlphaDecisionClass, AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision,
+    AlphaReDecisionAction, AlphaReDecisionInput, AlphaRecoveryContext, AlphaRecoveryDecision,
+    AlphaRecoveryOperatorStatus, AlphaUnknownExposureReason,
 };
 use strategy::catchup::{StrategyExecutionCatchupLoop, target_signed_qty_for_intent};
 use strategy::intent::StrategyIntent;
@@ -27,6 +33,15 @@ const DEFAULT_LIMIT: usize = 500;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_MAX_DECISIONS: usize = 12;
 const MAX_CATCHUP_PAGES_PER_REFRESH: usize = 8;
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "1";
+const ANSI_DIM: &str = "2";
+const ANSI_RED: &str = "31";
+const ANSI_GREEN: &str = "32";
+const ANSI_YELLOW: &str = "33";
+const ANSI_BLUE: &str = "34";
+const ANSI_MAGENTA: &str = "35";
+const ANSI_CYAN: &str = "36";
 const METRIC_NAMES: &[&str] = &[
     "gateway_v3_confirm_store_size",
     "gateway_v3_loss_suspect_total",
@@ -141,6 +156,54 @@ struct CatchupView {
     redecision: Option<AlphaReDecision>,
 }
 
+#[derive(Debug, Clone)]
+struct DashboardUiState {
+    show_help: bool,
+    show_catchup: bool,
+    show_runtime: bool,
+    show_metrics: bool,
+    show_errors: bool,
+    paused: bool,
+    colors_enabled: bool,
+    visible_decisions: usize,
+}
+
+impl DashboardUiState {
+    fn new(max_decisions: usize) -> Self {
+        Self {
+            show_help: false,
+            show_catchup: true,
+            show_runtime: true,
+            show_metrics: true,
+            show_errors: true,
+            paused: false,
+            colors_enabled: io::stdout().is_terminal(),
+            visible_decisions: max_decisions.max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiKey {
+    Quit,
+    ToggleHelp,
+    ToggleCatchup,
+    ToggleRuntime,
+    ToggleMetrics,
+    ToggleErrors,
+    TogglePause,
+    RefreshNow,
+    IncreaseRows,
+    DecreaseRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyHandling {
+    Quit,
+    RefreshNow,
+    RenderOnly,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DashboardState {
     catchup: Option<CatchupView>,
@@ -150,18 +213,22 @@ struct DashboardState {
     last_refresh_ns: Option<u64>,
 }
 
-struct TerminalUiGuard;
+struct TerminalUiGuard {
+    original_termios: Option<Termios>,
+}
 
 impl TerminalUiGuard {
     fn enter() -> Self {
+        let original_termios = configure_raw_mode();
         print!("\x1b[?25l");
         let _ = io::stdout().flush();
-        Self
+        Self { original_termios }
     }
 }
 
 impl Drop for TerminalUiGuard {
     fn drop(&mut self) {
+        restore_raw_mode(self.original_termios.as_ref());
         print!("\x1b[0m\x1b[?25h\n");
         let _ = io::stdout().flush();
     }
@@ -178,25 +245,91 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let config = parse_args()?;
     let _guard = TerminalUiGuard::enter();
+    let mut ui = DashboardUiState::new(config.max_decisions);
+    if config.scope.is_none() {
+        ui.show_catchup = false;
+    }
+    if config.parent_intent_id.is_none() {
+        ui.show_runtime = false;
+    }
     let mut state = DashboardState::default();
+
+    if let Err(err) = refresh_dashboard(&config, &mut state).await {
+        state.errors = vec![err];
+        state.last_refresh_ns = Some(now_epoch_ns());
+    }
+    render_dashboard(&config, &ui, &state)?;
+
+    let mut refresh_tick = interval(Duration::from_millis(config.poll_interval_ms.max(100)));
+    refresh_tick.tick().await;
+    let mut key_events = spawn_key_reader();
 
     loop {
         tokio::select! {
-            result = refresh_dashboard(&config, &mut state) => {
-                if let Err(err) = result {
+            _ = refresh_tick.tick(), if !ui.paused => {
+                if let Err(err) = refresh_dashboard(&config, &mut state).await {
                     state.errors = vec![err];
                     state.last_refresh_ns = Some(now_epoch_ns());
                 }
-                render_dashboard(&config, &state)?;
-                sleep(Duration::from_millis(config.poll_interval_ms.max(1))).await;
+                render_dashboard(&config, &ui, &state)?;
             }
-            _ = tokio::signal::ctrl_c() => {
-                break;
+            Some(key) = key_events.recv() => {
+                match handle_key(key, &mut ui) {
+                    KeyHandling::Quit => break,
+                    KeyHandling::RefreshNow => {
+                        if let Err(err) = refresh_dashboard(&config, &mut state).await {
+                            state.errors = vec![err];
+                            state.last_refresh_ns = Some(now_epoch_ns());
+                        }
+                    }
+                    KeyHandling::RenderOnly => {}
+                }
+                render_dashboard(&config, &ui, &state)?;
             }
+            _ = tokio::signal::ctrl_c() => break,
         }
     }
 
     Ok(())
+}
+
+fn handle_key(key: UiKey, ui: &mut DashboardUiState) -> KeyHandling {
+    match key {
+        UiKey::Quit => KeyHandling::Quit,
+        UiKey::ToggleHelp => {
+            ui.show_help = !ui.show_help;
+            KeyHandling::RenderOnly
+        }
+        UiKey::ToggleCatchup => {
+            ui.show_catchup = !ui.show_catchup;
+            KeyHandling::RenderOnly
+        }
+        UiKey::ToggleRuntime => {
+            ui.show_runtime = !ui.show_runtime;
+            KeyHandling::RenderOnly
+        }
+        UiKey::ToggleMetrics => {
+            ui.show_metrics = !ui.show_metrics;
+            KeyHandling::RenderOnly
+        }
+        UiKey::ToggleErrors => {
+            ui.show_errors = !ui.show_errors;
+            KeyHandling::RenderOnly
+        }
+        UiKey::TogglePause => {
+            ui.paused = !ui.paused;
+            KeyHandling::RenderOnly
+        }
+        UiKey::RefreshNow => KeyHandling::RefreshNow,
+        UiKey::IncreaseRows => {
+            ui.visible_decisions = ui.visible_decisions.saturating_add(1);
+            KeyHandling::RenderOnly
+        }
+        UiKey::DecreaseRows => {
+            ui.visible_decisions = ui.visible_decisions.saturating_sub(1).max(1);
+            KeyHandling::RenderOnly
+        }
+    }
 }
 
 async fn refresh_dashboard(config: &TuiConfig, state: &mut DashboardState) -> Result<(), String> {
@@ -294,18 +427,30 @@ async fn fetch_metrics_view(base_url: &str) -> Result<BTreeMap<String, String>, 
     Ok(parse_selected_metrics(&text))
 }
 
-fn render_dashboard(config: &TuiConfig, state: &DashboardState) -> Result<(), String> {
+fn render_dashboard(
+    config: &TuiConfig,
+    ui: &DashboardUiState,
+    state: &DashboardState,
+) -> Result<(), String> {
     let mut out = String::new();
     let now_ns = now_epoch_ns();
     let refreshed_at = state
         .last_refresh_ns
         .map(format_timestamp_ns)
         .unwrap_or_else(|| "-".to_string());
+    let refresh_mode = if ui.paused {
+        paint(ui.colors_enabled, ANSI_YELLOW, "paused")
+    } else {
+        paint(ui.colors_enabled, ANSI_GREEN, "live")
+    };
 
     write!(
         out,
-        "\x1b[2J\x1b[HStrategy Ops TUI  refreshed={}  poll={}ms  ctrl-c=exit\n",
-        refreshed_at, config.poll_interval_ms
+        "\x1b[2J\x1b[H{}  refreshed={}  poll={}ms  refresh={}  ctrl-c=exit\n",
+        paint(ui.colors_enabled, ANSI_BOLD, "Strategy Ops TUI"),
+        refreshed_at,
+        config.poll_interval_ms,
+        refresh_mode,
     )
     .map_err(|err| err.to_string())?;
     write!(out, "Base: {}\n", config.base_url).map_err(|err| err.to_string())?;
@@ -317,25 +462,68 @@ fn render_dashboard(config: &TuiConfig, state: &DashboardState) -> Result<(), St
     if let Some(parent_intent_id) = config.parent_intent_id.as_deref() {
         write!(out, "Parent runtime: {}\n", parent_intent_id).map_err(|err| err.to_string())?;
     }
+    writeln!(out, "Keys: {}", render_key_summary(ui.colors_enabled))
+        .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "Panels: catchup={} runtime={} metrics={} errors={} rows={}",
+        on_off(ui.show_catchup),
+        on_off(ui.show_runtime),
+        on_off(ui.show_metrics),
+        on_off(ui.show_errors),
+        ui.visible_decisions,
+    )
+    .map_err(|err| err.to_string())?;
     out.push('\n');
 
-    if let Some(catchup) = state.catchup.as_ref() {
-        render_catchup_panel(&mut out, catchup, config.max_decisions, now_ns)?;
-    } else {
-        out.push_str("Catch-up\n  not configured\n\n");
+    if ui.show_help {
+        render_help_panel(&mut out, ui.colors_enabled)?;
     }
-
-    if let Some(runtime) = state.runtime.as_ref() {
-        render_runtime_panel(&mut out, runtime, now_ns)?;
-    } else {
-        out.push_str("Algo Runtime\n  not configured\n\n");
+    if ui.show_catchup {
+        if let Some(catchup) = state.catchup.as_ref() {
+            render_catchup_panel(
+                &mut out,
+                catchup,
+                ui.visible_decisions,
+                now_ns,
+                ui.colors_enabled,
+            )?;
+        } else {
+            out.push_str("Catch-up\n  not configured\n\n");
+        }
     }
-
-    render_metrics_panel(&mut out, &state.metrics)?;
-    render_error_panel(&mut out, &state.errors)?;
+    if ui.show_runtime {
+        if let Some(runtime) = state.runtime.as_ref() {
+            render_runtime_panel(&mut out, runtime, now_ns, ui.colors_enabled)?;
+        } else {
+            out.push_str("Algo Runtime\n  not configured\n\n");
+        }
+    }
+    if ui.show_metrics {
+        render_metrics_panel(&mut out, &state.metrics, ui.colors_enabled)?;
+    }
+    if ui.show_errors {
+        render_error_panel(&mut out, &state.errors, ui.colors_enabled)?;
+    }
 
     print!("{out}");
     io::stdout().flush().map_err(|err| err.to_string())
+}
+
+fn render_help_panel(out: &mut String, colors_enabled: bool) -> Result<(), String> {
+    writeln!(out, "{}", paint(colors_enabled, ANSI_CYAN, "Help")).map_err(|err| err.to_string())?;
+    writeln!(out, "  q      quit").map_err(|err| err.to_string())?;
+    writeln!(out, "  h, ?   toggle help").map_err(|err| err.to_string())?;
+    writeln!(out, "  p      pause/resume auto refresh").map_err(|err| err.to_string())?;
+    writeln!(out, "  space  refresh now").map_err(|err| err.to_string())?;
+    writeln!(out, "  c      toggle catch-up panel").map_err(|err| err.to_string())?;
+    writeln!(out, "  r      toggle runtime panel").map_err(|err| err.to_string())?;
+    writeln!(out, "  m      toggle metrics panel").map_err(|err| err.to_string())?;
+    writeln!(out, "  e      toggle errors panel").map_err(|err| err.to_string())?;
+    writeln!(out, "  + / -  increase/decrease visible decision rows")
+        .map_err(|err| err.to_string())?;
+    out.push('\n');
+    Ok(())
 }
 
 fn render_catchup_panel(
@@ -343,8 +531,10 @@ fn render_catchup_panel(
     catchup: &CatchupView,
     max_decisions: usize,
     now_ns: u64,
+    colors_enabled: bool,
 ) -> Result<(), String> {
-    writeln!(out, "Catch-up").map_err(|err| err.to_string())?;
+    writeln!(out, "{}", paint(colors_enabled, ANSI_CYAN, "Catch-up"))
+        .map_err(|err| err.to_string())?;
     writeln!(
         out,
         "  facts={} decisions={} nextCursor={} hasMore={} statusTotals[rej={} unconf={} durAcc={} durRej={} loss={}]",
@@ -361,6 +551,15 @@ fn render_catchup_panel(
     .map_err(|err| err.to_string())?;
 
     if let Some(recovery) = catchup.recovery_context.as_ref() {
+        let unknown_text = if recovery.unknown_signed_qty != 0 {
+            paint(
+                colors_enabled,
+                ANSI_YELLOW,
+                format_signed(recovery.unknown_signed_qty),
+            )
+        } else {
+            format_signed(recovery.unknown_signed_qty)
+        };
         writeln!(
             out,
             "  recovery target={} committed={} filled={} open={} failed={} unknown={} unsent={}",
@@ -369,14 +568,18 @@ fn render_catchup_panel(
             format_signed(recovery.filled_signed_qty),
             format_signed(recovery.open_signed_qty),
             format_signed(recovery.failed_signed_qty),
-            format_signed(recovery.unknown_signed_qty),
+            unknown_text,
             format_signed(recovery.unsent_signed_qty),
         )
         .map_err(|err| err.to_string())?;
         writeln!(
             out,
             "  operator {} {}",
-            format_debug(&recovery.operator_status),
+            paint_operator_status(
+                colors_enabled,
+                &recovery.operator_status,
+                format_debug(&recovery.operator_status),
+            ),
             recovery.operator_reason.as_deref().unwrap_or("-")
         )
         .map_err(|err| err.to_string())?;
@@ -400,7 +603,7 @@ fn render_catchup_panel(
         writeln!(
             out,
             "  redecision {} desired={} effective={} residual={} reason={}",
-            format_debug(&redecision.action),
+            paint_redecision_action(colors_enabled, redecision),
             format_signed(redecision.desired_signed_qty),
             format_signed(redecision.effective_desired_signed_qty),
             format_signed(redecision.residual_signed_qty),
@@ -424,8 +627,14 @@ fn render_catchup_panel(
 
     writeln!(
         out,
-        "  {:<22} {:>8} {:<18} {:<18} {:>7} {:>7} {:<18}",
-        "decision", "qty", "latest", "live", "filled", "remain", "reason"
+        "  {} {} {} {} {} {} {}",
+        fit_cell("decision", 22),
+        fit_cell_right("qty", 8),
+        fit_cell("latest", 18),
+        fit_cell("live", 18),
+        fit_cell_right("filled", 7),
+        fit_cell_right("remain", 7),
+        fit_cell("reason", 18),
     )
     .map_err(|err| err.to_string())?;
 
@@ -437,17 +646,15 @@ fn render_catchup_panel(
             .decisions
             .iter()
             .cloned()
-            .map(
-                |decision| strategy::alpha_redecision::AlphaRecoveryDecision {
-                    decision,
-                    class: strategy::alpha_redecision::AlphaDecisionClass::Unknown,
-                    filled_signed_qty: 0,
-                    open_signed_qty: 0,
-                    failed_signed_qty: 0,
-                    unknown_signed_qty: 0,
-                    unknown_reason: None,
-                },
-            )
+            .map(|decision| AlphaRecoveryDecision {
+                decision,
+                class: AlphaDecisionClass::Unknown,
+                filled_signed_qty: 0,
+                open_signed_qty: 0,
+                failed_signed_qty: 0,
+                unknown_signed_qty: 0,
+                unknown_reason: None,
+            })
             .collect::<Vec<_>>()
     };
     rows.sort_by(|left, right| {
@@ -457,6 +664,7 @@ fn render_catchup_panel(
             .cmp(&left.decision.latest_event_at_ns)
             .then_with(|| right.decision.cursor.cmp(&left.decision.cursor))
     });
+
     for row in rows.into_iter().take(max_decisions) {
         let live_status = row
             .decision
@@ -476,23 +684,43 @@ fn render_catchup_panel(
             .as_ref()
             .map(|order| order.remaining_qty)
             .unwrap_or(0);
+        let latest_cell = paint_fact_status(
+            colors_enabled,
+            row.decision.latest_status,
+            fit_cell(format_fact_status(row.decision.latest_status), 18),
+        );
+        let live_cell = paint_live_status(
+            colors_enabled,
+            live_status,
+            fit_cell(trim_to_width(live_status, 18), 18),
+        );
+        let reason_raw = row
+            .decision
+            .reason
+            .as_deref()
+            .or_else(|| row.unknown_reason.map(unknown_reason_label))
+            .unwrap_or("-");
+        let reason_cell = paint_reason_cell(
+            colors_enabled,
+            &row,
+            fit_cell(trim_to_width(reason_raw, 18), 18),
+        );
         writeln!(
             out,
-            "  {:<22} {:>8} {:<18} {:<18} {:>7} {:>7} {:<18}",
-            decision_label(&row.decision),
-            row.decision.position_delta_qty.unwrap_or_default(),
-            format_fact_status(row.decision.latest_status),
-            trim_to_width(live_status, 18),
-            live_filled,
-            live_remaining,
-            trim_to_width(
+            "  {} {} {} {} {} {} {}",
+            fit_cell(decision_label(&row.decision), 22),
+            fit_cell_right(
                 row.decision
-                    .reason
-                    .as_deref()
-                    .or_else(|| row.unknown_reason.map(unknown_reason_label))
-                    .unwrap_or("-"),
-                18
+                    .position_delta_qty
+                    .unwrap_or_default()
+                    .to_string(),
+                8
             ),
+            latest_cell,
+            live_cell,
+            fit_cell_right(live_filled.to_string(), 7),
+            fit_cell_right(live_remaining.to_string(), 7),
+            reason_cell,
         )
         .map_err(|err| err.to_string())?;
     }
@@ -504,13 +732,15 @@ fn render_runtime_panel(
     out: &mut String,
     runtime: &AlgoRuntimeView,
     now_ns: u64,
+    colors_enabled: bool,
 ) -> Result<(), String> {
-    writeln!(out, "Algo Runtime").map_err(|err| err.to_string())?;
+    writeln!(out, "{}", paint(colors_enabled, ANSI_CYAN, "Algo Runtime"))
+        .map_err(|err| err.to_string())?;
     writeln!(
         out,
         "  parent={} status={} policy={} recovery={} totalQty={} children={} updated={}",
         runtime.parent_intent_id,
-        runtime.status,
+        paint_runtime_status(colors_enabled, &runtime.status, runtime.status.clone()),
         runtime.policy,
         runtime.recovery_policy,
         runtime.total_qty,
@@ -550,22 +780,36 @@ fn render_runtime_panel(
     .map_err(|err| err.to_string())?;
     writeln!(
         out,
-        "  {:>3} {:>8} {:<18} {:>8} {:<18}",
-        "seq", "qty", "status", "sessSeq", "reason"
+        "  {} {} {} {} {}",
+        fit_cell_right("seq", 3),
+        fit_cell_right("qty", 8),
+        fit_cell("status", 18),
+        fit_cell_right("sessSeq", 8),
+        fit_cell("reason", 18),
     )
     .map_err(|err| err.to_string())?;
     for slice in runtime.slices.iter().take(12) {
         writeln!(
             out,
-            "  {:>3} {:>8} {:<18} {:>8} {:<18}",
-            slice.sequence,
-            slice.qty,
-            slice.status,
-            slice
-                .session_seq
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            trim_to_width(slice.reject_reason.as_deref().unwrap_or("-"), 18),
+            "  {} {} {} {} {}",
+            fit_cell_right(slice.sequence.to_string(), 3),
+            fit_cell_right(slice.qty.to_string(), 8),
+            paint_runtime_status(colors_enabled, &slice.status, fit_cell(&slice.status, 18)),
+            fit_cell_right(
+                slice
+                    .session_seq
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                8,
+            ),
+            paint_reason_text(
+                colors_enabled,
+                slice.reject_reason.as_deref(),
+                fit_cell(
+                    trim_to_width(slice.reject_reason.as_deref().unwrap_or("-"), 18),
+                    18
+                ),
+            ),
         )
         .map_err(|err| err.to_string())?;
     }
@@ -576,8 +820,10 @@ fn render_runtime_panel(
 fn render_metrics_panel(
     out: &mut String,
     metrics: &BTreeMap<String, String>,
+    colors_enabled: bool,
 ) -> Result<(), String> {
-    writeln!(out, "Metrics").map_err(|err| err.to_string())?;
+    writeln!(out, "{}", paint(colors_enabled, ANSI_CYAN, "Metrics"))
+        .map_err(|err| err.to_string())?;
     for name in METRIC_NAMES {
         writeln!(
             out,
@@ -591,14 +837,20 @@ fn render_metrics_panel(
     Ok(())
 }
 
-fn render_error_panel(out: &mut String, errors: &[String]) -> Result<(), String> {
-    writeln!(out, "Errors").map_err(|err| err.to_string())?;
+fn render_error_panel(
+    out: &mut String,
+    errors: &[String],
+    colors_enabled: bool,
+) -> Result<(), String> {
+    writeln!(out, "{}", paint(colors_enabled, ANSI_CYAN, "Errors"))
+        .map_err(|err| err.to_string())?;
     if errors.is_empty() {
         writeln!(out, "  -").map_err(|err| err.to_string())?;
         return Ok(());
     }
     for error in errors {
-        writeln!(out, "  {}", error).map_err(|err| err.to_string())?;
+        writeln!(out, "  {}", paint(colors_enabled, ANSI_RED, error))
+            .map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -686,12 +938,6 @@ fn parse_args() -> Result<TuiConfig, String> {
         (None, None) => None,
         _ => return Err("choose either --execution-run-id or --intent-id".to_string()),
     };
-    if scope.is_none() && parent_intent_id.is_none() {
-        return Err(
-            "one of --execution-run-id, --intent-id, or --parent-intent-id is required".to_string(),
-        );
-    }
-
     Ok(TuiConfig {
         base_url,
         scope,
@@ -732,6 +978,8 @@ fn print_usage() {
         "    [--market-desired-signed-qty 60] [--market-observed-at-ns NOW_NS] [--market-max-decision-age-ns 1000000] \\"
     );
     println!("    [--market-snapshot-id snap-1] [--market-signal-id signal-1]");
+    println!("  no scope args => metrics-only mode");
+    println!("  keys: q quit, h help, p pause, space refresh, c/r/m/e toggle panels, +/- rows");
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {
@@ -773,13 +1021,13 @@ fn build_redecision_input(
     recovery: &AlphaRecoveryContext,
     config: &TuiConfig,
     now_ns: u64,
-) -> Result<Option<strategy::alpha_redecision::AlphaReDecisionInput>, String> {
+) -> Result<Option<AlphaReDecisionInput>, String> {
     let Some(market_desired_signed_qty) = config.market_desired_signed_qty else {
         return Ok(None);
     };
     let market = build_market_context(template, config, market_desired_signed_qty, now_ns)?;
     let next_intent = build_next_intent_params(template, recovery, config, now_ns)?;
-    Ok(Some(strategy::alpha_redecision::AlphaReDecisionInput {
+    Ok(Some(AlphaReDecisionInput {
         template_intent: template.clone(),
         recovery: recovery.clone(),
         market,
@@ -1030,6 +1278,25 @@ fn parse_selected_metrics(raw: &str) -> BTreeMap<String, String> {
     parsed
 }
 
+fn render_key_summary(colors_enabled: bool) -> String {
+    [
+        ("q", "quit"),
+        ("h", "help"),
+        ("p", "pause"),
+        ("space", "refresh"),
+        ("c/r/m/e", "toggle panels"),
+        ("+/-", "rows"),
+    ]
+    .into_iter()
+    .map(|(key, label)| format!("{} {}", paint(colors_enabled, ANSI_BOLD, key), label))
+    .collect::<Vec<_>>()
+    .join("  ")
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
 fn decision_label(decision: &strategy::catchup::StrategyExecutionDecisionState) -> String {
     if let Some(decision_key) = decision.decision_key.as_deref() {
         return trim_to_width(decision_key, 22);
@@ -1051,16 +1318,28 @@ fn trim_to_width(value: &str, width: usize) -> String {
     format!("{prefix}…")
 }
 
-fn unknown_reason_label(
-    reason: strategy::alpha_redecision::AlphaUnknownExposureReason,
-) -> &'static str {
+fn fit_cell(value: impl AsRef<str>, width: usize) -> String {
+    format!(
+        "{:<width$}",
+        trim_to_width(value.as_ref(), width),
+        width = width
+    )
+}
+
+fn fit_cell_right(value: impl AsRef<str>, width: usize) -> String {
+    format!(
+        "{:>width$}",
+        trim_to_width(value.as_ref(), width),
+        width = width
+    )
+}
+
+fn unknown_reason_label(reason: AlphaUnknownExposureReason) -> &'static str {
     match reason {
-        strategy::alpha_redecision::AlphaUnknownExposureReason::Unconfirmed => "UNCONFIRMED",
-        strategy::alpha_redecision::AlphaUnknownExposureReason::LossSuspect => "LOSS_SUSPECT",
-        strategy::alpha_redecision::AlphaUnknownExposureReason::ResidualUnknown => {
-            "RESIDUAL_UNKNOWN"
-        }
-        strategy::alpha_redecision::AlphaUnknownExposureReason::None => "-",
+        AlphaUnknownExposureReason::Unconfirmed => "UNCONFIRMED",
+        AlphaUnknownExposureReason::LossSuspect => "LOSS_SUSPECT",
+        AlphaUnknownExposureReason::ResidualUnknown => "RESIDUAL_UNKNOWN",
+        AlphaUnknownExposureReason::None => "-",
     }
 }
 
@@ -1084,6 +1363,103 @@ fn format_signed(value: i64) -> String {
 
 fn format_debug<T: std::fmt::Debug>(value: &T) -> String {
     format!("{value:?}")
+}
+
+fn paint(colors_enabled: bool, code: &str, text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if !colors_enabled {
+        return text.to_string();
+    }
+    format!("\x1b[{code}m{text}{ANSI_RESET}")
+}
+
+fn paint_fact_status(
+    colors_enabled: bool,
+    status: StrategyExecutionFactStatus,
+    text: String,
+) -> String {
+    let code = match status {
+        StrategyExecutionFactStatus::DurableAccepted => ANSI_GREEN,
+        StrategyExecutionFactStatus::Rejected | StrategyExecutionFactStatus::DurableRejected => {
+            ANSI_RED
+        }
+        StrategyExecutionFactStatus::Unconfirmed | StrategyExecutionFactStatus::LossSuspect => {
+            ANSI_YELLOW
+        }
+    };
+    paint(colors_enabled, code, text)
+}
+
+fn paint_live_status(colors_enabled: bool, raw_status: &str, text: String) -> String {
+    let upper = raw_status.trim().to_ascii_uppercase();
+    let code = if raw_status == "-" {
+        ANSI_DIM
+    } else if upper.contains("ACTIVE") || upper.contains("OPEN") {
+        ANSI_GREEN
+    } else if upper.contains("REJECT") || upper.contains("CANCEL") || upper.contains("FAIL") {
+        ANSI_RED
+    } else {
+        ANSI_BLUE
+    };
+    paint(colors_enabled, code, text)
+}
+
+fn paint_runtime_status(colors_enabled: bool, raw_status: &str, text: String) -> String {
+    let code = match raw_status {
+        "RUNNING" | "DURABLE_ACCEPTED" | "COMPLETED" => ANSI_GREEN,
+        "VOLATILE_ACCEPTED" => ANSI_BLUE,
+        "DISPATCHING" => ANSI_YELLOW,
+        "REJECTED" => ANSI_RED,
+        "SKIPPED" | "SCHEDULED" | "PAUSED" => ANSI_DIM,
+        _ => ANSI_MAGENTA,
+    };
+    paint(colors_enabled, code, text)
+}
+
+fn paint_reason_text(colors_enabled: bool, reason: Option<&str>, text: String) -> String {
+    if reason.is_some() {
+        return paint(colors_enabled, ANSI_RED, text);
+    }
+    text
+}
+
+fn paint_reason_cell(colors_enabled: bool, row: &AlphaRecoveryDecision, text: String) -> String {
+    if row.unknown_reason.is_some() {
+        return paint(colors_enabled, ANSI_YELLOW, text);
+    }
+    if row.decision.reason.is_some() {
+        return paint(colors_enabled, ANSI_RED, text);
+    }
+    text
+}
+
+fn paint_operator_status(
+    colors_enabled: bool,
+    status: &AlphaRecoveryOperatorStatus,
+    text: String,
+) -> String {
+    let code = match status {
+        AlphaRecoveryOperatorStatus::ReadyForReDecision => ANSI_GREEN,
+        AlphaRecoveryOperatorStatus::HoldUnconfirmedExposure
+        | AlphaRecoveryOperatorStatus::HoldResidualUnknownExposure => ANSI_YELLOW,
+        AlphaRecoveryOperatorStatus::HoldLossSuspectExposure
+        | AlphaRecoveryOperatorStatus::HoldMixedUnknownExposure => ANSI_RED,
+    };
+    paint(colors_enabled, code, text)
+}
+
+fn paint_redecision_action(colors_enabled: bool, redecision: &AlphaReDecision) -> String {
+    let code = match redecision.action {
+        AlphaReDecisionAction::SubmitFreshIntent => ANSI_GREEN,
+        AlphaReDecisionAction::HoldUnknownExposure => ANSI_YELLOW,
+        AlphaReDecisionAction::AbortAlphaStale
+        | AlphaReDecisionAction::AbortSideFlip
+        | AlphaReDecisionAction::InvalidInput => ANSI_RED,
+        AlphaReDecisionAction::NoopNoSignal | AlphaReDecisionAction::NoopAlreadySatisfied => {
+            ANSI_DIM
+        }
+    };
+    paint(colors_enabled, code, format_debug(&redecision.action))
 }
 
 fn format_age_ns(now_ns: u64, at_ns: u64) -> String {
@@ -1125,9 +1501,78 @@ fn now_epoch_ns() -> u64 {
         .unwrap_or(0)
 }
 
+fn configure_raw_mode() -> Option<Termios> {
+    if !io::stdin().is_terminal() {
+        return None;
+    }
+    let fd = io::stdin().as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<Termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return None;
+    }
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return None;
+    }
+    Some(original)
+}
+
+fn restore_raw_mode(original: Option<&Termios>) {
+    let Some(original) = original else {
+        return;
+    };
+    let fd = io::stdin().as_raw_fd();
+    let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, original) };
+}
+
+fn spawn_key_reader() -> mpsc::UnboundedReceiver<UiKey> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    if !io::stdin().is_terminal() {
+        return rx;
+    }
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut locked = stdin.lock();
+        let mut buf = [0u8; 1];
+        loop {
+            match locked.read(&mut buf) {
+                Ok(0) => continue,
+                Ok(_) => {
+                    if let Some(key) = parse_ui_key(buf[0]) {
+                        if tx.send(key).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+fn parse_ui_key(byte: u8) -> Option<UiKey> {
+    match byte {
+        b'q' | b'Q' => Some(UiKey::Quit),
+        b'h' | b'H' | b'?' => Some(UiKey::ToggleHelp),
+        b'c' | b'C' => Some(UiKey::ToggleCatchup),
+        b'r' | b'R' => Some(UiKey::ToggleRuntime),
+        b'm' | b'M' => Some(UiKey::ToggleMetrics),
+        b'e' | b'E' => Some(UiKey::ToggleErrors),
+        b'p' | b'P' => Some(UiKey::TogglePause),
+        b' ' | b'\n' | b'\r' => Some(UiKey::RefreshNow),
+        b'+' | b'=' => Some(UiKey::IncreaseRows),
+        b'-' | b'_' => Some(UiKey::DecreaseRows),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{METRIC_NAMES, parse_selected_metrics, trim_to_width};
+    use super::{METRIC_NAMES, UiKey, parse_selected_metrics, parse_ui_key, trim_to_width};
 
     #[test]
     fn parse_selected_metrics_keeps_only_requested_names() {
@@ -1157,5 +1602,14 @@ gateway_other_metric 999\n";
     fn trim_to_width_adds_ellipsis() {
         assert_eq!(trim_to_width("abcdef", 4), "abc…");
         assert_eq!(trim_to_width("abc", 4), "abc");
+    }
+
+    #[test]
+    fn parse_ui_key_maps_expected_shortcuts() {
+        assert_eq!(parse_ui_key(b'q'), Some(UiKey::Quit));
+        assert_eq!(parse_ui_key(b'h'), Some(UiKey::ToggleHelp));
+        assert_eq!(parse_ui_key(b' '), Some(UiKey::RefreshNow));
+        assert_eq!(parse_ui_key(b'+'), Some(UiKey::IncreaseRows));
+        assert_eq!(parse_ui_key(b'x'), None);
     }
 }
