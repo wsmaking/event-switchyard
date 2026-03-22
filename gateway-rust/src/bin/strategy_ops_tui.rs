@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use libc::{self, termios as Termios};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -9,8 +9,6 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::os::fd::AsRawFd;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 
@@ -25,6 +23,10 @@ use strategy::alpha_redecision::{
     AlphaRecoveryOperatorStatus, AlphaUnknownExposureReason,
 };
 use strategy::catchup::{StrategyExecutionCatchupLoop, target_signed_qty_for_intent};
+use strategy::http_client::{
+    ACCEPT_JSON_OR_TEXT, fetch_catchup_page as fetch_strategy_catchup_page,
+    http_get_body_with_accept, parse_http_base_url,
+};
 use strategy::intent::StrategyIntent;
 use strategy::replay::{StrategyExecutionCatchupInput, StrategyExecutionFactStatus};
 
@@ -103,19 +105,6 @@ struct TuiConfig {
     next_decision_key: Option<String>,
     next_created_at_ns: Option<u64>,
     next_expires_at_ns: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-struct ParsedHttpBaseUrl {
-    host: String,
-    port: u16,
-    base_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SimpleHttpResponse {
-    status_code: u16,
-    body: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,14 +405,14 @@ async fn fetch_runtime_view(
         "{}{}{}",
         parsed.base_path, "/strategy/runtime/", parent_intent_id
     );
-    let raw = http_get_body(&parsed, &path).await?;
+    let raw = strategy::http_client::http_get_body(&parsed, &path).await?;
     serde_json::from_slice(&raw).map_err(|err| format!("decode runtime failed: {err}"))
 }
 
 async fn fetch_metrics_view(base_url: &str) -> Result<BTreeMap<String, String>, String> {
     let parsed = parse_http_base_url(base_url)?;
     let path = format!("{}{}", parsed.base_path, "/metrics");
-    let raw = http_get_body(&parsed, &path).await?;
+    let raw = http_get_body_with_accept(&parsed, &path, ACCEPT_JSON_OR_TEXT).await?;
     let text = String::from_utf8(raw).map_err(|err| format!("decode metrics failed: {err}"))?;
     Ok(parse_selected_metrics(&text))
 }
@@ -1093,169 +1082,14 @@ async fn fetch_catchup_page(
     after_cursor: u64,
     limit: usize,
 ) -> Result<StrategyExecutionCatchupInput, String> {
-    let parsed = parse_http_base_url(base_url)?;
-    let path = format!(
-        "{}{}/{id}?afterCursor={after_cursor}&limit={limit}",
-        parsed.base_path,
+    fetch_strategy_catchup_page(
+        base_url,
         scope.endpoint_path(),
-        id = scope.id()
-    );
-    let raw = http_get_body(&parsed, &path).await?;
-    serde_json::from_slice::<StrategyExecutionCatchupInput>(&raw)
-        .map_err(|err| format!("decode catch-up page failed: {err}"))
-}
-
-fn parse_http_base_url(raw: &str) -> Result<ParsedHttpBaseUrl, String> {
-    let trimmed = raw.trim();
-    let rest = trimmed
-        .strip_prefix("http://")
-        .ok_or_else(|| "only http:// base URLs are supported".to_string())?;
-    if rest.is_empty() {
-        return Err("base URL host is required".to_string());
-    }
-    let (host_port, base_path) = match rest.split_once('/') {
-        Some((left, right)) => (left, format!("/{}", right.trim_matches('/'))),
-        None => (rest, String::new()),
-    };
-    if host_port.is_empty() {
-        return Err("base URL host is required".to_string());
-    }
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.is_empty() => {
-            let port = port
-                .parse::<u16>()
-                .map_err(|err| format!("invalid port: {err}"))?;
-            (host.to_string(), port)
-        }
-        _ => (host_port.to_string(), 80),
-    };
-    Ok(ParsedHttpBaseUrl {
-        host,
-        port,
-        base_path: if base_path == "/" {
-            String::new()
-        } else {
-            base_path
-        },
-    })
-}
-
-async fn http_get_body(base: &ParsedHttpBaseUrl, path: &str) -> Result<Vec<u8>, String> {
-    let response = http_request(base, "GET", path, None).await?;
-    if response.status_code != 200 {
-        let message = String::from_utf8_lossy(&response.body);
-        return Err(format!("HTTP {}: {}", response.status_code, message));
-    }
-    Ok(response.body)
-}
-
-async fn http_request(
-    base: &ParsedHttpBaseUrl,
-    method: &str,
-    path: &str,
-    body: Option<&[u8]>,
-) -> Result<SimpleHttpResponse, String> {
-    let mut stream = TcpStream::connect((base.host.as_str(), base.port))
-        .await
-        .map_err(|err| format!("connect failed: {err}"))?;
-    let mut request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json, text/plain\r\nConnection: close\r\n",
-        host = base.host
-    );
-    if let Some(body) = body {
-        request.push_str("Content-Type: application/json\r\n");
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|err| format!("write request failed: {err}"))?;
-    if let Some(body) = body {
-        stream
-            .write_all(body)
-            .await
-            .map_err(|err| format!("write request body failed: {err}"))?;
-    }
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .await
-        .map_err(|err| format!("read response failed: {err}"))?;
-    parse_http_response(&raw)
-}
-
-fn parse_http_response(raw: &[u8]) -> Result<SimpleHttpResponse, String> {
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "invalid HTTP response".to_string())?;
-    let (head, body) = raw.split_at(split + 4);
-    let head = std::str::from_utf8(head).map_err(|err| format!("invalid HTTP headers: {err}"))?;
-    let mut lines = head.split("\r\n").filter(|line| !line.is_empty());
-    let status_line = lines
-        .next()
-        .ok_or_else(|| "missing HTTP status line".to_string())?;
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "missing HTTP status code".to_string())?
-        .parse::<u16>()
-        .map_err(|err| format!("invalid HTTP status code: {err}"))?;
-
-    let mut headers = HashMap::<String, String>::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-
-    let body = if headers
-        .get("transfer-encoding")
-        .map(|value| value.eq_ignore_ascii_case("chunked"))
-        .unwrap_or(false)
-    {
-        decode_chunked_body(body)?
-    } else {
-        body.to_vec()
-    };
-
-    Ok(SimpleHttpResponse { status_code, body })
-}
-
-fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut cursor = 0usize;
-    let mut out = Vec::new();
-    loop {
-        let line_end = raw[cursor..]
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .map(|offset| cursor + offset)
-            .ok_or_else(|| "invalid chunk header".to_string())?;
-        let size_raw = std::str::from_utf8(&raw[cursor..line_end])
-            .map_err(|err| format!("invalid chunk header utf8: {err}"))?;
-        let size_hex = size_raw
-            .split(';')
-            .next()
-            .ok_or_else(|| "invalid chunk size".to_string())?;
-        let size = usize::from_str_radix(size_hex.trim(), 16)
-            .map_err(|err| format!("invalid chunk size: {err}"))?;
-        cursor = line_end + 2;
-        if size == 0 {
-            return Ok(out);
-        }
-        let end = cursor
-            .checked_add(size)
-            .ok_or_else(|| "chunk body overflow".to_string())?;
-        if end + 2 > raw.len() {
-            return Err("truncated chunk body".to_string());
-        }
-        out.extend_from_slice(&raw[cursor..end]);
-        if &raw[end..end + 2] != b"\r\n" {
-            return Err("invalid chunk terminator".to_string());
-        }
-        cursor = end + 2;
-    }
+        scope.id(),
+        after_cursor,
+        limit,
+    )
+    .await
 }
 
 fn parse_selected_metrics(raw: &str) -> BTreeMap<String, String> {

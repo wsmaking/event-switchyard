@@ -17,3 +17,6 @@ pub mod alpha_redecision;
 #[allow(dead_code)]
 #[path = "../../strategy/market_input.rs"]
 pub mod market_input;
+
+#[allow(dead_code)]
+pub mod http_client;
