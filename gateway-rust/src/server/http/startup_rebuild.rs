@@ -454,3 +454,22 @@ pub(super) async fn run_startup_rebuild_task(state: AppState, max_lines: usize) 
     state.mark_v3_startup_rebuild_completed(gateway_core::now_nanos());
     info!(elapsed_ms = elapsed_ms, "startup WAL rebuild completed");
 }
+
+pub(super) fn maybe_start_startup_rebuild(
+    state: &AppState,
+    rebuild_on_start: bool,
+    rebuild_async_on_start: bool,
+    max_lines: usize,
+) {
+    if !rebuild_on_start {
+        return;
+    }
+    state.mark_v3_startup_rebuild_started(gateway_core::now_nanos());
+    if rebuild_async_on_start {
+        tokio::spawn(run_startup_rebuild_task(state.clone(), max_lines));
+    } else {
+        let (v3_stats, strategy_stats, elapsed_ms) = run_startup_rebuild_sync(state, max_lines);
+        record_startup_rebuild_stats(state, v3_stats, strategy_stats, elapsed_ms, max_lines);
+        state.mark_v3_startup_rebuild_completed(gateway_core::now_nanos());
+    }
+}

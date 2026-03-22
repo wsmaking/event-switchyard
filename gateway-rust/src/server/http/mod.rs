@@ -72,9 +72,7 @@ use std::path::{Path, PathBuf};
 
 use orders::render_v3_symbol_key;
 use routes::build_http_router;
-use startup_rebuild::{
-    record_startup_rebuild_stats, run_startup_rebuild_sync, run_startup_rebuild_task,
-};
+use startup_rebuild::maybe_start_startup_rebuild;
 use strategy::append_algo_runtime_snapshot;
 use tcp::run_v3_tcp_server;
 
@@ -3460,26 +3458,12 @@ pub async fn run(
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
 
-    if v3_confirm_rebuild_on_start {
-        app_state.mark_v3_startup_rebuild_started(gateway_core::now_nanos());
-        if v3_confirm_rebuild_async_on_start {
-            tokio::spawn(run_startup_rebuild_task(
-                app_state.clone(),
-                v3_confirm_rebuild_max_lines,
-            ));
-        } else {
-            let (v3_stats, strategy_stats, elapsed_ms) =
-                run_startup_rebuild_sync(&app_state, v3_confirm_rebuild_max_lines);
-            record_startup_rebuild_stats(
-                &app_state,
-                v3_stats,
-                strategy_stats,
-                elapsed_ms,
-                v3_confirm_rebuild_max_lines,
-            );
-            app_state.mark_v3_startup_rebuild_completed(gateway_core::now_nanos());
-        }
-    }
+    maybe_start_startup_rebuild(
+        &app_state,
+        v3_confirm_rebuild_on_start,
+        v3_confirm_rebuild_async_on_start,
+        v3_confirm_rebuild_max_lines,
+    );
 
     axum::serve(listener, app).await?;
 
