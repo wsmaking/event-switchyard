@@ -4,7 +4,6 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::os::fd::AsRawFd;
 use std::thread;
@@ -18,9 +17,9 @@ mod order;
 mod strategy;
 
 use strategy::alpha_redecision::{
-    AlphaDecisionClass, AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision,
-    AlphaReDecisionAction, AlphaReDecisionInput, AlphaRecoveryContext, AlphaRecoveryDecision,
-    AlphaRecoveryOperatorStatus, AlphaUnknownExposureReason,
+    AlphaDecisionClass, AlphaReDecision, AlphaReDecisionAction, AlphaReDecisionInput,
+    AlphaRecoveryContext, AlphaRecoveryDecision, AlphaRecoveryOperatorStatus,
+    AlphaUnknownExposureReason,
 };
 use strategy::catchup::{StrategyExecutionCatchupLoop, target_signed_qty_for_intent};
 use strategy::http_client::{
@@ -28,6 +27,11 @@ use strategy::http_client::{
     http_get_body_with_accept, parse_http_base_url,
 };
 use strategy::intent::StrategyIntent;
+use strategy::redecision_support::{
+    AlphaMarketOverrides, AlphaNextIntentOverrides,
+    build_optional_redecision_input as build_shared_optional_redecision_input,
+    load_template_intent as load_shared_template_intent,
+};
 use strategy::replay::{StrategyExecutionCatchupInput, StrategyExecutionFactStatus};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8081";
@@ -996,14 +1000,7 @@ fn parse_usize_arg(args: &mut impl Iterator<Item = String>, name: &str) -> Resul
 }
 
 fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
-    let raw =
-        fs::read_to_string(path).map_err(|err| format!("read template intent failed: {err}"))?;
-    let intent: StrategyIntent =
-        serde_json::from_str(&raw).map_err(|err| format!("parse template intent failed: {err}"))?;
-    intent
-        .validate()
-        .map_err(|err| format!("invalid template intent: {err}"))?;
-    Ok(intent)
+    load_shared_template_intent(path)
 }
 
 fn build_redecision_input(
@@ -1012,68 +1009,24 @@ fn build_redecision_input(
     config: &TuiConfig,
     now_ns: u64,
 ) -> Result<Option<AlphaReDecisionInput>, String> {
-    let Some(market_desired_signed_qty) = config.market_desired_signed_qty else {
-        return Ok(None);
-    };
-    let market = build_market_context(template, config, market_desired_signed_qty, now_ns)?;
-    let next_intent = build_next_intent_params(template, recovery, config, now_ns)?;
-    Ok(Some(AlphaReDecisionInput {
-        template_intent: template.clone(),
-        recovery: recovery.clone(),
-        market,
-        next_intent,
-    }))
-}
-
-fn build_market_context(
-    template: &StrategyIntent,
-    config: &TuiConfig,
-    desired_signed_qty: i64,
-    now_ns: u64,
-) -> Result<AlphaMarketContext, String> {
-    let max_decision_age_ns = config
-        .market_max_decision_age_ns
-        .or(template.max_decision_age_ns)
-        .ok_or_else(|| "MARKET_MAX_DECISION_AGE_NS_REQUIRED".to_string())?;
-    let market = AlphaMarketContext {
-        observed_at_ns: config.market_observed_at_ns.unwrap_or(now_ns),
-        desired_signed_qty,
-        max_decision_age_ns,
-        market_snapshot_id: config
-            .market_snapshot_id
-            .clone()
-            .or_else(|| template.market_snapshot_id.clone()),
-        signal_id: config
-            .market_signal_id
-            .clone()
-            .or_else(|| template.signal_id.clone()),
-    };
-    market.validate().map_err(|err| err.to_string())?;
-    Ok(market)
-}
-
-fn build_next_intent_params(
-    template: &StrategyIntent,
-    recovery: &AlphaRecoveryContext,
-    config: &TuiConfig,
-    now_ns: u64,
-) -> Result<AlphaNextIntentParams, String> {
-    let suffix = recovery.next_cursor.max(1);
-    let params = AlphaNextIntentParams {
-        intent_id: config
-            .next_intent_id
-            .clone()
-            .unwrap_or_else(|| format!("{}::redecision::{suffix}", template.intent_id)),
-        decision_key: config
-            .next_decision_key
-            .clone()
-            .unwrap_or_else(|| format!("redecision-{suffix}")),
-        decision_attempt_seq: 1,
-        created_at_ns: config.next_created_at_ns.unwrap_or(now_ns),
-        expires_at_ns: config.next_expires_at_ns,
-    };
-    params.validate().map_err(|err| err.to_string())?;
-    Ok(params)
+    build_shared_optional_redecision_input(
+        template,
+        recovery,
+        AlphaMarketOverrides {
+            desired_signed_qty: config.market_desired_signed_qty,
+            observed_at_ns: config.market_observed_at_ns,
+            max_decision_age_ns: config.market_max_decision_age_ns,
+            market_snapshot_id: config.market_snapshot_id.clone(),
+            signal_id: config.market_signal_id.clone(),
+        },
+        AlphaNextIntentOverrides {
+            intent_id: config.next_intent_id.clone(),
+            decision_key: config.next_decision_key.clone(),
+            created_at_ns: config.next_created_at_ns,
+            expires_at_ns: config.next_expires_at_ns,
+        },
+        now_ns,
+    )
 }
 
 async fn fetch_catchup_page(

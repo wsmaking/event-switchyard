@@ -12,8 +12,7 @@ mod order;
 mod strategy;
 
 use strategy::alpha_redecision::{
-    AlphaMarketContext, AlphaNextIntentParams, AlphaReDecision, AlphaReDecisionAction,
-    AlphaReDecisionInput, AlphaRecoveryContext,
+    AlphaReDecision, AlphaReDecisionAction, AlphaReDecisionInput, AlphaRecoveryContext,
 };
 use strategy::catchup::{
     StrategyExecutionCatchupLoop, StrategyExecutionCatchupLoopSnapshot,
@@ -25,6 +24,12 @@ use strategy::http_client::{
 };
 use strategy::intent::StrategyIntent;
 use strategy::market_input::StrategyMarketInput;
+use strategy::redecision_support::{
+    AlphaMarketOverrides, AlphaNextIntentOverrides,
+    build_redecision_input as build_shared_redecision_input,
+    load_template_intent as load_shared_template_intent,
+    redecision_skip_reason as shared_redecision_skip_reason,
+};
 use strategy::replay::StrategyExecutionCatchupInput;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8081";
@@ -481,64 +486,24 @@ fn build_redecision_input(
     market_input: &StrategyMarketInput,
     now_ns: u64,
 ) -> Result<AlphaReDecisionInput, String> {
-    let market = build_market_context(template, market_input, now_ns)?;
-    let next_intent = build_next_intent_params(template, recovery, run, now_ns)?;
-    Ok(AlphaReDecisionInput {
-        template_intent: template.clone(),
-        recovery: recovery.clone(),
-        market,
-        next_intent,
-    })
-}
-
-fn build_market_context(
-    template: &StrategyIntent,
-    market_input: &StrategyMarketInput,
-    now_ns: u64,
-) -> Result<AlphaMarketContext, String> {
-    let max_decision_age_ns = market_input
-        .max_decision_age_ns
-        .or(template.max_decision_age_ns)
-        .ok_or_else(|| "MARKET_MAX_DECISION_AGE_NS_REQUIRED".to_string())?;
-    let market = AlphaMarketContext {
-        observed_at_ns: market_input.observed_at_ns.unwrap_or(now_ns),
-        desired_signed_qty: market_input.desired_signed_qty,
-        max_decision_age_ns,
-        market_snapshot_id: market_input
-            .market_snapshot_id
-            .clone()
-            .or_else(|| template.market_snapshot_id.clone()),
-        signal_id: market_input
-            .signal_id
-            .clone()
-            .or_else(|| template.signal_id.clone()),
-    };
-    market.validate().map_err(|err| err.to_string())?;
-    Ok(market)
-}
-
-fn build_next_intent_params(
-    template: &StrategyIntent,
-    recovery: &AlphaRecoveryContext,
-    run: &OrchestratorRunConfig,
-    now_ns: u64,
-) -> Result<AlphaNextIntentParams, String> {
-    let suffix = recovery.next_cursor.max(1);
-    let params = AlphaNextIntentParams {
-        intent_id: run
-            .next_intent_id
-            .clone()
-            .unwrap_or_else(|| format!("{}::redecision::{suffix}", template.intent_id)),
-        decision_key: run
-            .next_decision_key
-            .clone()
-            .unwrap_or_else(|| format!("redecision-{suffix}")),
-        decision_attempt_seq: 1,
-        created_at_ns: run.next_created_at_ns.unwrap_or(now_ns),
-        expires_at_ns: run.next_expires_at_ns,
-    };
-    params.validate().map_err(|err| err.to_string())?;
-    Ok(params)
+    build_shared_redecision_input(
+        template,
+        recovery,
+        AlphaMarketOverrides {
+            desired_signed_qty: Some(market_input.desired_signed_qty),
+            observed_at_ns: market_input.observed_at_ns,
+            max_decision_age_ns: market_input.max_decision_age_ns,
+            market_snapshot_id: market_input.market_snapshot_id.clone(),
+            signal_id: market_input.signal_id.clone(),
+        },
+        AlphaNextIntentOverrides {
+            intent_id: run.next_intent_id.clone(),
+            decision_key: run.next_decision_key.clone(),
+            created_at_ns: run.next_created_at_ns,
+            expires_at_ns: run.next_expires_at_ns,
+        },
+        now_ns,
+    )
 }
 
 async fn execute_redecision_flow(
@@ -628,20 +593,7 @@ fn proposal_already_executed(
 }
 
 fn redecision_skip_reason(redecision: &AlphaReDecision) -> String {
-    redecision.reason.clone().unwrap_or_else(|| {
-        match redecision.action {
-            AlphaReDecisionAction::InvalidInput => "INVALID_INPUT",
-            AlphaReDecisionAction::AbortAlphaStale => "STRATEGY_INTENT_ALPHA_STALE",
-            AlphaReDecisionAction::HoldUnknownExposure => "UNKNOWN_EXPOSURE_PRESENT",
-            AlphaReDecisionAction::AbortSideFlip => "SIDE_FLIP_REQUIRES_NEW_RUN",
-            AlphaReDecisionAction::NoopNoSignal => "NO_DESIRED_QTY",
-            AlphaReDecisionAction::NoopAlreadySatisfied => {
-                "LIVE_COMMITTED_QTY_ALREADY_SATISFIES_DESIRED_QTY"
-            }
-            AlphaReDecisionAction::SubmitFreshIntent => "SUBMIT_FRESH_INTENT",
-        }
-        .to_string()
-    })
+    shared_redecision_skip_reason(redecision)
 }
 
 fn selected_runs<'a>(
@@ -684,11 +636,7 @@ fn load_config(path: &str) -> Result<OrchestratorConfig, String> {
 }
 
 fn load_template_intent(path: &str) -> Result<StrategyIntent, String> {
-    let intent = load_json_file::<StrategyIntent>(path)?;
-    intent
-        .validate()
-        .map_err(|err| format!("invalid template intent: {err}"))?;
-    Ok(intent)
+    load_shared_template_intent(path)
 }
 
 fn load_json_file<T: DeserializeOwned>(path: &str) -> Result<T, String> {
