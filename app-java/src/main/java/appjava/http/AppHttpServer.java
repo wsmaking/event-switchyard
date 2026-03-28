@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.concurrent.Executors;
 
 public final class AppHttpServer {
@@ -21,6 +22,7 @@ public final class AppHttpServer {
     private final OrderService orderService;
     private final ReplayScenarioService replayScenarioService;
     private final MobileLearningService mobileLearningService;
+    private final Path frontendDistDir;
 
     public AppHttpServer(
         int port,
@@ -30,7 +32,8 @@ public final class AppHttpServer {
         OmsClient omsClient,
         OrderService orderService,
         ReplayScenarioService replayScenarioService,
-        MobileLearningService mobileLearningService
+        MobileLearningService mobileLearningService,
+        Path frontendDistDir
     ) {
         this.port = port;
         this.accountId = accountId;
@@ -40,6 +43,7 @@ public final class AppHttpServer {
         this.orderService = orderService;
         this.replayScenarioService = replayScenarioService;
         this.mobileLearningService = mobileLearningService;
+        this.frontendDistDir = frontendDistDir;
     }
 
     public void start() throws IOException {
@@ -55,6 +59,7 @@ public final class AppHttpServer {
         server.createContext("/api/ops", new OpsApiHandler(accountId, omsClient, backOfficeClient));
         server.createContext("/api/order-stream", new OrderStreamHandler(omsClient, backOfficeClient));
         server.createContext("/api/mobile", new MobileApiHandler(mobileLearningService));
+        server.createContext("/", new StaticFrontendHandler(frontendDistDir));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("app-java listening on http://localhost:" + port);

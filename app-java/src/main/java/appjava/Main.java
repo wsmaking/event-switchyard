@@ -11,6 +11,8 @@ import appjava.mobile.MobileLearningService;
 import appjava.mobile.MobileProgressStore;
 import appjava.order.OrderService;
 
+import java.nio.file.Path;
+
 public final class Main {
     private Main() {
     }
@@ -18,6 +20,12 @@ public final class Main {
     public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(System.getProperty("app.http.port", "8080"));
         String accountId = System.getProperty("app.account.id", System.getenv().getOrDefault("ACCOUNT_ID", "acct_demo"));
+        Path frontendDistDir = Path.of(
+            System.getProperty(
+                "app.frontend.dist.dir",
+                System.getenv().getOrDefault("APP_FRONTEND_DIST_DIR", "frontend/dist")
+            )
+        ).toAbsolutePath().normalize();
 
         MarketDataService marketDataService = new MarketDataService();
         BackOfficeClient backOfficeClient = new BackOfficeClient(accountId);
@@ -47,7 +55,8 @@ public final class Main {
             omsClient,
             orderService,
             replayScenarioService,
-            mobileLearningService
+            mobileLearningService,
+            frontendDistDir
         );
         server.start();
     }
