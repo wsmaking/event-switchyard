@@ -32,7 +32,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"\n\"${SRCROOT}/../scripts/ops/prepare_mobile_ios_shell.sh\"\n";
+			shellScript = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"\nif \"${SRCROOT}/../scripts/ops/prepare_mobile_ios_shell.sh\"; then\n  echo \"[ok] prepared mobile web bundle\"\nelse\n  if [ -f \"${SRCROOT}/MobileLearningShell/WebApp/index.html\" ]; then\n    echo \"warning: prepare_mobile_ios_shell.sh failed; using existing bundled WebApp resources\"\n    exit 0\n  fi\n  echo \"error: mobile web bundle is missing and prepare script failed\"\n  exit 1\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
