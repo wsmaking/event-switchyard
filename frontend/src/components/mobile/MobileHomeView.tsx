@@ -1,4 +1,5 @@
 import type { MobileHome } from '../../types/mobile';
+import { isStandaloneDisplay } from '../../pwa';
 import { difficultyTone, formatDateTime, statusLabel, statusTone } from './mobileUtils';
 
 interface MobileHomeViewProps {
@@ -28,6 +29,8 @@ export function MobileHomeView({
       </div>
     );
   }
+
+  const standalone = isStandaloneDisplay();
 
   return (
     <div className="space-y-4 px-4 py-5">
@@ -64,6 +67,16 @@ export function MobileHomeView({
           続きから開く
         </button>
       </section>
+
+      {!standalone && (
+        <section className="rounded-[24px] border border-emerald-300/20 bg-emerald-500/10 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-emerald-100/70">Install</div>
+          <div className="mt-2 text-lg font-semibold text-white">iPhone に追加</div>
+          <div className="mt-2 text-sm leading-6 text-emerald-50/80">
+            Safari の共有メニューから「ホーム画面に追加」を選ぶと、アプリ形態で開けます。
+          </div>
+        </section>
+      )}
 
       <section className="rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(30,41,59,0.88),rgba(13,20,36,0.96))] p-4">
         <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">{home.todaySuggestion.label}</div>
