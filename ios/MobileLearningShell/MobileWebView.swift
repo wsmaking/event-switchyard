@@ -107,10 +107,39 @@ struct MobileWebView: UIViewRepresentable {
               column: event.colno
             });
           });
+          window.addEventListener('error', function (event) {
+            var target = event.target;
+            if (target && target !== window) {
+              post('resource.error', {
+                tagName: target.tagName,
+                src: target.src || target.href || null,
+                outerHTML: target.outerHTML ? String(target.outerHTML).slice(0, 240) : null
+              });
+            }
+          }, true);
           window.addEventListener('unhandledrejection', function (event) {
             var reason = event.reason;
             post('window.unhandledrejection', reason && (reason.stack || reason.message || reason));
           });
+          document.addEventListener('DOMContentLoaded', function () {
+            post('dom.contentLoaded', {
+              title: document.title,
+              rootExists: !!document.getElementById('root'),
+              scriptCount: document.scripts.length
+            });
+          });
+          function sampleRoot(label) {
+            var root = document.getElementById('root');
+            post('root.sample', {
+              label: label,
+              hasRoot: !!root,
+              childCount: root ? root.childElementCount : null,
+              textLength: root && root.textContent ? root.textContent.length : 0,
+              htmlLength: root && root.innerHTML ? root.innerHTML.length : 0
+            });
+          }
+          setTimeout(function () { sampleRoot('t+250ms'); }, 250);
+          setTimeout(function () { sampleRoot('t+1500ms'); }, 1500);
           post('bootstrap', 'debug bridge ready');
         })();
         """
@@ -128,6 +157,20 @@ struct MobileWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             print("[MobileShell] didFinish", webView.url?.absoluteString ?? "nil")
+            webView.evaluateJavaScript("""
+            JSON.stringify({
+              href: location.href,
+              title: document.title,
+              rootHtmlLength: document.getElementById('root') ? document.getElementById('root').innerHTML.length : -1,
+              scripts: Array.from(document.scripts).map(function (s) { return { src: s.src, type: s.type || 'classic' }; })
+            })
+            """) { value, error in
+                if let error {
+                    print("[MobileShell] evaluateJavaScript error", error.localizedDescription)
+                    return
+                }
+                print("[MobileShell] domSnapshot", value ?? "nil")
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
