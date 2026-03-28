@@ -24,7 +24,7 @@ start_service() {
 
   (
     cd "${ROOT_DIR}"
-    ./gradlew "${task}" >"${log_file}" 2>&1 &
+    nohup ./gradlew "${task}" >"${log_file}" 2>&1 </dev/null &
     echo $! >"${pid_file}"
   )
   echo "[start] ${name} task=${task} log=${log_file}"

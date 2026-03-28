@@ -46,7 +46,7 @@ public final class GatewayAuditIntakeService {
     private final InMemoryPendingOrphanStore pendingOrphanStore;
     private final boolean enabled;
     private final Path auditPath;
-    private final Path offsetPath;
+    private final AuditOffsetStore offsetStore;
     private final String startMode;
     private final long pollMs;
     private final Object loopLock = new Object();
@@ -67,6 +67,24 @@ public final class GatewayAuditIntakeService {
         OrderProjectionStateStore orderStateStore,
         LedgerReadModel ledgerReadModel
     ) {
+        this(
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderStateStore,
+            ledgerReadModel,
+            defaultOffsetStore()
+        );
+    }
+
+    public GatewayAuditIntakeService(
+        AccountOverviewReadModel accountOverviewReadModel,
+        PositionReadModel positionReadModel,
+        FillReadModel fillReadModel,
+        OrderProjectionStateStore orderStateStore,
+        LedgerReadModel ledgerReadModel,
+        AuditOffsetStore offsetStore
+    ) {
         this.accountOverviewReadModel = accountOverviewReadModel;
         this.positionReadModel = positionReadModel;
         this.fillReadModel = fillReadModel;
@@ -84,12 +102,7 @@ public final class GatewayAuditIntakeService {
                 System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_PATH", "var/gateway/audit.log")
             )
         );
-        this.offsetPath = resolvePath(
-            System.getProperty(
-                "backoffice.gateway.audit.offset.path",
-                System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_OFFSET_PATH", "var/java-replay/backoffice/audit.offset")
-            )
-        );
+        this.offsetStore = offsetStore;
         this.startMode = System.getProperty(
             "backoffice.gateway.audit.start.mode",
             System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_START_MODE", "tail")
@@ -119,7 +132,7 @@ public final class GatewayAuditIntakeService {
             enabled,
             state.get(),
             auditPath.toString(),
-            offsetPath.toString(),
+            offsetStore.describe(),
             startMode,
             startedAt,
             processed.get(),
@@ -698,27 +711,11 @@ public final class GatewayAuditIntakeService {
     }
 
     private long readOffset() {
-        try {
-            if (!Files.exists(offsetPath)) {
-                return 0L;
-            }
-            String raw = Files.readString(offsetPath).trim();
-            if (raw.isEmpty()) {
-                return 0L;
-            }
-            return Long.parseLong(raw);
-        } catch (Exception exception) {
-            return 0L;
-        }
+        return offsetStore.readOffset();
     }
 
     private void writeOffset(long offset) {
-        try {
-            Files.createDirectories(offsetPath.getParent());
-            Files.writeString(offsetPath, Long.toString(offset), StandardCharsets.UTF_8);
-        } catch (IOException exception) {
-            throw new IllegalStateException("failed_to_write_backoffice_audit_offset:" + offsetPath, exception);
-        }
+        offsetStore.writeOffset(offset);
     }
 
     private static JsonNode safeData(JsonNode data) {
@@ -863,6 +860,16 @@ public final class GatewayAuditIntakeService {
     private static Path resolvePath(String configured) {
         Path path = Path.of(configured);
         return path.isAbsolute() ? path : workspaceRoot().resolve(path).normalize();
+    }
+
+    private static AuditOffsetStore defaultOffsetStore() {
+        Path offsetPath = resolvePath(
+            System.getProperty(
+                "backoffice.gateway.audit.offset.path",
+                System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_OFFSET_PATH", "var/java-replay/backoffice/audit.offset")
+            )
+        );
+        return new FileAuditOffsetStore(offsetPath);
     }
 
     private static Path workspaceRoot() {
