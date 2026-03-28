@@ -723,7 +723,7 @@ public final class MobileLearningService {
                 List.of("/mobile/ledger", "/mobile/risk"),
                 List.of(
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java",
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx"
                 ),
                 List.of("reservation", "margin", "risk model")
             ),
@@ -841,7 +841,8 @@ public final class MobileLearningService {
                 "この risk sandbox はポジションと現在価格に shock をかける教育用の簡易モデルであり、VaR engine ではない。数字の大小だけでなく、前提と限界を説明できることが重要。",
                 List.of("/mobile/risk"),
                 List.of(
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
                 ),
                 List.of("risk sandbox", "assumption")
             )
@@ -1048,7 +1049,8 @@ public final class MobileLearningService {
                 "FX では価格だけでなく、金利差に基づく carry、funding、通貨ペアごとの settlement cut-off、複数通貨 exposure の相殺関係が論点になる。注文系でも base/quote の扱いを誤ると会計整合が崩れる。",
                 List.of("/mobile/cards"),
                 List.of(
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileDrillsView.tsx"
                 ),
                 List.of("FX", "carry", "settlement")
             ),
@@ -1062,7 +1064,8 @@ public final class MobileLearningService {
                 "rates では単純な価格差よりも、金利 1bp 変化に対する感応度で exposure を比較する方が実務的である。duration や DV01 は portfolio の方向感を素早く捉えるための代表的な尺度になる。",
                 List.of("/mobile/cards"),
                 List.of(
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx"
                 ),
                 List.of("rates", "duration", "DV01")
             ),
@@ -1076,7 +1079,8 @@ public final class MobileLearningService {
                 "credit では clean price だけではなく、spread widening、default probability、recovery 前提、流動性の悪化が主要な論点になる。stress の物語も price shock より spread shock の方が自然なことが多い。",
                 List.of("/mobile/cards"),
                 List.of(
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx"
                 ),
                 List.of("credit", "spread", "recovery")
             ),
@@ -1091,7 +1095,7 @@ public final class MobileLearningService {
                 List.of("/mobile/cards", "/mobile/architecture"),
                 List.of(
                     "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileArchitectureView.tsx",
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx"
                 ),
                 List.of("cross-asset", "boundary", "valuation")
             ),
