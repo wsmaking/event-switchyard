@@ -41,7 +41,15 @@ struct MobileWebView: UIViewRepresentable {
         }
 
         let readAccessURL = entryURL.deletingLastPathComponent()
-        webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
+        do {
+            let html = try String(contentsOf: entryURL, encoding: .utf8)
+            let normalizedHtml = html
+                .replacingOccurrences(of: "href=\"/", with: "href=\"./")
+                .replacingOccurrences(of: "src=\"/", with: "src=\"./")
+            webView.loadHTMLString(normalizedHtml, baseURL: readAccessURL)
+        } catch {
+            webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
+        }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {

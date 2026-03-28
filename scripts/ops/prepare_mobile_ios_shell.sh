@@ -11,12 +11,13 @@ echo "[icons] iOS app icons"
 echo "[build] frontend mobile bundle"
 (
   cd "$ROOT_DIR/frontend"
-  npm run build
+  VITE_PUBLIC_BASE=./ npm run build
 )
 
 echo "[sync] iOS WebApp resources"
 mkdir -p "$WEBAPP_DIR"
 rsync -a --delete --exclude '.gitignore' "$ROOT_DIR/frontend/dist/" "$WEBAPP_DIR/"
+perl -0pi -e 's/href="\/([^"]+)"/href=".\/$1"/g; s/src="\/([^"]+)"/src=".\/$1"/g' "$WEBAPP_DIR/index.html"
 
 echo "[ok] iOS shell resources prepared"
 echo "  xcodeproj : $ROOT_DIR/ios/MobileLearningShell.xcodeproj"
