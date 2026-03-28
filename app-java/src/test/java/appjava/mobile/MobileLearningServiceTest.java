@@ -13,13 +13,13 @@ final class MobileLearningServiceTest {
 
     @Test
     void incompleteCardIsDue() {
-        MobileProgressStore.CardProgress progress = new MobileProgressStore.CardProgress("card", false, false, 2, 1, 0, 100L);
+        MobileProgressStore.CardProgress progress = new MobileProgressStore.CardProgress("card", false, false, 2, 1, 0, 100L, 10_000L);
         assertTrue(MobileLearningService.isDue(progress, 200L));
     }
 
     @Test
     void masteredCardWithinIntervalIsNotDue() {
-        MobileProgressStore.CardProgress progress = new MobileProgressStore.CardProgress("card", false, true, 3, 3, 0, 1_000L);
-        assertFalse(MobileLearningService.isDue(progress, 1_000L + 1_000L));
+        MobileProgressStore.CardProgress progress = new MobileProgressStore.CardProgress("card", false, true, 3, 3, 0, 1_000L, 10_000L);
+        assertFalse(MobileLearningService.isDue(progress, 2_000L));
     }
 }

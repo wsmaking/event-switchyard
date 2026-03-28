@@ -15,6 +15,12 @@ public final class MobileProgressStore {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
         .registerModule(new JavaTimeModule())
         .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final long[] REVIEW_INTERVALS_MS = {
+        0L,
+        24L * 60L * 60L * 1000L,
+        3L * 24L * 60L * 60L * 1000L,
+        7L * 24L * 60L * 60L * 1000L
+    };
 
     private final Path stateFile;
     private final String accountId;
@@ -49,9 +55,11 @@ public final class MobileProgressStore {
             card.correctCount += 1;
             card.masteryLevel = Math.min(3, card.masteryLevel + 1);
             card.completed = true;
+            card.nextReviewAt = now + REVIEW_INTERVALS_MS[card.masteryLevel];
         } else {
             card.incorrectCount += 1;
             card.masteryLevel = Math.max(0, card.masteryLevel - 1);
+            card.nextReviewAt = now;
         }
         state.updatedAt = now;
         persist();
@@ -111,7 +119,8 @@ public final class MobileProgressStore {
                 card.masteryLevel,
                 card.correctCount,
                 card.incorrectCount,
-                card.lastReviewedAt
+                card.lastReviewedAt,
+                card.nextReviewAt
             ));
         }
         return new ProgressSnapshot(state.accountId, state.updatedAt, state.anchor, cards);
@@ -127,7 +136,8 @@ public final class MobileProgressStore {
         int masteryLevel,
         int correctCount,
         int incorrectCount,
-        long lastReviewedAt
+        long lastReviewedAt,
+        long nextReviewAt
     ) {
     }
 
@@ -154,6 +164,7 @@ public final class MobileProgressStore {
         public int correctCount;
         public int incorrectCount;
         public long lastReviewedAt;
+        public long nextReviewAt;
 
         PersistedCardProgress() {
         }

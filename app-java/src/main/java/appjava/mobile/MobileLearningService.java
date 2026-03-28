@@ -9,6 +9,7 @@ import appjava.clients.OmsClient;
 import appjava.clients.OmsClient.OmsReconcile;
 import appjava.clients.OmsClient.OmsStats;
 import appjava.market.MarketDataService;
+import appjava.market.PricePoint;
 import appjava.market.StockInfo;
 import appjava.order.OrderView;
 
@@ -21,8 +22,6 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class MobileLearningService {
-    private static final long REVIEW_INTERVAL_MS = 48L * 60L * 60L * 1000L;
-
     private final String accountId;
     private final MarketDataService marketDataService;
     private final BackOfficeClient backOfficeClient;
@@ -183,51 +182,24 @@ public final class MobileLearningService {
         RiskScenario scenario = resolveRiskScenario(request);
         List<BackOfficePosition> positions = backOfficeClient.fetchPositions(accountId);
         AccountOverview overview = backOfficeClient.fetchOverview(accountId);
-        List<RiskPositionImpact> impacts = new ArrayList<>();
-        double currentMarketValue = 0.0;
-        double shockedMarketValue = 0.0;
-        double pnlDelta = 0.0;
-
-        for (BackOfficePosition position : positions) {
-            double currentPrice = marketDataService.getCurrentPrice(position.symbol());
-            double shockPercent = scenarioShockForSymbol(scenario, position.symbol());
-            double shockedPrice = round2(currentPrice * (1.0 + shockPercent / 100.0));
-            double currentValue = round2(currentPrice * position.netQty());
-            double stressedValue = round2(shockedPrice * position.netQty());
-            double delta = round2(stressedValue - currentValue);
-            currentMarketValue += currentValue;
-            shockedMarketValue += stressedValue;
-            pnlDelta += delta;
-            impacts.add(new RiskPositionImpact(
-                position.symbol(),
-                safeName(position.symbol()),
-                position.netQty(),
-                round2(position.avgPrice()),
-                round2(currentPrice),
-                shockedPrice,
-                round2(currentValue),
-                round2(stressedValue),
-                delta,
-                shockPercent
-            ));
-        }
-
-        impacts.sort(Comparator.comparingDouble((RiskPositionImpact impact) -> Math.abs(impact.pnlDelta())).reversed());
+        List<RiskPositionImpact> impacts = calculateImpacts(positions, scenario, null, 0.0);
+        PortfolioImpact portfolioImpact = toPortfolioImpact(impacts, overview);
+        HistoricalVar historicalVar = buildHistoricalVar(positions);
+        HedgeComparison hedgeComparison = buildHedgeComparison(positions, scenario, portfolioImpact.pnlDelta());
+        List<String> assumptions = new ArrayList<>(scenario.assumptions());
+        assumptions.add("historical VaR は過去価格の 1-step return を使う教育用近似");
+        assumptions.add("hedge comparison は最大エクスポージャー 50% 圧縮の簡易比較");
         return new RiskEvaluationResponse(
             accountId,
             scenario.id(),
             scenario.title(),
             scenario.description(),
             System.currentTimeMillis(),
-            new PortfolioImpact(
-                round2(currentMarketValue),
-                round2(shockedMarketValue),
-                round2(pnlDelta),
-                overview.cashBalance(),
-                overview.realizedPnl()
-            ),
+            portfolioImpact,
             impacts,
-            scenario.assumptions()
+            historicalVar,
+            hedgeComparison,
+            assumptions
         );
     }
 
@@ -235,13 +207,7 @@ public final class MobileLearningService {
         if (progress == null) {
             return true;
         }
-        if (!progress.completed()) {
-            return true;
-        }
-        if (progress.masteryLevel() < 2) {
-            return true;
-        }
-        return now - progress.lastReviewedAt() >= REVIEW_INTERVAL_MS;
+        return !progress.completed() || progress.nextReviewAt() <= now;
     }
 
     private MainlineStatus buildMainlineStatus(
@@ -330,7 +296,7 @@ public final class MobileLearningService {
 
     private static CardProgress toCardProgress(MobileProgressStore.CardProgress progress, LearningCard card) {
         if (progress == null) {
-            return new CardProgress(card.id(), false, false, 0, 0, 0, 0L);
+            return new CardProgress(card.id(), false, false, 0, 0, 0, 0L, 0L);
         }
         return new CardProgress(
             progress.cardId(),
@@ -339,7 +305,8 @@ public final class MobileLearningService {
             progress.masteryLevel(),
             progress.correctCount(),
             progress.incorrectCount(),
-            progress.lastReviewedAt()
+            progress.lastReviewedAt(),
+            progress.nextReviewAt()
         );
     }
 
@@ -349,6 +316,130 @@ public final class MobileLearningService {
             (int) cards.stream().filter(CardSummary::due).count(),
             (int) cards.stream().filter(CardSummary::bookmarked).count(),
             (int) cards.stream().filter(card -> card.progress().completed()).count()
+        );
+    }
+
+    private List<RiskPositionImpact> calculateImpacts(
+        List<BackOfficePosition> positions,
+        RiskScenario scenario,
+        String hedgeSymbol,
+        double hedgeRatio
+    ) {
+        List<RiskPositionImpact> impacts = new ArrayList<>();
+        for (BackOfficePosition position : positions) {
+            double quantityFactor = hedgeSymbol != null && hedgeSymbol.equals(position.symbol())
+                ? Math.max(0.0, 1.0 - hedgeRatio)
+                : 1.0;
+            long effectiveQty = Math.round(position.netQty() * quantityFactor);
+            double currentPrice = marketDataService.getCurrentPrice(position.symbol());
+            double shockPercent = scenarioShockForSymbol(scenario, position.symbol());
+            double shockedPrice = round2(currentPrice * (1.0 + shockPercent / 100.0));
+            double currentValue = round2(currentPrice * effectiveQty);
+            double stressedValue = round2(shockedPrice * effectiveQty);
+            double delta = round2(stressedValue - currentValue);
+            impacts.add(new RiskPositionImpact(
+                position.symbol(),
+                safeName(position.symbol()),
+                effectiveQty,
+                round2(position.avgPrice()),
+                round2(currentPrice),
+                shockedPrice,
+                round2(currentValue),
+                round2(stressedValue),
+                delta,
+                shockPercent
+            ));
+        }
+        impacts.sort(Comparator.comparingDouble((RiskPositionImpact impact) -> Math.abs(impact.pnlDelta())).reversed());
+        return impacts;
+    }
+
+    private static PortfolioImpact toPortfolioImpact(List<RiskPositionImpact> impacts, AccountOverview overview) {
+        double currentMarketValue = 0.0;
+        double shockedMarketValue = 0.0;
+        double pnlDelta = 0.0;
+        for (RiskPositionImpact impact : impacts) {
+            currentMarketValue += impact.currentValue();
+            shockedMarketValue += impact.shockedValue();
+            pnlDelta += impact.pnlDelta();
+        }
+        return new PortfolioImpact(
+            round2(currentMarketValue),
+            round2(shockedMarketValue),
+            round2(pnlDelta),
+            overview.cashBalance(),
+            overview.realizedPnl()
+        );
+    }
+
+    private HistoricalVar buildHistoricalVar(List<BackOfficePosition> positions) {
+        List<List<PricePoint>> histories = new ArrayList<>();
+        List<BackOfficePosition> activePositions = new ArrayList<>();
+        int observationCount = Integer.MAX_VALUE;
+        for (BackOfficePosition position : positions) {
+            if (position.netQty() == 0L) {
+                continue;
+            }
+            List<PricePoint> history = marketDataService.getPriceHistory(position.symbol(), 120);
+            if (history.size() < 2) {
+                continue;
+            }
+            histories.add(history);
+            activePositions.add(position);
+            observationCount = Math.min(observationCount, history.size() - 1);
+        }
+        if (activePositions.isEmpty() || observationCount <= 0) {
+            return new HistoricalVar(95, 0, 0.0, 0.0, "1 tick", "insufficient_history");
+        }
+        List<Double> pnlSamples = new ArrayList<>();
+        for (int offset = 0; offset < observationCount; offset++) {
+            double pnl = 0.0;
+            for (int index = 0; index < activePositions.size(); index++) {
+                List<PricePoint> history = histories.get(index);
+                BackOfficePosition position = activePositions.get(index);
+                int startIndex = history.size() - observationCount - 1 + offset;
+                double previous = history.get(startIndex).price();
+                double current = history.get(startIndex + 1).price();
+                pnl += (current - previous) * position.netQty();
+            }
+            pnlSamples.add(round2(pnl));
+        }
+        pnlSamples.sort(Double::compareTo);
+        int tailSize = Math.max(1, (int) Math.ceil(pnlSamples.size() * 0.05));
+        double varLoss = Math.abs(Math.min(0.0, pnlSamples.get(tailSize - 1)));
+        double expectedShortfall = 0.0;
+        for (int index = 0; index < tailSize; index++) {
+            expectedShortfall += Math.abs(Math.min(0.0, pnlSamples.get(index)));
+        }
+        expectedShortfall = round2(expectedShortfall / tailSize);
+        return new HistoricalVar(95, observationCount, round2(varLoss), expectedShortfall, "1 tick", "過去 " + observationCount + " 本の return");
+    }
+
+    private HedgeComparison buildHedgeComparison(List<BackOfficePosition> positions, RiskScenario scenario, double unhedgedPnlDelta) {
+        if (positions.isEmpty()) {
+            return new HedgeComparison(null, 0.0, round2(unhedgedPnlDelta), round2(unhedgedPnlDelta), 0.0, "ポジションなし");
+        }
+        String hedgeSymbol = scenario.targetSymbol();
+        if (hedgeSymbol == null) {
+            hedgeSymbol = positions.stream()
+                .max(Comparator.comparingDouble(position -> Math.abs(position.netQty() * marketDataService.getCurrentPrice(position.symbol()))))
+                .map(BackOfficePosition::symbol)
+                .orElse(null);
+        }
+        if (hedgeSymbol == null) {
+            return new HedgeComparison(null, 0.0, round2(unhedgedPnlDelta), round2(unhedgedPnlDelta), 0.0, "hedge symbol を決められませんでした");
+        }
+        double hedgeRatio = 0.5;
+        List<RiskPositionImpact> hedgedImpacts = calculateImpacts(positions, scenario, hedgeSymbol, hedgeRatio);
+        double hedgedPnlDelta = hedgedImpacts.stream().mapToDouble(RiskPositionImpact::pnlDelta).sum();
+        double protectionAmount = round2(Math.abs(unhedgedPnlDelta) - Math.abs(hedgedPnlDelta));
+        return new HedgeComparison(
+            hedgeSymbol,
+            hedgeRatio,
+            round2(unhedgedPnlDelta),
+            round2(hedgedPnlDelta),
+            protectionAmount,
+            hedgeSymbol + " のエクスポージャーを 50% 落とした教育用比較"
         );
     }
 
@@ -424,7 +515,7 @@ public final class MobileLearningService {
     }
 
     private static List<LearningCard> buildCards() {
-        return List.of(
+        List<LearningCard> built = new ArrayList<>(List.of(
             new LearningCard(
                 "oms-vs-backoffice",
                 "OMS と BackOffice の境界",
@@ -573,6 +664,163 @@ public final class MobileLearningService {
                 ),
                 List.of("risk sandbox", "assumption")
             )
+        ));
+        built.addAll(buildExtendedCards());
+        return List.copyOf(built);
+    }
+
+    private static List<LearningCard> buildExtendedCards() {
+        return List.of(
+            new LearningCard(
+                "idempotency-boundary",
+                "idempotency key をどこで効かせるか",
+                "設計",
+                "medium",
+                "注文 API の idempotency はどこまで保証し、何を保証しないのか。",
+                "submit 境界で二重送信を抑止するが、projection の順序保証とは別問題。",
+                "idempotency key は client retry や UI 二重送信への防波堤になるが、aggregateSeq や downstream replay の整合とは役割が違う。面接では duplicate suppression と ordering / exactly-once を混同しないことが重要。",
+                List.of("/mobile/orders", "/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/server/http/orders/classic.rs",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/OrderService.java"
+                ),
+                List.of("idempotency", "duplicate suppression")
+            ),
+            new LearningCard(
+                "event-id-vs-order-id",
+                "eventId と orderId の違い",
+                "設計",
+                "medium",
+                "なぜ eventId と orderId を分ける必要があるのか。",
+                "orderId は aggregate identity、eventId は 1 イベント単位の重複排除キー。",
+                "注文の identity とイベントの identity を分けないと、同一注文に紐づく複数イベントの重複排除や再送説明が破綻する。eventId は replay や DLQ 再投入時の追跡にも効く。",
+                List.of("/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/contracts/bus_event_v2.schema.json",
+                    "/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java"
+                ),
+                List.of("eventId", "orderId", "dedup")
+            ),
+            new LearningCard(
+                "venue-order-mapping",
+                "clientOrderId と venueOrderId の対応",
+                "注文",
+                "medium",
+                "内部注文 ID と venue order ID はどう扱うべきか。",
+                "内部の業務識別と venue の session 識別を分ける。",
+                "internal orderId は業務状態の anchor、venueOrderId は取引所 session の制御 ID。cancel や amend では venueOrderId の生存期間と再接続復元を区別して話す必要がある。",
+                List.of("/mobile/orders", "/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/exchange/client.rs",
+                    "/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/exchange/control.rs"
+                ),
+                List.of("clientOrderId", "venueOrderId")
+            ),
+            new LearningCard(
+                "accepted-before-fill",
+                "accepted より前に fill が見えたらどうするか",
+                "運用",
+                "hard",
+                "fill-first を見たとき、なぜ即 apply してはいけないのか。",
+                "accepted 前提が欠けるなら pending orphan に保留する。",
+                "fill は会計的に重要でも、accepted 前提 없이 apply すると open order 数や reservation release と衝突する。pending orphan に置き、前提イベント到着後に replay するのが安全。",
+                List.of("/mobile/architecture", "/mobile/ledger"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java",
+                    "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java"
+                ),
+                List.of("fill-first", "pending orphan")
+            ),
+            new LearningCard(
+                "offset-vs-checkpoint",
+                "offset と aggregate progress の違い",
+                "運用",
+                "medium",
+                "consumer offset が進んでいれば安全と言えない理由は何か。",
+                "offset は読み取り位置、aggregate progress は適用済み sequence の位置。",
+                "offset だけでは out-of-order や pending orphan が解けたかは分からない。aggregate progress とセットで見て初めて projection recovery を説明できる。",
+                List.of("/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/resources/db/migration/V3__oms_aggregate_progress.sql",
+                    "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/resources/db/migration/V3__backoffice_aggregate_progress.sql"
+                ),
+                List.of("offset", "checkpoint", "aggregate progress")
+            ),
+            new LearningCard(
+                "snapshot-vs-replay",
+                "snapshot 復元と replay 復元の違い",
+                "運用",
+                "medium",
+                "再起動時に snapshot だけでなく replay 導線も必要な理由は何か。",
+                "snapshot は速いが、壊れた projection の説明責任は replay が持つ。",
+                "projection の warm start は snapshot でよいが、不整合調査や drill では replay が必要。restore speed と explainability を分けて持つのが実務的。",
+                List.of("/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/scripts/ops/drill_business_mainline_projection_recovery.sh",
+                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/business_mainline_operations_runbook.md"
+                ),
+                List.of("snapshot", "replay", "recovery")
+            ),
+            new LearningCard(
+                "accounting-truth",
+                "ledger が truth になる瞬間",
+                "台帳",
+                "medium",
+                "どのタイミングで cash / position / pnl を確定させるべきか。",
+                "注文 status ではなく fill 起点で ledger を起こす。",
+                "accepted だけでは会計を確定できない。fill を受けて ledger entry を起こし、reservation release と合わせて cash / position / realized PnL を確定する。",
+                List.of("/mobile/ledger"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java"
+                ),
+                List.of("ledger", "fill", "accounting truth")
+            ),
+            new LearningCard(
+                "realized-vs-unrealized",
+                "realized と unrealized の違い",
+                "台帳",
+                "easy",
+                "realized PnL と unrealized PnL をどう分けて説明するか。",
+                "realized は約定で確定、unrealized は保有ポジションの評価差。",
+                "BackOffice の realized PnL は fills と平均取得価格から確定する。一方 unrealized は current price を使った評価差であり、mark-to-market 前提に依存する。",
+                List.of("/mobile/ledger", "/mobile/risk"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java",
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileOrderStudyView.tsx"
+                ),
+                List.of("realized", "unrealized", "mark-to-market")
+            ),
+            new LearningCard(
+                "historical-var-reading",
+                "historical VaR をどう読むか",
+                "リスク",
+                "medium",
+                "historical VaR を見たとき、何を前提として確認すべきか。",
+                "窓、信頼水準、保有期間、データ品質、モデルの単純化。",
+                "教育用 historical VaR でも、何本の履歴を使ったか、何% tail か、価格系列がどの頻度かを先に確認する。数字の大きさだけではなく前提の薄さを話せることが重要。",
+                List.of("/mobile/risk"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
+                ),
+                List.of("historical VaR", "confidence level")
+            ),
+            new LearningCard(
+                "hedge-comparison",
+                "simple hedge comparison の読み方",
+                "リスク",
+                "medium",
+                "簡易 hedge comparison は何を見せ、何を見せないか。",
+                "エクスポージャー圧縮の方向感は見せるが、執行コストや basis risk は見せない。",
+                "この repo の hedge comparison は最大エクスポージャーを 50% 圧縮した教育用比較であり、最適ヘッジを解くものではない。reduction amount の意味と限界をセットで話す必要がある。",
+                List.of("/mobile/risk"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
+                ),
+                List.of("hedge", "risk reduction")
+            )
         );
     }
 
@@ -707,7 +955,8 @@ public final class MobileLearningService {
         int masteryLevel,
         int correctCount,
         int incorrectCount,
-        long lastReviewedAt
+        long lastReviewedAt,
+        long nextReviewAt
     ) {
     }
 
@@ -769,6 +1018,8 @@ public final class MobileLearningService {
         long evaluatedAt,
         PortfolioImpact portfolio,
         List<RiskPositionImpact> positions,
+        HistoricalVar historicalVar,
+        HedgeComparison hedgeComparison,
         List<String> assumptions
     ) {
     }
@@ -797,5 +1048,25 @@ public final class MobileLearningService {
         public String shockLabel() {
             return String.format(Locale.US, "%+.1f%%", shockPercent);
         }
+    }
+
+    public record HistoricalVar(
+        int confidenceLevel,
+        int observationCount,
+        double varLoss,
+        double expectedShortfall,
+        String holdingPeriod,
+        String methodology
+    ) {
+    }
+
+    public record HedgeComparison(
+        String hedgeSymbol,
+        double hedgeRatio,
+        double unhedgedPnlDelta,
+        double hedgedPnlDelta,
+        double protectionAmount,
+        String note
+    ) {
     }
 }

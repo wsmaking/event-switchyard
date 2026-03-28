@@ -23,6 +23,7 @@ final class MobileProgressStoreTest {
             assertEquals("/mobile/orders/order-1", snapshot.anchor().route());
             assertEquals("order-1", snapshot.anchor().orderId());
             assertTrue(snapshot.cards().get("aggregate-seq").bookmarked());
+            assertEquals(0L, snapshot.cards().get("aggregate-seq").nextReviewAt());
         } finally {
             System.clearProperty("app.state.dir");
         }
