@@ -1,5 +1,16 @@
 import { useState } from 'react';
-import { useOrders, useSubmitOrder } from '../hooks/useOrders';
+import {
+  useOrderFinalOut,
+  useOpsOverview,
+  useOrderStream,
+  useRequeueDeadLetter,
+  useRequeueOrphans,
+  useReplayGatewayAudit,
+  useOrders,
+  useResetDemo,
+  useRunReplayScenario,
+  useSubmitOrder,
+} from '../hooks/useOrders';
 import { useStockInfo, usePositions, usePriceHistory } from '../hooks/useMarketData';
 import { OrderSide, OrderType, OrderStatus, TimeInForce } from '../types/trading';
 import type { OrderRequest, PricePoint } from '../types/trading';
@@ -18,6 +29,12 @@ export function TradingView() {
     error: positionsErrorObj,
   } = usePositions();
   const submitOrder = useSubmitOrder();
+  const resetDemo = useResetDemo();
+  const runReplayScenario = useRunReplayScenario();
+  const replayGatewayAudit = useReplayGatewayAudit();
+  const requeueDeadLetter = useRequeueDeadLetter();
+  const requeueOrphans = useRequeueOrphans();
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // フォーム状態
   const [symbol, setSymbol] = useState('7203'); // トヨタ自動車
@@ -36,13 +53,12 @@ export function TradingView() {
     isError: historyError,
   } = usePriceHistory(symbol);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const buildOrderRequest = (): OrderRequest => {
     const parsedExpireAt = expireAtInput ? Date.parse(expireAtInput) : Number.NaN;
     const expireAtMs =
       timeInForce === TimeInForce.GTD && !Number.isNaN(parsedExpireAt) ? parsedExpireAt : null;
 
-    const request: OrderRequest = {
+    return {
       symbol,
       side,
       type: orderType,
@@ -51,6 +67,11 @@ export function TradingView() {
       timeInForce,
       expireAt: expireAtMs,
     };
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const request = buildOrderRequest();
 
     submitOrder.mutate(request);
 
@@ -74,6 +95,20 @@ export function TradingView() {
     submitOrder.mutate(demoRequest);
   };
 
+  const handleReplayScenario = (scenario: string) => {
+    runReplayScenario.mutate(
+      {
+        scenario,
+        request: buildOrderRequest(),
+      },
+      {
+        onSuccess: (order) => {
+          setSelectedOrderId(order.id);
+        },
+      }
+    );
+  };
+
   const apiErrors = [ordersErrorObj, positionsErrorObj]
     .filter(Boolean)
     .map((err) => (err instanceof Error ? err.message : String(err)))
@@ -82,6 +117,14 @@ export function TradingView() {
   const showEmptyOrders = !ordersLoading && !ordersError && (!orders || orders.length === 0);
   const showEmptyPositions = !positionsLoading && !positionsError && (!positions || positions.length === 0);
   const historyPoints = priceHistory ?? [];
+  const replayScenarios = [
+    { id: 'accepted', label: '受付済', tone: 'border-amber-500/30 text-amber-200' },
+    { id: 'partial-fill', label: '一部約定', tone: 'border-blue-500/30 text-blue-200' },
+    { id: 'filled', label: '全量約定', tone: 'border-emerald-500/30 text-emerald-200' },
+    { id: 'canceled', label: '取消完了', tone: 'border-sky-500/30 text-sky-200' },
+    { id: 'expired', label: '失効', tone: 'border-rose-500/30 text-rose-200' },
+    { id: 'rejected', label: '拒否', tone: 'border-rose-500/30 text-rose-200' },
+  ] as const;
 
   const buildSparklinePoints = (points: PricePoint[]) => {
     if (points.length < 2) return '';
@@ -113,6 +156,53 @@ export function TradingView() {
 
   const sparkline = buildSparklinePoints(historyPoints);
   const historyStats = summarizeHistory(historyPoints);
+  const effectiveSelectedOrderId = selectedOrderId ?? orders?.[0]?.id ?? null;
+  const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(effectiveSelectedOrderId);
+  const { data: opsOverview, isLoading: opsOverviewLoading } = useOpsOverview(effectiveSelectedOrderId);
+  const orderStreamState = useOrderStream(effectiveSelectedOrderId);
+
+  const statusTone = (status: OrderStatus) => {
+    switch (status) {
+      case OrderStatus.FILLED:
+        return 'bg-emerald-500/20 text-emerald-200';
+      case OrderStatus.REJECTED:
+      case OrderStatus.CANCELED:
+      case OrderStatus.EXPIRED:
+        return 'bg-rose-500/20 text-rose-200';
+      case OrderStatus.PARTIALLY_FILLED:
+        return 'bg-blue-500/20 text-blue-200';
+      case OrderStatus.CANCEL_PENDING:
+      case OrderStatus.AMEND_PENDING:
+        return 'bg-sky-500/20 text-sky-200';
+      default:
+        return 'bg-amber-500/20 text-amber-200';
+    }
+  };
+
+  const statusLabel = (status: OrderStatus) => {
+    switch (status) {
+      case OrderStatus.PENDING_ACCEPT:
+        return '受付中';
+      case OrderStatus.ACCEPTED:
+        return '受付済';
+      case OrderStatus.PARTIALLY_FILLED:
+        return '一部約定';
+      case OrderStatus.FILLED:
+        return '約定済';
+      case OrderStatus.CANCEL_PENDING:
+        return '取消中';
+      case OrderStatus.CANCELED:
+        return '取消済';
+      case OrderStatus.EXPIRED:
+        return '失効';
+      case OrderStatus.REJECTED:
+        return '失敗';
+      case OrderStatus.AMEND_PENDING:
+        return '訂正中';
+      default:
+        return status;
+    }
+  };
 
   const marketSymbols = [
     { symbol: '7203', label: 'トヨタ自動車' },
@@ -128,6 +218,9 @@ export function TradingView() {
     'rounded-2xl border border-slate-800/70 bg-[color:var(--panel-strong)] shadow-[0_20px_60px_rgba(0,0,0,0.5)] backdrop-blur';
   const inputClass =
     'w-full rounded-md border border-slate-700/60 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40';
+
+  const formatEventTime = (value: number | null | undefined) =>
+    value ? new Date(value).toLocaleString('ja-JP') : '-';
 
   const MarketCard = ({ symbol: cardSymbol, label }: { symbol: string; label: string }) => {
     const { data: info } = useStockInfo(cardSymbol);
@@ -424,7 +517,7 @@ export function TradingView() {
                 {/* 送信ボタン */}
                 <button
                   type="submit"
-                  disabled={submitOrder.isPending}
+                  disabled={submitOrder.isPending || runReplayScenario.isPending}
                   className="w-full rounded-md bg-blue-500/80 py-3 font-semibold text-slate-100 transition hover:bg-blue-400/90 disabled:cursor-not-allowed disabled:bg-slate-700"
                 >
                   {submitOrder.isPending ? '送信中...' : '注文を送信'}
@@ -433,15 +526,62 @@ export function TradingView() {
                 <button
                   type="button"
                   onClick={handleDemoOrder}
-                  disabled={submitOrder.isPending}
+                  disabled={submitOrder.isPending || runReplayScenario.isPending}
                   className="w-full rounded-md border border-slate-700/70 py-2 font-semibold text-slate-300 transition hover:bg-slate-900/60 disabled:bg-slate-900 disabled:text-slate-500"
                 >
                   デモ注文を1件作成
                 </button>
 
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">業務再現シナリオ</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        1クリックで OMS / BackOffice を再構成し、最終Outを即確認します
+                      </div>
+                    </div>
+                    <span className="text-[11px] text-slate-500">状態は上書きされます</span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {replayScenarios.map((scenario) => (
+                      <button
+                        key={scenario.id}
+                        type="button"
+                        onClick={() => handleReplayScenario(scenario.id)}
+                        disabled={runReplayScenario.isPending || submitOrder.isPending}
+                        className={`rounded-md border bg-slate-900/70 px-3 py-2 text-sm font-semibold transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500 ${scenario.tone}`}
+                      >
+                        {scenario.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetDemo.mutate();
+                    setSelectedOrderId(null);
+                  }}
+                  disabled={resetDemo.isPending || runReplayScenario.isPending}
+                  className="w-full rounded-md border border-slate-700/70 py-2 font-semibold text-slate-300 transition hover:bg-slate-900/60 disabled:bg-slate-900 disabled:text-slate-500"
+                >
+                  {resetDemo.isPending ? 'リセット中...' : 'デモをリセット'}
+                </button>
+
                 {submitOrder.isError && (
                   <div className="text-sm text-rose-300">
                     注文に失敗しました: {submitOrder.error.message}
+                  </div>
+                )}
+                {resetDemo.isError && (
+                  <div className="text-sm text-rose-300">
+                    リセットに失敗しました: {resetDemo.error.message}
+                  </div>
+                )}
+                {runReplayScenario.isError && (
+                  <div className="text-sm text-rose-300">
+                    シナリオ再生に失敗しました: {runReplayScenario.error.message}
                   </div>
                 )}
               </form>
@@ -575,7 +715,13 @@ export function TradingView() {
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 bg-slate-950/40">
                       {orders.map((order) => (
-                        <tr key={order.id} className="hover:bg-slate-900/40">
+                        <tr
+                          key={order.id}
+                          className={`cursor-pointer hover:bg-slate-900/40 ${
+                            effectiveSelectedOrderId === order.id ? 'bg-slate-900/50' : ''
+                          }`}
+                          onClick={() => setSelectedOrderId(order.id)}
+                        >
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-100">
                             {new Date(order.submittedAt).toLocaleTimeString('ja-JP')}
                           </td>
@@ -610,19 +756,9 @@ export function TradingView() {
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm">
                             <span
-                              className={`px-2 py-1 rounded-md font-medium ${
-                                order.status === OrderStatus.FILLED
-                                  ? 'bg-emerald-500/20 text-emerald-200'
-                                  : order.status === OrderStatus.REJECTED
-                                  ? 'bg-rose-500/20 text-rose-200'
-                                  : 'bg-amber-500/20 text-amber-200'
-                              }`}
+                              className={`px-2 py-1 rounded-md font-medium ${statusTone(order.status)}`}
                             >
-                              {order.status === OrderStatus.FILLED
-                                ? '約定済'
-                                : order.status === OrderStatus.REJECTED
-                                ? '失敗'
-                                : '待機中'}
+                              {statusLabel(order.status)}
                             </span>
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
@@ -640,6 +776,432 @@ export function TradingView() {
               ) : (
                 <div className="text-slate-500">注文履歴を取得できませんでした</div>
               )}
+          </div>
+        </div>
+
+        <div className={`mt-6 ${panelClass} p-6 reveal reveal-delay-3`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">最終Out</h2>
+              <span className="text-xs text-slate-500">
+                {effectiveSelectedOrderId ? `Order: ${effectiveSelectedOrderId}` : '注文未選択'}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={`rounded-full px-3 py-1 text-[11px] font-medium ${
+                orderStreamState === 'open'
+                  ? 'bg-emerald-500/15 text-emerald-100'
+                  : orderStreamState === 'error'
+                    ? 'bg-rose-500/15 text-rose-100'
+                    : 'bg-slate-800/70 text-slate-300'
+              }`}>
+                Live {orderStreamState}
+              </span>
+              <button
+                onClick={() => replayGatewayAudit.mutate()}
+                disabled={replayGatewayAudit.isPending}
+                className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {replayGatewayAudit.isPending ? 'Gateway Audit Replay中...' : 'Gateway Audit Replay'}
+              </button>
+            </div>
+          </div>
+
+          {finalOutLoading ? (
+            <div className="mt-4 text-sm text-slate-500">読み込み中...</div>
+          ) : finalOut ? (
+            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Order</div>
+                <div className="mt-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">{finalOut.order.symbol}</div>
+                    <div className="text-xs text-slate-400">
+                      {finalOut.order.side} / {finalOut.order.type} / {finalOut.order.quantity.toLocaleString()}株
+                    </div>
+                  </div>
+                  <span className={`rounded-md px-2 py-1 text-xs font-medium ${statusTone(finalOut.order.status)}`}>
+                    {statusLabel(finalOut.order.status)}
+                  </span>
+                </div>
+                <div className="mt-4 space-y-2 text-sm text-slate-300">
+                  <div>受付時刻: {new Date(finalOut.order.submittedAt).toLocaleString('ja-JP')}</div>
+                  <div>価格: {finalOut.order.price ? `¥${finalOut.order.price.toLocaleString()}` : '成行'}</div>
+                  <div>約定数量: {(finalOut.order.filledQuantity ?? 0).toLocaleString()}株</div>
+                  <div>残数量: {(finalOut.order.remainingQuantity ?? finalOut.order.quantity).toLocaleString()}株</div>
+                  <div>理由: {finalOut.order.statusReason ?? '-'}</div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Account</div>
+                <div className="mt-3 space-y-3 text-sm text-slate-300">
+                  <div>口座: {finalOut.accountOverview.accountId}</div>
+                  <div>現金残高: ¥{finalOut.accountOverview.cashBalance.toLocaleString()}</div>
+                  <div>利用可能余力: ¥{finalOut.accountOverview.availableBuyingPower.toLocaleString()}</div>
+                  <div>拘束余力: ¥{finalOut.accountOverview.reservedBuyingPower.toLocaleString()}</div>
+                  <div>建玉数: {finalOut.accountOverview.positionCount.toLocaleString()}</div>
+                  <div>実現損益: ¥{finalOut.accountOverview.realizedPnl.toLocaleString()}</div>
+                </div>
+                <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Balance Delta</div>
+                  <div className="mt-2 space-y-2 text-xs text-slate-300">
+                    <div>現金差分: {finalOut.balanceEffect.cashDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.cashDelta.toLocaleString()}</div>
+                    <div>利用可能余力差分: {finalOut.balanceEffect.availableBuyingPowerDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.availableBuyingPowerDelta.toLocaleString()}</div>
+                    <div>拘束余力差分: {finalOut.balanceEffect.reservedBuyingPowerDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.reservedBuyingPowerDelta.toLocaleString()}</div>
+                    <div>実現損益差分: {finalOut.balanceEffect.realizedPnlDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.realizedPnlDelta.toLocaleString()}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Reservations</div>
+                {finalOut.reservations.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.reservations.map((reservation) => (
+                      <div key={reservation.reservationId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-100">{reservation.symbol}</div>
+                          <div className="text-xs text-slate-400">{reservation.status}</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-400">
+                          {reservation.reservedQuantity.toLocaleString()}株 / 拘束 ¥{reservation.reservedAmount.toLocaleString()}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          解放 ¥{reservation.releasedAmount.toLocaleString()} / 更新 {new Date(reservation.updatedAt).toLocaleTimeString('ja-JP')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">reservation はありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Fills</div>
+                {finalOut.fills.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.fills.map((fill) => (
+                      <div key={fill.fillId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{fill.quantity.toLocaleString()}株</div>
+                          <div className="text-[11px] text-slate-500">
+                            {new Date(fill.filledAt).toLocaleTimeString('ja-JP')}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">
+                          {fill.side} / ¥{fill.price.toLocaleString()} / 約定代金 ¥{fill.notional.toLocaleString()}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">Liquidity: {fill.liquidity}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">fill はありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Positions</div>
+                {finalOut.positions.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.positions.map((position) => (
+                      <div key={position.symbol} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-100">{position.symbol}</div>
+                          <div className="text-xs text-slate-400">{position.quantity.toLocaleString()}株</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-400">
+                          平均 ¥{position.avgPrice.toLocaleString()} / 現在 ¥{position.currentPrice.toLocaleString()}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">ポジションはありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Timeline</div>
+                {finalOut.timeline.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.timeline.map((entry) => (
+                      <div key={`${entry.eventType}-${entry.eventAt}`} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{entry.label}</div>
+                          <div className="text-[11px] text-slate-500">
+                            {new Date(entry.eventAt).toLocaleTimeString('ja-JP')}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">{entry.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">イベントはまだありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Raw Event Ref</div>
+                {finalOut.rawEvents.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {finalOut.rawEvents.map((event) => (
+                      <div key={event.eventRef} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{event.eventType}</div>
+                          <div className="text-[11px] text-slate-500">{event.source}</div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">{event.eventRef}</div>
+                        <div className="mt-1 text-[11px] text-slate-500">{event.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">raw event はありません。</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 text-sm text-slate-500">
+              注文を作成すると、その注文の最終Outをここで確認できます。
+            </div>
+          )}
+
+          <div className="mt-6 border-t border-slate-800/60 pt-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-100">Ops</h3>
+              <span className="text-xs text-slate-500">
+                intake / reconcile / ledger
+              </span>
+            </div>
+
+            {opsOverviewLoading ? (
+              <div className="mt-4 text-sm text-slate-500">Ops情報を読み込み中...</div>
+            ) : opsOverview ? (
+              <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">OMS Intake</div>
+                  {opsOverview.omsStats ? (
+                    <div className="mt-3 space-y-2 text-sm text-slate-300">
+                      <div>状態: {opsOverview.omsStats.state}</div>
+                      <div>処理件数: {opsOverview.omsStats.processed.toLocaleString()}</div>
+                      <div>重複: {opsOverview.omsStats.duplicates.toLocaleString()}</div>
+                      <div>孤児: {opsOverview.omsStats.orphans.toLocaleString()}</div>
+                      <div>Seq Gap: {opsOverview.omsStats.sequenceGaps.toLocaleString()}</div>
+                      <div>DLQ: {opsOverview.omsStats.deadLetterCount.toLocaleString()}</div>
+                      <div>Pending: {opsOverview.omsStats.pendingOrphanCount.toLocaleString()}</div>
+                      <div>Seq State: {opsOverview.omsStats.aggregateProgressCount.toLocaleString()}</div>
+                      <div>Replay回数: {opsOverview.omsStats.replays.toLocaleString()}</div>
+                      <div>最終イベント: {formatEventTime(opsOverview.omsStats.lastEventAt)}</div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">OMS stats はありません。</div>
+                  )}
+                  {opsOverview.omsBusStats && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>bus state: {opsOverview.omsBusStats.state}</div>
+                      <div>bus received: {opsOverview.omsBusStats.received.toLocaleString()}</div>
+                      <div>bus applied: {opsOverview.omsBusStats.applied.toLocaleString()}</div>
+                      <div>bus pending: {opsOverview.omsBusStats.pending.toLocaleString()}</div>
+                      <div>bus errors: {opsOverview.omsBusStats.errors.toLocaleString()}</div>
+                    </div>
+                  )}
+                  {opsOverview.omsReconcile && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>open orders: {opsOverview.omsReconcile.openOrders.toLocaleString()}</div>
+                      <div>expected reserved: ¥{opsOverview.omsReconcile.expectedReservedAmount.toLocaleString()}</div>
+                      <div>actual reserved: ¥{opsOverview.omsReconcile.actualReservedAmount.toLocaleString()}</div>
+                      <div>gap: ¥{opsOverview.omsReconcile.reservedGapAmount.toLocaleString()}</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">BackOffice Intake</div>
+                  {opsOverview.backOfficeStats ? (
+                    <div className="mt-3 space-y-2 text-sm text-slate-300">
+                      <div>状態: {opsOverview.backOfficeStats.state}</div>
+                      <div>処理件数: {opsOverview.backOfficeStats.processed.toLocaleString()}</div>
+                      <div>Ledger件数: {opsOverview.backOfficeStats.ledgerEntryCount.toLocaleString()}</div>
+                      <div>重複: {opsOverview.backOfficeStats.duplicates.toLocaleString()}</div>
+                      <div>孤児: {opsOverview.backOfficeStats.orphans.toLocaleString()}</div>
+                      <div>Seq Gap: {opsOverview.backOfficeStats.sequenceGaps.toLocaleString()}</div>
+                      <div>DLQ: {opsOverview.backOfficeStats.deadLetterCount.toLocaleString()}</div>
+                      <div>Pending: {opsOverview.backOfficeStats.pendingOrphanCount.toLocaleString()}</div>
+                      <div>Seq State: {opsOverview.backOfficeStats.aggregateProgressCount.toLocaleString()}</div>
+                      <div>最終イベント: {formatEventTime(opsOverview.backOfficeStats.lastEventAt)}</div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">BackOffice stats はありません。</div>
+                  )}
+                  {opsOverview.backOfficeBusStats && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>bus state: {opsOverview.backOfficeBusStats.state}</div>
+                      <div>bus received: {opsOverview.backOfficeBusStats.received.toLocaleString()}</div>
+                      <div>bus applied: {opsOverview.backOfficeBusStats.applied.toLocaleString()}</div>
+                      <div>bus pending: {opsOverview.backOfficeBusStats.pending.toLocaleString()}</div>
+                      <div>bus errors: {opsOverview.backOfficeBusStats.errors.toLocaleString()}</div>
+                    </div>
+                  )}
+                  {opsOverview.backOfficeReconcile && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>cash: ¥{opsOverview.backOfficeReconcile.cashBalance.toLocaleString()}</div>
+                      <div>expected cash: ¥{opsOverview.backOfficeReconcile.expectedCashBalance.toLocaleString()}</div>
+                      <div>reserved: ¥{opsOverview.backOfficeReconcile.reservedBuyingPower.toLocaleString()}</div>
+                      <div>expected reserved: ¥{opsOverview.backOfficeReconcile.expectedReservedBuyingPower.toLocaleString()}</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Issues</div>
+                  <div className="mt-3 space-y-2">
+                    {[
+                      ...(opsOverview.omsReconcile?.issues ?? []),
+                      ...(opsOverview.backOfficeReconcile?.issues ?? []),
+                    ].length > 0 ? (
+                      [
+                        ...(opsOverview.omsReconcile?.issues ?? []),
+                        ...(opsOverview.backOfficeReconcile?.issues ?? []),
+                      ].map((issue) => (
+                        <div key={issue} className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3 text-xs text-rose-100">
+                          {issue}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                        issue はありません。
+                      </div>
+                    )}
+                  </div>
+                  {replayGatewayAudit.isSuccess && replayGatewayAudit.data && (
+                    <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+                      OMS replay: {replayGatewayAudit.data.oms?.status ?? 'N/A'} / BackOffice replay: {replayGatewayAudit.data.backOffice?.status ?? 'N/A'}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => requeueOrphans.mutate(effectiveSelectedOrderId)}
+                    disabled={requeueOrphans.isPending}
+                    className="mt-4 rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-100 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {requeueOrphans.isPending ? 'Pending Orphan Requeue中...' : 'Pending Orphan Requeue'}
+                  </button>
+                  {requeueOrphans.isSuccess && requeueOrphans.data && (
+                    <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/10 p-3 text-xs text-sky-100">
+                      OMS reprocessed: {requeueOrphans.data.oms?.reprocessed ?? 0} / BackOffice reprocessed: {requeueOrphans.data.backOffice?.reprocessed ?? 0}
+                    </div>
+                  )}
+                  {requeueDeadLetter.isSuccess && requeueDeadLetter.data && (
+                    <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                      OMS: {requeueDeadLetter.data.oms?.outcome ?? 'N/A'} / BackOffice: {requeueDeadLetter.data.backOffice?.outcome ?? 'N/A'}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Ledger</div>
+                  {opsOverview.ledgerEntries.length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {opsOverview.ledgerEntries.map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-slate-100">{entry.eventType}</div>
+                            <div className="text-[11px] text-slate-500">
+                              {new Date(entry.eventAt).toLocaleTimeString('ja-JP')}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-400">{entry.detail}</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500 xl:grid-cols-4">
+                            <div>qty delta: {entry.quantityDelta.toLocaleString()}</div>
+                            <div>cash delta: ¥{entry.cashDelta.toLocaleString()}</div>
+                            <div>reserve delta: ¥{entry.reservedBuyingPowerDelta.toLocaleString()}</div>
+                            <div>realized pnl delta: ¥{entry.realizedPnlDelta.toLocaleString()}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">ledger はまだありません。</div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
+                  <div className="mb-3 text-xs uppercase tracking-[0.2em] text-slate-500">Pending Orphans</div>
+                  {[...opsOverview.omsPendingOrphans, ...opsOverview.backOfficePendingOrphans].length > 0 ? (
+                    <div className="mb-6 space-y-3">
+                      {[...opsOverview.omsPendingOrphans, ...opsOverview.backOfficePendingOrphans].map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-amber-50">
+                              {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                            </div>
+                            <div className="text-[11px] text-amber-200">
+                              {formatEventTime(entry.recordedAt)}
+                            </div>
+                          </div>
+                          <div className="mt-2 text-[11px] text-amber-100">
+                            orderId: {entry.orderId ?? '-'} / source: {entry.source}
+                          </div>
+                          <div className="mt-2 overflow-x-auto rounded-md bg-slate-950/60 p-2 text-[11px] text-slate-300">
+                            {entry.rawLine}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mb-6 text-sm text-slate-500">pending orphan はありません。</div>
+                  )}
+
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Orphans / DLQ</div>
+                  {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-rose-50">
+                                {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                              </div>
+                              <div className="mt-1 text-xs text-rose-100">{entry.detail}</div>
+                            </div>
+                            <div className="flex flex-col items-end gap-2">
+                              <div className="text-[11px] text-rose-200">
+                                {formatEventTime(entry.recordedAt)}
+                              </div>
+                              {entry.eventRef && (
+                                <button
+                                  type="button"
+                                  onClick={() => requeueDeadLetter.mutate(entry.eventRef)}
+                                  disabled={requeueDeadLetter.isPending}
+                                  className="rounded-md border border-rose-400/40 bg-rose-500/10 px-2 py-1 text-[11px] font-medium text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {requeueDeadLetter.isPending && requeueDeadLetter.variables === entry.eventRef
+                                    ? '再投入中...'
+                                    : 'DLQ再投入'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="mt-2 text-[11px] text-rose-200">
+                            orderId: {entry.orderId ?? '-'} / source: {entry.source}
+                          </div>
+                          <div className="mt-2 overflow-x-auto rounded-md bg-slate-950/60 p-2 text-[11px] text-slate-300">
+                            {entry.rawLine}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">orphan / dlq はありません。</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 text-sm text-slate-500">Ops情報を取得できませんでした。</div>
+            )}
           </div>
         </div>
       </div>

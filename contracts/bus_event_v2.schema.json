@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/event-switchyard/contracts/bus_event_v2.schema.json",
+  "title": "BusEventV2",
+  "type": "object",
+  "required": [
+    "eventId",
+    "eventType",
+    "schemaVersion",
+    "sourceSystem",
+    "aggregateId",
+    "aggregateSeq",
+    "occurredAt",
+    "ingestedAt",
+    "accountId",
+    "data"
+  ],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1 },
+    "eventType": { "type": "string", "minLength": 1 },
+    "schemaVersion": { "type": "integer", "minimum": 2 },
+    "sourceSystem": { "type": "string", "minLength": 1 },
+    "aggregateId": { "type": "string", "minLength": 1 },
+    "aggregateSeq": { "type": "integer", "minimum": 0 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "ingestedAt": { "type": "string", "format": "date-time" },
+    "accountId": { "type": "string", "minLength": 1 },
+    "orderId": { "type": ["string", "null"] },
+    "venueOrderId": { "type": ["string", "null"] },
+    "correlationId": { "type": ["string", "null"] },
+    "causationId": { "type": ["string", "null"] },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -227,6 +227,144 @@ curl -sS http://127.0.0.1:8081/health
 curl -sS http://127.0.0.1:8081/metrics | head
 ```
 
+## Business Replay Stack
+
+`gateway-rust` まで含めて、UI から実注文しつつ OMS / BackOffice の最終 out を追う導線です。
+
+### 1. backend start
+
+```bash
+scripts/ops/run_business_replay_stack.sh
+```
+
+起動後の endpoint:
+
+- `gateway-rust`: `http://localhost:8081`
+- `app-java`: `http://localhost:8080`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+
+既定では `JWT_HS256_SECRET=secret123` で `gateway-rust` と `app-java` を揃えて起動します。
+`app-java` は `/api/order-stream` `/api/ops/audit/replay` `/api/ops/orphans/requeue` `/api/ops/dlq/requeue` を持ち、UI の live 更新と運用再投入に使います。
+
+### 2. frontend start
+
+```bash
+cd frontend
+npm run dev
+```
+
+### 3. smoke
+
+```bash
+scripts/ops/smoke_business_replay_stack.sh
+```
+
+### 4. stop
+
+```bash
+scripts/ops/stop_business_replay_stack.sh
+```
+
+## Business Mainline Stack
+
+Kafka / PostgreSQL / TCP venue simulator を含めた本線導線です。
+
+### 1. backend start
+
+```bash
+scripts/ops/run_business_mainline_stack.sh
+```
+
+起動後の endpoint:
+
+- `gateway-rust`: `http://localhost:8081`
+- `app-java`: `http://localhost:8080`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+
+この導線は次を前提に起動します。
+
+- Docker Compose の `postgres` `kafka` `zookeeper`
+- Kotlin `gateway.exchange.TcpExchangeSimulatorMain`
+- `gateway-rust` の `kafka-bus` feature build
+- `oms-java` / `backoffice-java` の `postgres + kafka` mode
+
+### 2. smoke
+
+```bash
+scripts/ops/smoke_business_mainline_stack.sh
+```
+
+### 3. ops gate
+
+```bash
+scripts/ops/check_business_mainline_ops.sh
+```
+
+### 4. projection recovery drill
+
+```bash
+scripts/ops/drill_business_mainline_projection_recovery.sh
+```
+
+### 5. stop
+
+```bash
+scripts/ops/stop_business_mainline_stack.sh
+```
+
+runbook:
+
+- [docs/ops/business_mainline_operations_runbook.md](/Users/fujii/Desktop/dev/event-switchyard/docs/ops/business_mainline_operations_runbook.md)
+
+## Java Replay Stack
+
+UI から注文し、OMS / BackOffice の最終 out まで追う Java replay 環境は別導線で起動します。
+
+### 1. backend start
+
+```bash
+scripts/ops/run_java_replay_stack.sh
+```
+
+起動後の endpoint:
+
+- `app-java`: `http://localhost:8080`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+
+状態は `var/java-replay/` に保存され、再起動後も replay scenario の結果を引き継ぎます。
+
+`oms-java` と `backoffice-java` は既定で `var/gateway/audit.log` を tail し、`/stats` `/reconcile` `/ledger` `/orphans` を提供します。
+`/orphans/pending` と `/internal/orphans/dlq/requeue` も使えます。
+実 event を Java 側へ再投入したい場合は `app-java` 経由で次を叩きます。
+
+```bash
+curl -sS -X POST http://localhost:8080/api/ops/audit/replay \
+  -H 'content-type: application/json' \
+  -d '{"resetState":true}'
+```
+
+### 2. frontend start
+
+```bash
+cd frontend
+npm run dev
+```
+
+### 3. smoke
+
+```bash
+scripts/ops/smoke_java_replay_stack.sh
+```
+
+### 4. stop
+
+```bash
+scripts/ops/stop_java_replay_stack.sh
+```
+
 ## strategy quick start
 
 ### 1. adapt

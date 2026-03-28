@@ -13,4 +13,8 @@ if [[ "$(uname -s)" == "Linux" ]]; then
 fi
 
 cd "$ROOT_DIR"
-cargo build --release --bin gateway-rust --manifest-path "$MANIFEST_PATH"
+if [[ -n "${GATEWAY_RUST_FEATURES:-}" ]]; then
+  cargo build --release --bin gateway-rust --manifest-path "$MANIFEST_PATH" --features "$GATEWAY_RUST_FEATURES"
+else
+  cargo build --release --bin gateway-rust --manifest-path "$MANIFEST_PATH"
+fi

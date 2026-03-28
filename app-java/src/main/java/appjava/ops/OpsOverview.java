@@ -1,0 +1,23 @@
+package appjava.ops;
+
+import appjava.clients.BackOfficeClient;
+import appjava.clients.OmsClient;
+
+import java.util.List;
+
+public record OpsOverview(
+    String accountId,
+    String orderId,
+    OmsClient.OmsStats omsStats,
+    OmsClient.OmsBusStats omsBusStats,
+    OmsClient.OmsReconcile omsReconcile,
+    List<OmsClient.DeadLetterEntry> omsOrphans,
+    List<OmsClient.PendingOrphanEntry> omsPendingOrphans,
+    BackOfficeClient.BackOfficeStats backOfficeStats,
+    BackOfficeClient.BackOfficeBusStats backOfficeBusStats,
+    BackOfficeClient.BackOfficeReconcile backOfficeReconcile,
+    List<BackOfficeClient.LedgerEntry> ledgerEntries,
+    List<BackOfficeClient.DeadLetterEntry> backOfficeOrphans,
+    List<BackOfficeClient.PendingOrphanEntry> backOfficePendingOrphans
+) {
+}

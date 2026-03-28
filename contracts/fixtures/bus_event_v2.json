@@ -1,0 +1,22 @@
+{
+  "eventId": "evt-20260328-0001",
+  "eventType": "OrderAccepted",
+  "schemaVersion": 2,
+  "sourceSystem": "gateway-rust",
+  "aggregateId": "ord-1",
+  "aggregateSeq": 1,
+  "occurredAt": "2026-03-28T00:00:00Z",
+  "ingestedAt": "2026-03-28T00:00:00Z",
+  "accountId": "acct-1",
+  "orderId": "ord-1",
+  "venueOrderId": "venue-1",
+  "correlationId": "corr-1",
+  "causationId": null,
+  "data": {
+    "symbol": "BTC",
+    "side": "BUY",
+    "type": "LIMIT",
+    "qty": 1,
+    "price": 100
+  }
+}

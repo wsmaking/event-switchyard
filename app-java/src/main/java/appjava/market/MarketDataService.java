@@ -1,0 +1,125 @@
+package appjava.market;
+
+import appjava.http.JsonHttpHandler;
+
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+
+public final class MarketDataService {
+    private final Map<String, SymbolSpec> specs = Map.of(
+        "7203", new SymbolSpec("トヨタ自動車", 2500.0, 1.0, 4.0, 10.0),
+        "6758", new SymbolSpec("ソニーグループ", 13500.0, 5.0, 5.0, 12.0),
+        "9984", new SymbolSpec("ソフトバンクグループ", 6200.0, 1.0, 6.0, 12.0),
+        "6861", new SymbolSpec("キーエンス", 52000.0, 10.0, 6.5, 14.0),
+        "8306", new SymbolSpec("三菱UFJフィナンシャル・グループ", 1200.0, 0.5, 3.5, 8.0)
+    );
+    private final Map<String, StockInfo> latest = new ConcurrentHashMap<>();
+    private final Map<String, ArrayDeque<PricePoint>> history = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "app-java-market-data");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    public MarketDataService() {
+        reset();
+        scheduler.scheduleAtFixedRate(this::tickAll, 1, 1, TimeUnit.SECONDS);
+    }
+
+    public synchronized void reset() {
+        latest.clear();
+        history.clear();
+        specs.forEach((symbol, spec) -> latest.put(symbol, seed(symbol, spec)));
+        latest.forEach((symbol, stockInfo) -> appendHistory(symbol, stockInfo.currentPrice()));
+    }
+
+    public StockInfo getStockInfo(String symbol) {
+        StockInfo stockInfo = latest.get(symbol);
+        if (stockInfo == null) {
+            throw new JsonHttpHandler.NotFoundException("symbol_not_found:" + symbol);
+        }
+        return stockInfo;
+    }
+
+    public List<PricePoint> getPriceHistory(String symbol, int limit) {
+        if (!latest.containsKey(symbol)) {
+            throw new JsonHttpHandler.NotFoundException("symbol_not_found:" + symbol);
+        }
+        ArrayDeque<PricePoint> points = history.get(symbol);
+        if (points == null) {
+            return List.of();
+        }
+        int safeLimit = Math.max(1, limit);
+        return points.stream()
+            .skip(Math.max(0, points.size() - safeLimit))
+            .toList();
+    }
+
+    public double getCurrentPrice(String symbol) {
+        return getStockInfo(symbol).currentPrice();
+    }
+
+    private void tickAll() {
+        specs.forEach((symbol, spec) -> latest.compute(symbol, (key, previous) -> next(symbol, spec, previous)));
+    }
+
+    private StockInfo seed(String symbol, SymbolSpec spec) {
+        return new StockInfo(symbol, spec.name, spec.basePrice, 0.0, 0.0, spec.basePrice, spec.basePrice, 100_000L);
+    }
+
+    private StockInfo next(String symbol, SymbolSpec spec, StockInfo previous) {
+        double lastPrice = previous == null ? spec.basePrice : previous.currentPrice();
+        double moveBps = ThreadLocalRandom.current().nextDouble(-spec.volatilityBps(), spec.volatilityBps());
+        double unclamped = lastPrice * (1.0 + moveBps / 10_000.0);
+        double min = spec.basePrice() * (1.0 - spec.maxMovePercent() / 100.0);
+        double max = spec.basePrice() * (1.0 + spec.maxMovePercent() / 100.0);
+        double currentPrice = applyTick(clamp(unclamped, min, max), spec.tickSize());
+        double change = currentPrice - spec.basePrice();
+        double changePercent = spec.basePrice() == 0.0 ? 0.0 : (change / spec.basePrice()) * 100.0;
+        double high = previous == null ? currentPrice : Math.max(previous.high(), currentPrice);
+        double low = previous == null ? currentPrice : Math.min(previous.low(), currentPrice);
+        long volume = previous == null ? 100_000L : previous.volume() + ThreadLocalRandom.current().nextLong(500L, 4000L);
+        appendHistory(symbol, currentPrice);
+        return new StockInfo(
+            symbol,
+            spec.name(),
+            round2(currentPrice),
+            round2(change),
+            round2(changePercent),
+            round2(high),
+            round2(low),
+            volume
+        );
+    }
+
+    private void appendHistory(String symbol, double price) {
+        history.computeIfAbsent(symbol, ignored -> new ArrayDeque<>())
+            .addLast(new PricePoint(Instant.now().toEpochMilli(), round2(price)));
+        ArrayDeque<PricePoint> deque = history.get(symbol);
+        while (deque.size() > 300) {
+            deque.removeFirst();
+        }
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static double applyTick(double value, double tickSize) {
+        return Math.round(value / tickSize) * tickSize;
+    }
+
+    private static double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    private record SymbolSpec(String name, double basePrice, double tickSize, double volatilityBps, double maxMovePercent) {
+    }
+}

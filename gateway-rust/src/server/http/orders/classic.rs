@@ -1,5 +1,7 @@
 use super::*;
 use crate::auth::AuthResult;
+use crate::engine::exchange_worker::ExecutionReportContext;
+use crate::exchange::{OrderSide as VenueOrderSide, OrderStatus as VenueOrderStatus};
 
 /// 注文受付（POST /orders）
 /// - JWT検証 → Idempotency-Key → FastPath → 監査/Bus/Snapshot 保存
@@ -587,12 +589,186 @@ pub(crate) async fn handle_amend_order(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    let Some(venue_control) = state.venue_order_control.clone() else {
+        let updated = state
+            .sharded_store
+            .update(&order.order_id, &order.account_id, |prev| {
+                let mut next = prev.clone();
+                next.qty = req.new_qty;
+                next.price = Some(req.new_price);
+                next.status = crate::store::OrderStatus::AmendRequested;
+                next.last_update_at = now_ms;
+                next
+            });
+
+        if updated.is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthErrorResponse {
+                    error: "NOT_FOUND".into(),
+                }),
+            ));
+        }
+
+        let amend_data = serde_json::json!({
+            "newQty": req.new_qty,
+            "newPrice": req.new_price,
+            "comment": req.comment,
+        });
+        append_and_publish_audit_event(
+            &state,
+            "AmendRequested",
+            now_ms,
+            order.account_id.clone(),
+            order.order_id.clone(),
+            amend_data,
+        );
+
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(AmendResponse {
+                order_id,
+                status: "AMEND_REQUESTED".into(),
+                reason: None,
+            }),
+        ));
+    };
+
+    let Some(current_internal_id) = state.order_id_map.to_internal(&order.order_id) else {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(AmendResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some("VENUE_ORDER_MAPPING_MISSING".into()),
+            }),
+        ));
+    };
+
+    let replacement_internal_id = state.order_id_seq.fetch_add(1, Ordering::Relaxed);
+    let replacement_new_qty = req.new_qty;
+    let replacement_new_price = req.new_price;
+    let replacement_comment = req.comment.clone();
+    let replacement_side = match venue_order_side(&order.side) {
+        Some(side) => side,
+        None => {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(AmendResponse {
+                    order_id,
+                    status: "REJECTED".into(),
+                    reason: Some("INVALID_SIDE".into()),
+                }),
+            ));
+        }
+    };
+    let replacement_symbol = order.symbol.clone();
+    let replacement_account_id = order.account_id.clone();
+    let replacement_order_id = order.order_id.clone();
+    let replacement_original = order.clone();
+    let replacement_state = state.clone();
+    let report_ctx = build_report_context(&state);
+    let replacement_report_ctx = build_report_context(&state);
+    let reentry_control = Arc::clone(&venue_control);
+
+    if let Err(error) = venue_control.send_cancel(
+        &current_internal_id.to_string(),
+        Box::new(move |report| {
+            let report_at_ms = parse_exchange_report_at_ms(&report.at);
+            match report.status {
+                VenueOrderStatus::Canceled => {
+                    report_ctx.handle_report(report);
+                    replacement_state.order_id_map.remove(current_internal_id);
+                    replacement_state.order_id_map.register_with_internal(
+                        replacement_internal_id,
+                        replacement_order_id.clone(),
+                        replacement_account_id.clone(),
+                    );
+                    let reentry_report_ctx = replacement_report_ctx.clone();
+                    match reentry_control.send_new_order(
+                        &replacement_internal_id.to_string(),
+                        &replacement_symbol,
+                        replacement_side,
+                        replacement_new_qty as i64,
+                        replacement_new_price as i64,
+                        Box::new(move |replacement_report| {
+                            reentry_report_ctx.handle_report(replacement_report);
+                        }),
+                    ) {
+                        Ok(()) => {
+                            let _ = replacement_state.sharded_store.update(
+                                &replacement_order_id,
+                                &replacement_account_id,
+                                |prev| {
+                                    let mut next = prev.clone();
+                                    next.qty = replacement_new_qty;
+                                    next.price = Some(replacement_new_price);
+                                    next.status = crate::store::OrderStatus::Sent;
+                                    next.last_update_at = report_at_ms;
+                                    next
+                                },
+                            );
+                            append_and_publish_audit_event(
+                                &replacement_state,
+                                "OrderUpdated",
+                                report_at_ms,
+                                replacement_account_id.clone(),
+                                replacement_order_id.clone(),
+                                serde_json::json!({
+                                    "status": "SENT",
+                                    "filledQty": replacement_original.filled_qty,
+                                }),
+                            );
+                            publish_order_status_sse(
+                                &replacement_state,
+                                &replacement_order_id,
+                                &replacement_account_id,
+                                "SENT",
+                                replacement_original.filled_qty,
+                                report_at_ms,
+                            );
+                        }
+                        Err(error) => {
+                            replacement_state.order_id_map.remove(replacement_internal_id);
+                            restore_order_after_amend_reject(
+                                &replacement_state,
+                                &replacement_original,
+                                report_at_ms,
+                                "CANCELED",
+                                "REPLACE_SEND_FAILED",
+                                Some(error.to_string()),
+                            );
+                        }
+                    }
+                }
+                VenueOrderStatus::Rejected => {
+                    restore_order_after_amend_reject(
+                        &replacement_state,
+                        &replacement_original,
+                        report_at_ms,
+                        replacement_original.status.as_str(),
+                        "VENUE_CANCEL_REJECTED",
+                        None,
+                    );
+                }
+                _ => {}
+            }
+        }),
+    ) {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AmendResponse {
+                order_id,
+                status: "REJECTED".into(),
+                reason: Some(format!("VENUE_CANCEL_SEND_FAILED:{error}")),
+            }),
+        ));
+    }
+
     let updated = state
         .sharded_store
         .update(&order.order_id, &order.account_id, |prev| {
             let mut next = prev.clone();
-            next.qty = req.new_qty;
-            next.price = Some(req.new_price);
             next.status = crate::store::OrderStatus::AmendRequested;
             next.last_update_at = now_ms;
             next
@@ -610,24 +786,16 @@ pub(crate) async fn handle_amend_order(
     let amend_data = serde_json::json!({
         "newQty": req.new_qty,
         "newPrice": req.new_price,
-        "comment": req.comment,
+        "comment": replacement_comment,
     });
-    state.audit_log.append(AuditEvent {
-        event_type: "AmendRequested".into(),
-        at: audit::now_millis(),
-        account_id: order.account_id.clone(),
-        order_id: Some(order.order_id.clone()),
-        data: amend_data.clone(),
-    });
-    if !state.bus_mode_outbox {
-        state.bus_publisher.publish(BusEvent {
-            event_type: "AmendRequested".into(),
-            at: crate::bus::format_event_time(audit::now_millis()),
-            account_id: order.account_id.clone(),
-            order_id: Some(order.order_id.clone()),
-            data: amend_data,
-        });
-    }
+    append_and_publish_audit_event(
+        &state,
+        "AmendRequested",
+        now_ms,
+        order.account_id.clone(),
+        order.order_id.clone(),
+        amend_data,
+    );
 
     Ok((
         StatusCode::ACCEPTED,
@@ -725,6 +893,45 @@ pub(crate) async fn handle_cancel_order(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    if let Some(venue_control) = state.venue_order_control.clone() {
+        let Some(internal_order_id) = state.order_id_map.to_internal(&order.order_id) else {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(CancelResponse {
+                    order_id,
+                    status: "REJECTED".into(),
+                    reason: Some("VENUE_ORDER_MAPPING_MISSING".into()),
+                }),
+            ));
+        };
+        let original_order = order.clone();
+        let control_state = state.clone();
+        let report_ctx = build_report_context(&state);
+        if let Err(error) = venue_control.send_cancel(
+            &internal_order_id.to_string(),
+            Box::new(move |report| {
+                let report_at_ms = parse_exchange_report_at_ms(&report.at);
+                match report.status {
+                    VenueOrderStatus::Rejected => restore_order_after_cancel_reject(
+                        &control_state,
+                        &original_order,
+                        report_at_ms,
+                    ),
+                    _ => report_ctx.handle_report(report),
+                }
+            }),
+        ) {
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(CancelResponse {
+                    order_id,
+                    status: "REJECTED".into(),
+                    reason: Some(format!("VENUE_CANCEL_SEND_FAILED:{error}")),
+                }),
+            ));
+        }
+    }
+
     let _ = state
         .sharded_store
         .update(&order.order_id, &order.account_id, |prev| {
@@ -734,22 +941,14 @@ pub(crate) async fn handle_cancel_order(
             next
         });
 
-    state.audit_log.append(AuditEvent {
-        event_type: "CancelRequested".into(),
-        at: audit::now_millis(),
-        account_id: order.account_id.clone(),
-        order_id: Some(order.order_id.clone()),
-        data: serde_json::json!({}),
-    });
-    if !state.bus_mode_outbox {
-        state.bus_publisher.publish(BusEvent {
-            event_type: "CancelRequested".into(),
-            at: crate::bus::format_event_time(audit::now_millis()),
-            account_id: order.account_id.clone(),
-            order_id: Some(order.order_id.clone()),
-            data: serde_json::json!({}),
-        });
-    }
+    append_and_publish_audit_event(
+        &state,
+        "CancelRequested",
+        now_ms,
+        order.account_id.clone(),
+        order.order_id.clone(),
+        serde_json::json!({}),
+    );
 
     Ok((
         StatusCode::ACCEPTED,
@@ -759,4 +958,179 @@ pub(crate) async fn handle_cancel_order(
             reason: None,
         }),
     ))
+}
+
+fn build_report_context(state: &AppState) -> ExecutionReportContext {
+    ExecutionReportContext::new(
+        Arc::clone(&state.sharded_store),
+        Arc::clone(&state.order_id_map),
+        Arc::clone(&state.sse_hub),
+        Arc::clone(&state.audit_log),
+        Arc::clone(&state.bus_publisher),
+        state.bus_mode_outbox,
+    )
+}
+
+fn parse_exchange_report_at_ms(raw: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .and_then(|dt| {
+            let value = dt.timestamp_millis();
+            if value < 0 { None } else { Some(value as u64) }
+        })
+        .unwrap_or_else(audit::now_millis)
+}
+
+fn venue_order_side(side: &str) -> Option<VenueOrderSide> {
+    match side.trim().to_uppercase().as_str() {
+        "BUY" => Some(VenueOrderSide::Buy),
+        "SELL" => Some(VenueOrderSide::Sell),
+        _ => None,
+    }
+}
+
+fn append_and_publish_audit_event(
+    state: &AppState,
+    event_type: &str,
+    at_ms: u64,
+    account_id: String,
+    order_id: String,
+    data: serde_json::Value,
+) {
+    state.audit_log.append(AuditEvent {
+        event_type: event_type.into(),
+        at: at_ms,
+        account_id: account_id.clone(),
+        order_id: Some(order_id.clone()),
+        data: data.clone(),
+    });
+    if !state.bus_mode_outbox {
+        state.bus_publisher.publish(BusEvent {
+            event_type: event_type.into(),
+            at: crate::bus::format_event_time(at_ms),
+            account_id,
+            order_id: Some(order_id),
+            data,
+        });
+    }
+}
+
+fn publish_order_status_sse(
+    state: &AppState,
+    order_id: &str,
+    account_id: &str,
+    status: &str,
+    filled_qty: u64,
+    at_ms: u64,
+) {
+    let payload = serde_json::json!({
+        "orderId": order_id,
+        "status": status,
+        "filledQty": filled_qty,
+        "at": at_ms,
+    })
+    .to_string();
+    state.sse_hub.publish_order(order_id, "order_updated", &payload);
+    state
+        .sse_hub
+        .publish_account(account_id, "order_updated", &payload);
+}
+
+fn restore_order_after_cancel_reject(
+    state: &AppState,
+    original_order: &crate::store::OrderSnapshot,
+    report_at_ms: u64,
+) {
+    let restored_status = state
+        .sharded_store
+        .update(&original_order.order_id, &original_order.account_id, |prev| {
+            let mut next = prev.clone();
+            if next.status == crate::store::OrderStatus::CancelRequested {
+                next.status = original_order.status;
+            }
+            next.last_update_at = report_at_ms;
+            next
+        })
+        .map(|snapshot| snapshot.status.as_str().to_string())
+        .unwrap_or_else(|| original_order.status.as_str().to_string());
+    append_and_publish_audit_event(
+        state,
+        "CancelRejected",
+        report_at_ms,
+        original_order.account_id.clone(),
+        original_order.order_id.clone(),
+        serde_json::json!({
+            "status": restored_status,
+            "filledQty": original_order.filled_qty,
+            "reason": "VENUE_CANCEL_REJECTED",
+        }),
+    );
+    publish_order_status_sse(
+        state,
+        &original_order.order_id,
+        &original_order.account_id,
+        &restored_status,
+        original_order.filled_qty,
+        report_at_ms,
+    );
+}
+
+fn restore_order_after_amend_reject(
+    state: &AppState,
+    original_order: &crate::store::OrderSnapshot,
+    report_at_ms: u64,
+    fallback_status: &str,
+    reason: &str,
+    detail: Option<String>,
+) {
+    let restored = state
+        .sharded_store
+        .update(&original_order.order_id, &original_order.account_id, |prev| {
+            let mut next = prev.clone();
+            if next.status == crate::store::OrderStatus::AmendRequested {
+                next.status = status_from_str(fallback_status).unwrap_or(original_order.status);
+            }
+            next.qty = original_order.qty;
+            next.price = original_order.price;
+            next.last_update_at = report_at_ms;
+            next
+        })
+        .unwrap_or_else(|| original_order.clone());
+    append_and_publish_audit_event(
+        state,
+        "AmendRejected",
+        report_at_ms,
+        original_order.account_id.clone(),
+        original_order.order_id.clone(),
+        serde_json::json!({
+            "status": restored.status.as_str(),
+            "qty": restored.qty,
+            "price": restored.price,
+            "filledQty": restored.filled_qty,
+            "reason": reason,
+            "detail": detail,
+        }),
+    );
+    publish_order_status_sse(
+        state,
+        &original_order.order_id,
+        &original_order.account_id,
+        restored.status.as_str(),
+        restored.filled_qty,
+        report_at_ms,
+    );
+}
+
+fn status_from_str(value: &str) -> Option<crate::store::OrderStatus> {
+    match value.trim().to_uppercase().as_str() {
+        "ACCEPTED" => Some(crate::store::OrderStatus::Accepted),
+        "SENT" => Some(crate::store::OrderStatus::Sent),
+        "AMEND_REQUESTED" | "AMEND_PENDING" => Some(crate::store::OrderStatus::AmendRequested),
+        "CANCEL_REQUESTED" | "CANCEL_PENDING" => Some(crate::store::OrderStatus::CancelRequested),
+        "PARTIALLY_FILLED" => Some(crate::store::OrderStatus::PartiallyFilled),
+        "FILLED" => Some(crate::store::OrderStatus::Filled),
+        "CANCELED" => Some(crate::store::OrderStatus::Canceled),
+        "REJECTED" => Some(crate::store::OrderStatus::Rejected),
+        _ => None,
+    }
 }

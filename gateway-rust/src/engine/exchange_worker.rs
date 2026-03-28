@@ -47,6 +47,10 @@ impl ExecutionReportContext {
             bus_mode_outbox,
         }
     }
+
+    pub fn handle_report(&self, report: ExecutionReport) {
+        apply_execution_report(report, self);
+    }
 }
 
 /// キューから注文を取り出して Exchange に送信

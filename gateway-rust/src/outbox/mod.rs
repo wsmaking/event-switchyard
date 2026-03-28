@@ -4,6 +4,8 @@
 
 use crate::audit::AuditEvent;
 use crate::bus::{BusEvent, BusPublisher};
+use serde::Serialize;
+use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -118,8 +120,8 @@ impl OutboxWorker {
                         OUTBOX_LINES_READ.fetch_add(1, Ordering::Relaxed);
                         let next_offset = prev_offset + n as u64;
                         if let Ok(event) = serde_json::from_str::<AuditEvent>(line.trim()) {
-                            if let Some(bus_event) = to_bus_event(event) {
-                                if self.bus.publish_blocking(bus_event) {
+                            if let Some(bus_record) = to_bus_record(event, next_offset) {
+                                if publish_bus_record(&self.bus, bus_record) {
                                     offset = next_offset;
                                     progressed = true;
                                     OUTBOX_EVENTS_PUBLISHED.fetch_add(1, Ordering::Relaxed);
@@ -168,18 +170,128 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn to_bus_event(event: AuditEvent) -> Option<BusEvent> {
+fn to_bus_record(event: AuditEvent, next_offset: u64) -> Option<BusRecord> {
+    if bus_schema_version() >= 2 {
+        return to_bus_event_v2(event, next_offset);
+    }
+    to_bus_event_v1(event)
+}
+
+fn publish_bus_record(bus: &BusPublisher, record: BusRecord) -> bool {
+    match record {
+        BusRecord::V1(event) => bus.publish_blocking(event),
+        BusRecord::Raw { key, payload } => bus.publish_raw_blocking(&key, payload),
+    }
+}
+
+fn to_bus_event_v1(event: AuditEvent) -> Option<BusRecord> {
     match event.event_type.as_str() {
-        "OrderAccepted" | "AmendRequested" | "CancelRequested" | "ExecutionReport"
-        | "OrderUpdated" => Some(BusEvent {
+        "OrderAccepted" | "AmendRequested" | "AmendRejected" | "CancelRequested"
+        | "CancelRejected" | "ExecutionReport" | "OrderUpdated" => Some(BusRecord::V1(BusEvent {
             event_type: event.event_type,
             at: crate::bus::format_event_time(event.at),
             account_id: event.account_id,
             order_id: event.order_id,
             data: event.data,
-        }),
+        })),
         _ => None,
     }
+}
+
+fn to_bus_event_v2(event: AuditEvent, next_offset: u64) -> Option<BusRecord> {
+    match event.event_type.as_str() {
+        "OrderAccepted" | "AmendRequested" | "AmendRejected" | "CancelRequested"
+        | "CancelRejected" | "ExecutionReport" | "OrderUpdated" => {
+            let aggregate_id = event
+                .order_id
+                .clone()
+                .unwrap_or_else(|| event.account_id.clone());
+            let payload = BusEventV2 {
+                event_id: format!("evt-{}-{}", aggregate_id, next_offset),
+                event_type: event.event_type,
+                schema_version: 2,
+                source_system: "gateway-rust".to_string(),
+                aggregate_id,
+                aggregate_seq: next_offset,
+                occurred_at: crate::bus::format_event_time(event.at),
+                ingested_at: crate::bus::format_event_time(now_epoch_ms()),
+                account_id: event.account_id.clone(),
+                order_id: event.order_id.clone(),
+                venue_order_id: venue_order_id(&event.data),
+                correlation_id: correlation_id(&event.data),
+                causation_id: None,
+                data: event.data,
+            };
+            let key = payload
+                .order_id
+                .clone()
+                .unwrap_or_else(|| payload.account_id.clone());
+            let payload = match serde_json::to_vec(&payload) {
+                Ok(bytes) => bytes,
+                Err(_) => return None,
+            };
+            Some(BusRecord::Raw { key, payload })
+        }
+        _ => None,
+    }
+}
+
+fn bus_schema_version() -> u64 {
+    std::env::var("BUS_SCHEMA_VERSION")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2)
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn venue_order_id(data: &Value) -> Option<String> {
+    ["venueOrderId", "exchangeOrderId", "externalOrderId"]
+        .iter()
+        .find_map(|field| {
+            data.get(field)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn correlation_id(data: &Value) -> Option<String> {
+    ["correlationId", "clientOrderId", "idempotencyKey"]
+        .iter()
+        .find_map(|field| {
+            data.get(field)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+enum BusRecord {
+    V1(BusEvent),
+    Raw { key: String, payload: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BusEventV2 {
+    event_id: String,
+    event_type: String,
+    schema_version: u32,
+    source_system: String,
+    aggregate_id: String,
+    aggregate_seq: u64,
+    occurred_at: String,
+    ingested_at: String,
+    account_id: String,
+    order_id: Option<String>,
+    venue_order_id: Option<String>,
+    correlation_id: Option<String>,
+    causation_id: Option<String>,
+    data: Value,
 }
 
 fn read_offset(path: &Path) -> u64 {
@@ -289,9 +401,40 @@ mod tests {
             data: json!({"status":"FILLED"}),
         };
 
-        assert!(to_bus_event(accepted).is_some());
-        assert!(to_bus_event(amend).is_some());
-        assert!(to_bus_event(report).is_some());
+        assert!(to_bus_record(accepted, 10).is_some());
+        assert!(to_bus_record(amend, 20).is_some());
+        assert!(to_bus_record(report, 30).is_some());
+    }
+
+    #[test]
+    fn test_to_bus_event_v2_contains_contract_fields() {
+        unsafe {
+            std::env::set_var("BUS_SCHEMA_VERSION", "2");
+        }
+        let accepted = AuditEvent {
+            event_type: "OrderAccepted".to_string(),
+            at: 1_714_680_000_000,
+            account_id: "acct-1".to_string(),
+            order_id: Some("ord-1".to_string()),
+            data: json!({"symbol":"7203","side":"BUY","qty":100,"price":2800,"clientOrderId":"cli-1"}),
+        };
+
+        let record = to_bus_record(accepted, 123).expect("record");
+        match record {
+            BusRecord::Raw { key, payload } => {
+                let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+                assert_eq!(key, "ord-1");
+                assert_eq!(parsed["schemaVersion"], 2);
+                assert_eq!(parsed["eventType"], "OrderAccepted");
+                assert_eq!(parsed["aggregateId"], "ord-1");
+                assert_eq!(parsed["aggregateSeq"], 123);
+                assert_eq!(parsed["correlationId"], "cli-1");
+            }
+            BusRecord::V1(_) => panic!("expected v2 raw payload"),
+        }
+        unsafe {
+            std::env::remove_var("BUS_SCHEMA_VERSION");
+        }
     }
 
     #[test]
