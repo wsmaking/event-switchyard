@@ -9,5 +9,9 @@ public enum OrderStatus {
     CANCEL_PENDING,
     CANCELED,
     EXPIRED,
-    AMEND_PENDING
+    AMEND_PENDING;
+
+    public boolean isTerminal() {
+        return this == REJECTED || this == FILLED || this == CANCELED || this == EXPIRED;
+    }
 }

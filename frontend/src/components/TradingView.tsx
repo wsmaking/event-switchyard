@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import {
   useOrderFinalOut,
+  useOpsOverview,
+  useReplayGatewayAudit,
   useOrders,
   useResetDemo,
   useRunReplayScenario,
@@ -26,6 +28,7 @@ export function TradingView() {
   const submitOrder = useSubmitOrder();
   const resetDemo = useResetDemo();
   const runReplayScenario = useRunReplayScenario();
+  const replayGatewayAudit = useReplayGatewayAudit();
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // フォーム状態
@@ -150,6 +153,7 @@ export function TradingView() {
   const historyStats = summarizeHistory(historyPoints);
   const effectiveSelectedOrderId = selectedOrderId ?? orders?.[0]?.id ?? null;
   const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(effectiveSelectedOrderId);
+  const { data: opsOverview, isLoading: opsOverviewLoading } = useOpsOverview(effectiveSelectedOrderId);
 
   const statusTone = (status: OrderStatus) => {
     switch (status) {
@@ -208,6 +212,9 @@ export function TradingView() {
     'rounded-2xl border border-slate-800/70 bg-[color:var(--panel-strong)] shadow-[0_20px_60px_rgba(0,0,0,0.5)] backdrop-blur';
   const inputClass =
     'w-full rounded-md border border-slate-700/60 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40';
+
+  const formatEventTime = (value: number | null | undefined) =>
+    value ? new Date(value).toLocaleString('ja-JP') : '-';
 
   const MarketCard = ({ symbol: cardSymbol, label }: { symbol: string; label: string }) => {
     const { data: info } = useStockInfo(cardSymbol);
@@ -767,11 +774,20 @@ export function TradingView() {
         </div>
 
         <div className={`mt-6 ${panelClass} p-6 reveal reveal-delay-3`}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-slate-100">最終Out</h2>
-            <span className="text-xs text-slate-500">
-              {effectiveSelectedOrderId ? `Order: ${effectiveSelectedOrderId}` : '注文未選択'}
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">最終Out</h2>
+              <span className="text-xs text-slate-500">
+                {effectiveSelectedOrderId ? `Order: ${effectiveSelectedOrderId}` : '注文未選択'}
+              </span>
+            </div>
+            <button
+              onClick={() => replayGatewayAudit.mutate()}
+              disabled={replayGatewayAudit.isPending}
+              className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {replayGatewayAudit.isPending ? 'Gateway Audit Replay中...' : 'Gateway Audit Replay'}
+            </button>
           </div>
 
           {finalOutLoading ? (
@@ -936,6 +952,126 @@ export function TradingView() {
               注文を作成すると、その注文の最終Outをここで確認できます。
             </div>
           )}
+
+          <div className="mt-6 border-t border-slate-800/60 pt-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-100">Ops</h3>
+              <span className="text-xs text-slate-500">
+                intake / reconcile / ledger
+              </span>
+            </div>
+
+            {opsOverviewLoading ? (
+              <div className="mt-4 text-sm text-slate-500">Ops情報を読み込み中...</div>
+            ) : opsOverview ? (
+              <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">OMS Intake</div>
+                  {opsOverview.omsStats ? (
+                    <div className="mt-3 space-y-2 text-sm text-slate-300">
+                      <div>状態: {opsOverview.omsStats.state}</div>
+                      <div>処理件数: {opsOverview.omsStats.processed.toLocaleString()}</div>
+                      <div>重複: {opsOverview.omsStats.duplicates.toLocaleString()}</div>
+                      <div>孤児: {opsOverview.omsStats.orphans.toLocaleString()}</div>
+                      <div>Replay回数: {opsOverview.omsStats.replays.toLocaleString()}</div>
+                      <div>最終イベント: {formatEventTime(opsOverview.omsStats.lastEventAt)}</div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">OMS stats はありません。</div>
+                  )}
+                  {opsOverview.omsReconcile && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>open orders: {opsOverview.omsReconcile.openOrders.toLocaleString()}</div>
+                      <div>expected reserved: ¥{opsOverview.omsReconcile.expectedReservedAmount.toLocaleString()}</div>
+                      <div>actual reserved: ¥{opsOverview.omsReconcile.actualReservedAmount.toLocaleString()}</div>
+                      <div>gap: ¥{opsOverview.omsReconcile.reservedGapAmount.toLocaleString()}</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">BackOffice Intake</div>
+                  {opsOverview.backOfficeStats ? (
+                    <div className="mt-3 space-y-2 text-sm text-slate-300">
+                      <div>状態: {opsOverview.backOfficeStats.state}</div>
+                      <div>処理件数: {opsOverview.backOfficeStats.processed.toLocaleString()}</div>
+                      <div>Ledger件数: {opsOverview.backOfficeStats.ledgerEntryCount.toLocaleString()}</div>
+                      <div>重複: {opsOverview.backOfficeStats.duplicates.toLocaleString()}</div>
+                      <div>孤児: {opsOverview.backOfficeStats.orphans.toLocaleString()}</div>
+                      <div>最終イベント: {formatEventTime(opsOverview.backOfficeStats.lastEventAt)}</div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">BackOffice stats はありません。</div>
+                  )}
+                  {opsOverview.backOfficeReconcile && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>cash: ¥{opsOverview.backOfficeReconcile.cashBalance.toLocaleString()}</div>
+                      <div>expected cash: ¥{opsOverview.backOfficeReconcile.expectedCashBalance.toLocaleString()}</div>
+                      <div>reserved: ¥{opsOverview.backOfficeReconcile.reservedBuyingPower.toLocaleString()}</div>
+                      <div>expected reserved: ¥{opsOverview.backOfficeReconcile.expectedReservedBuyingPower.toLocaleString()}</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Issues</div>
+                  <div className="mt-3 space-y-2">
+                    {[
+                      ...(opsOverview.omsReconcile?.issues ?? []),
+                      ...(opsOverview.backOfficeReconcile?.issues ?? []),
+                    ].length > 0 ? (
+                      [
+                        ...(opsOverview.omsReconcile?.issues ?? []),
+                        ...(opsOverview.backOfficeReconcile?.issues ?? []),
+                      ].map((issue) => (
+                        <div key={issue} className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3 text-xs text-rose-100">
+                          {issue}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                        issue はありません。
+                      </div>
+                    )}
+                  </div>
+                  {replayGatewayAudit.isSuccess && replayGatewayAudit.data && (
+                    <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+                      OMS replay: {replayGatewayAudit.data.oms?.status ?? 'N/A'} / BackOffice replay: {replayGatewayAudit.data.backOffice?.status ?? 'N/A'}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Ledger</div>
+                  {opsOverview.ledgerEntries.length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {opsOverview.ledgerEntries.map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-slate-100">{entry.eventType}</div>
+                            <div className="text-[11px] text-slate-500">
+                              {new Date(entry.eventAt).toLocaleTimeString('ja-JP')}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-400">{entry.detail}</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-500 xl:grid-cols-4">
+                            <div>qty delta: {entry.quantityDelta.toLocaleString()}</div>
+                            <div>cash delta: ¥{entry.cashDelta.toLocaleString()}</div>
+                            <div>reserve delta: ¥{entry.reservedBuyingPowerDelta.toLocaleString()}</div>
+                            <div>realized pnl delta: ¥{entry.realizedPnlDelta.toLocaleString()}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">ledger はまだありません。</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 text-sm text-slate-500">Ops情報を取得できませんでした。</div>
+            )}
+          </div>
         </div>
       </div>
     </div>

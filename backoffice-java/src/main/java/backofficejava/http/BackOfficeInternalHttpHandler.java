@@ -4,6 +4,8 @@ import backofficejava.account.AccountOverviewReadModel;
 import backofficejava.account.AccountOverviewView;
 import backofficejava.account.FillReadModel;
 import backofficejava.account.FillView;
+import backofficejava.account.LedgerReadModel;
+import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
 import com.sun.net.httpserver.HttpExchange;
@@ -14,16 +16,20 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
     public BackOfficeInternalHttpHandler(
         AccountOverviewReadModel accountOverviewReadModel,
         PositionReadModel positionReadModel,
-        FillReadModel fillReadModel
+        FillReadModel fillReadModel,
+        OrderProjectionStateStore orderProjectionStateStore,
+        LedgerReadModel ledgerReadModel
     ) {
-        super(exchange -> route(exchange, accountOverviewReadModel, positionReadModel, fillReadModel));
+        super(exchange -> route(exchange, accountOverviewReadModel, positionReadModel, fillReadModel, orderProjectionStateStore, ledgerReadModel));
     }
 
     private static JsonResponse route(
         HttpExchange exchange,
         AccountOverviewReadModel accountOverviewReadModel,
         PositionReadModel positionReadModel,
-        FillReadModel fillReadModel
+        FillReadModel fillReadModel,
+        OrderProjectionStateStore orderProjectionStateStore,
+        LedgerReadModel ledgerReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -45,6 +51,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
             fillReadModel.reset();
+            orderProjectionStateStore.reset();
+            ledgerReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

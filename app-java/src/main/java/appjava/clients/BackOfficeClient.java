@@ -107,6 +107,72 @@ public final class BackOfficeClient {
         postJson("/internal/fills/replace", new ReplaceFillsRequest(orderId, fills));
     }
 
+    public BackOfficeStats fetchStats() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/stats"))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), BackOfficeStats.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public BackOfficeReconcile fetchReconcile(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/reconcile?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), BackOfficeReconcile.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public List<LedgerEntry> fetchLedger(String requestedAccountId, String orderId, int limit) {
+        try {
+            StringBuilder uri = new StringBuilder(baseUrl + "/ledger?accountId=" + requestedAccountId + "&limit=" + limit);
+            if (orderId != null && !orderId.isBlank()) {
+                uri.append("&orderId=").append(orderId);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri.toString()))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                LedgerResponse parsed = objectMapper.readValue(response.body(), LedgerResponse.class);
+                return parsed.entries == null ? List.of() : parsed.entries;
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
+    public ReplayResult replayGatewayAudit(boolean resetState) {
+        return postJsonWithResponse("/internal/audit/replay", new ReplayRequest(resetState), ReplayResult.class);
+    }
+
     private void postNoBody(String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -138,6 +204,26 @@ public final class BackOfficeClient {
         }
     }
 
+    private <T> T postJsonWithResponse(String path, Object payload, Class<T> responseType) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                return objectMapper.readValue(response.body(), responseType);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public String accountId() {
         return accountId;
     }
@@ -160,5 +246,72 @@ public final class BackOfficeClient {
     }
 
     public record ReplaceFillsRequest(String orderId, List<FillView> fills) {
+    }
+
+    public record BackOfficeStats(
+        boolean enabled,
+        String state,
+        String auditPath,
+        String offsetPath,
+        String startMode,
+        String startedAt,
+        long processed,
+        long skipped,
+        long duplicates,
+        long orphans,
+        long replays,
+        Long lastEventAt,
+        long currentOffset,
+        long currentAuditSize,
+        int ledgerEntryCount
+    ) {
+    }
+
+    public record BackOfficeReconcile(
+        String accountId,
+        long cashBalance,
+        long availableBuyingPower,
+        long reservedBuyingPower,
+        long realizedPnl,
+        long expectedCashBalance,
+        long expectedReservedBuyingPower,
+        long expectedRealizedPnl,
+        List<BackOfficePosition> positions,
+        List<String> issues
+    ) {
+    }
+
+    public record LedgerEntry(
+        String entryId,
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String symbol,
+        String side,
+        long quantityDelta,
+        long cashDelta,
+        long reservedBuyingPowerDelta,
+        long realizedPnlDelta,
+        String detail,
+        long eventAt,
+        String source
+    ) {
+    }
+
+    public record LedgerResponse(String accountId, List<LedgerEntry> entries) {
+    }
+
+    public record ReplayRequest(boolean resetState) {
+    }
+
+    public record ReplayResult(
+        String status,
+        long offset,
+        long processed,
+        long skipped,
+        long duplicates,
+        long orphans
+    ) {
     }
 }

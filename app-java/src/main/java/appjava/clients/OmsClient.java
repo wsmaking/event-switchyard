@@ -145,6 +145,46 @@ public final class OmsClient {
         }
     }
 
+    public OmsStats fetchStats() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/stats"))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), OmsStats.class);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public OmsReconcile fetchReconcile(String accountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/reconcile?accountId=" + accountId))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), OmsReconcile.class);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public ReplayResult replayGatewayAudit(boolean resetState) {
+        return postJsonWithResponse("/internal/audit/replay", new ReplayRequest(resetState), ReplayResult.class);
+    }
+
     private void postJson(String path, Object payload) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -160,9 +200,70 @@ public final class OmsClient {
         }
     }
 
+    private <T> T postJsonWithResponse(String path, Object payload, Class<T> responseType) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path))
+                .timeout(Duration.ofSeconds(3))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                return objectMapper.readValue(response.body(), responseType);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public record ReplaceOrderEventsRequest(String orderId, List<OrderEventView> events) {
     }
 
     public record ReplaceReservationsRequest(String accountId, List<ReservationView> reservations) {
+    }
+
+    public record OmsStats(
+        boolean enabled,
+        String state,
+        String auditPath,
+        String offsetPath,
+        String startMode,
+        String startedAt,
+        long processed,
+        long skipped,
+        long duplicates,
+        long orphans,
+        long replays,
+        Long lastEventAt,
+        long currentOffset,
+        long currentAuditSize
+    ) {
+    }
+
+    public record OmsReconcile(
+        String accountId,
+        int totalOrders,
+        int openOrders,
+        long expectedReservedAmount,
+        long actualReservedAmount,
+        long reservedGapAmount,
+        List<String> issues
+    ) {
+    }
+
+    public record ReplayRequest(boolean resetState) {
+    }
+
+    public record ReplayResult(
+        String status,
+        long offset,
+        long processed,
+        long skipped,
+        long duplicates,
+        long orphans
+    ) {
     }
 }

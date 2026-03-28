@@ -159,6 +159,115 @@ export interface RawEvent {
   eventRef: string;
 }
 
+export interface OmsStats {
+  enabled: boolean;
+  state: string;
+  auditPath: string;
+  offsetPath: string;
+  startMode: string;
+  startedAt: string;
+  processed: number;
+  skipped: number;
+  duplicates: number;
+  orphans: number;
+  replays: number;
+  lastEventAt: number | null;
+  currentOffset: number;
+  currentAuditSize: number;
+}
+
+export interface OmsReconcile {
+  accountId: string | null;
+  totalOrders: number;
+  openOrders: number;
+  expectedReservedAmount: number;
+  actualReservedAmount: number;
+  reservedGapAmount: number;
+  issues: string[];
+}
+
+export interface BackOfficeStats {
+  enabled: boolean;
+  state: string;
+  auditPath: string;
+  offsetPath: string;
+  startMode: string;
+  startedAt: string;
+  processed: number;
+  skipped: number;
+  duplicates: number;
+  orphans: number;
+  replays: number;
+  lastEventAt: number | null;
+  currentOffset: number;
+  currentAuditSize: number;
+  ledgerEntryCount: number;
+}
+
+export interface LedgerEntry {
+  entryId: string;
+  eventRef: string;
+  accountId: string;
+  orderId: string;
+  eventType: string;
+  symbol: string;
+  side: string;
+  quantityDelta: number;
+  cashDelta: number;
+  reservedBuyingPowerDelta: number;
+  realizedPnlDelta: number;
+  detail: string;
+  eventAt: number;
+  source: string;
+}
+
+export interface BackOfficeReconcile {
+  accountId: string;
+  cashBalance: number;
+  availableBuyingPower: number;
+  reservedBuyingPower: number;
+  realizedPnl: number;
+  expectedCashBalance: number;
+  expectedReservedBuyingPower: number;
+  expectedRealizedPnl: number;
+  positions: Array<{
+    accountId: string;
+    symbol: string;
+    netQty: number;
+    avgPrice: number;
+  }>;
+  issues: string[];
+}
+
+export interface OpsOverview {
+  accountId: string;
+  orderId: string | null;
+  omsStats: OmsStats | null;
+  omsReconcile: OmsReconcile | null;
+  backOfficeStats: BackOfficeStats | null;
+  backOfficeReconcile: BackOfficeReconcile | null;
+  ledgerEntries: LedgerEntry[];
+}
+
+export interface AuditReplayResult {
+  oms: {
+    status: string;
+    offset: number;
+    processed: number;
+    skipped: number;
+    duplicates: number;
+    orphans: number;
+  } | null;
+  backOffice: {
+    status: string;
+    offset: number;
+    processed: number;
+    skipped: number;
+    duplicates: number;
+    orphans: number;
+  } | null;
+}
+
 export interface StrategyConfig {
   enabled: boolean;
   symbols: string[];

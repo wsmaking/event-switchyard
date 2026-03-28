@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import type { Order, OrderFinalOut, OrderRequest } from '../types/trading';
+import type { AuditReplayResult, OpsOverview, Order, OrderFinalOut, OrderRequest } from '../types/trading';
 
 const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
@@ -69,6 +69,33 @@ async function runReplayScenario(input: { scenario: string; request: OrderReques
   return response.json();
 }
 
+async function fetchOpsOverview(orderId: string | null): Promise<OpsOverview> {
+  const query = orderId ? `?orderId=${encodeURIComponent(orderId)}` : '';
+  const response = await fetch(`${API_BASE_URL}/api/ops/overview${query}`);
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function replayGatewayAudit(): Promise<AuditReplayResult> {
+  const response = await fetch(`${API_BASE_URL}/api/ops/audit/replay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ resetState: true }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 export function useOrders() {
   return useQuery({
     queryKey: ['orders'],
@@ -98,6 +125,14 @@ export function useOrderFinalOut(orderId: string | null) {
   });
 }
 
+export function useOpsOverview(orderId: string | null) {
+  return useQuery({
+    queryKey: ['opsOverview', orderId],
+    queryFn: () => fetchOpsOverview(orderId),
+    refetchInterval: 3000,
+  });
+}
+
 export function useResetDemo() {
   const queryClient = useQueryClient();
 
@@ -120,6 +155,20 @@ export function useRunReplayScenario() {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       queryClient.invalidateQueries({ queryKey: ['positions'] });
       queryClient.invalidateQueries({ queryKey: ['orderFinalOut'] });
+    },
+  });
+}
+
+export function useReplayGatewayAudit() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: replayGatewayAudit,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['positions'] });
+      queryClient.invalidateQueries({ queryKey: ['orderFinalOut'] });
+      queryClient.invalidateQueries({ queryKey: ['opsOverview'] });
     },
   });
 }

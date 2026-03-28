@@ -31,14 +31,17 @@
 - `final out` での order / timeline / reservation / fills / balance delta / positions / raw event ref 表示
 - OMS / BackOffice の file snapshot による restart 復元
 - `scripts/ops/run_java_replay_stack.sh` などの起動 / 停止 / smoke 導線
+- `gateway-rust` の `audit.log` を Java OMS / BackOffice が tail する intake
+- `oms-java:/stats /reconcile` `backoffice-java:/stats /reconcile /ledger`
+- `app-java:/api/ops/overview` `app-java:/api/ops/audit/replay`
+- frontend からの ops 可視化と audit replay 起動
 
 一方で、まだ未完なのは次である。
 
 - `gateway-rust` outbox / Kafka からの Java 側 event intake
-- sequence / dedup / orphan pending / DLQ
-- reconcile / ops API
+- sequence / orphan pending / DLQ の本格化
 - UI の SSE / WebSocket 反映
-- replay scenario ではなく実 event で OMS / BackOffice を収束させる本線
+- audit log ではなく bus event / exchange truth で OMS / BackOffice を収束させる本線
 
 ## 前提
 
