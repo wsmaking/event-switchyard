@@ -22,4 +22,15 @@ final class MobileLearningServiceTest {
         MobileProgressStore.CardProgress progress = new MobileProgressStore.CardProgress("card", false, true, 3, 3, 0, 1_000L, 10_000L);
         assertFalse(MobileLearningService.isDue(progress, 2_000L));
     }
+
+    @Test
+    void nullDrillProgressIsDue() {
+        assertTrue(MobileLearningService.isDrillDue(null, 1_000L));
+    }
+
+    @Test
+    void futureDrillProgressIsNotDue() {
+        MobileProgressStore.DrillProgress progress = new MobileProgressStore.DrillProgress("drill", 2, 1_000L, 2, 10_000L, null, null);
+        assertFalse(MobileLearningService.isDrillDue(progress, 2_000L));
+    }
 }

@@ -74,6 +74,29 @@ public final class MobileProgressStore {
         return toSnapshot(state);
     }
 
+    public synchronized ProgressSnapshot applyDrillAttempt(
+        String drillId,
+        int clarityScore,
+        String note,
+        String audioDataUrl
+    ) {
+        PersistedDrillProgress drill = state.drills.computeIfAbsent(drillId, PersistedDrillProgress::new);
+        long now = System.currentTimeMillis();
+        drill.attemptCount += 1;
+        drill.lastAttemptAt = now;
+        drill.lastClarityScore = clarityScore;
+        drill.lastNote = note;
+        drill.audioDataUrl = audioDataUrl;
+        drill.nextReviewAt = switch (clarityScore) {
+            case 2 -> now + 7L * 24L * 60L * 60L * 1000L;
+            case 1 -> now + 24L * 60L * 60L * 1000L;
+            default -> now;
+        };
+        state.updatedAt = now;
+        persist();
+        return toSnapshot(state);
+    }
+
     private PersistedProgress load() {
         try {
             Files.createDirectories(stateFile.getParent());
@@ -82,6 +105,9 @@ public final class MobileProgressStore {
                 loaded.accountId = loaded.accountId == null || loaded.accountId.isBlank() ? accountId : loaded.accountId;
                 if (loaded.cards == null) {
                     loaded.cards = new LinkedHashMap<>();
+                }
+                if (loaded.drills == null) {
+                    loaded.drills = new LinkedHashMap<>();
                 }
                 if (loaded.anchor == null) {
                     loaded.anchor = new LearningAnchor("/mobile", null, null, 0L);
@@ -95,6 +121,7 @@ public final class MobileProgressStore {
         fresh.updatedAt = System.currentTimeMillis();
         fresh.anchor = new LearningAnchor("/mobile", null, null, 0L);
         fresh.cards = new LinkedHashMap<>();
+        fresh.drills = new LinkedHashMap<>();
         return fresh;
     }
 
@@ -123,7 +150,20 @@ public final class MobileProgressStore {
                 card.nextReviewAt
             ));
         }
-        return new ProgressSnapshot(state.accountId, state.updatedAt, state.anchor, cards);
+        Map<String, DrillProgress> drills = new LinkedHashMap<>();
+        for (Map.Entry<String, PersistedDrillProgress> entry : state.drills.entrySet()) {
+            PersistedDrillProgress drill = entry.getValue();
+            drills.put(entry.getKey(), new DrillProgress(
+                drill.drillId,
+                drill.attemptCount,
+                drill.lastAttemptAt,
+                drill.lastClarityScore,
+                drill.nextReviewAt,
+                drill.lastNote,
+                drill.audioDataUrl
+            ));
+        }
+        return new ProgressSnapshot(state.accountId, state.updatedAt, state.anchor, cards, drills);
     }
 
     public record LearningAnchor(String route, String orderId, String cardId, long updatedAt) {
@@ -145,7 +185,19 @@ public final class MobileProgressStore {
         String accountId,
         long updatedAt,
         LearningAnchor anchor,
-        Map<String, CardProgress> cards
+        Map<String, CardProgress> cards,
+        Map<String, DrillProgress> drills
+    ) {
+    }
+
+    public record DrillProgress(
+        String drillId,
+        int attemptCount,
+        long lastAttemptAt,
+        int lastClarityScore,
+        long nextReviewAt,
+        String lastNote,
+        String audioDataUrl
     ) {
     }
 
@@ -154,6 +206,7 @@ public final class MobileProgressStore {
         public long updatedAt;
         public LearningAnchor anchor;
         public Map<String, PersistedCardProgress> cards = new LinkedHashMap<>();
+        public Map<String, PersistedDrillProgress> drills = new LinkedHashMap<>();
     }
 
     static final class PersistedCardProgress {
@@ -171,6 +224,23 @@ public final class MobileProgressStore {
 
         PersistedCardProgress(String cardId) {
             this.cardId = cardId;
+        }
+    }
+
+    static final class PersistedDrillProgress {
+        public String drillId;
+        public int attemptCount;
+        public long lastAttemptAt;
+        public int lastClarityScore;
+        public long nextReviewAt;
+        public String lastNote;
+        public String audioDataUrl;
+
+        PersistedDrillProgress() {
+        }
+
+        PersistedDrillProgress(String drillId) {
+            this.drillId = drillId;
         }
     }
 }

@@ -29,6 +29,8 @@ public final class MobileLearningService {
     private final MobileProgressStore progressStore;
     private final List<LearningCard> cards;
     private final Map<String, LearningCard> cardIndex;
+    private final List<ExplanationDrill> drills;
+    private final Map<String, ExplanationDrill> drillIndex;
     private final List<RiskScenario> riskScenarios;
 
     public MobileLearningService(
@@ -46,6 +48,9 @@ public final class MobileLearningService {
         this.cards = buildCards();
         this.cardIndex = new LinkedHashMap<>();
         this.cards.forEach(card -> cardIndex.put(card.id(), card));
+        this.drills = buildDrills();
+        this.drillIndex = new LinkedHashMap<>();
+        this.drills.forEach(drill -> drillIndex.put(drill.id(), drill));
         this.riskScenarios = buildRiskScenarios();
     }
 
@@ -56,6 +61,7 @@ public final class MobileLearningService {
             .toList();
         MobileProgressStore.ProgressSnapshot progress = progressStore.snapshot();
         List<CardSummary> cardSummaries = summarizeCards(progress);
+        List<DrillSummary> drillSummaries = summarizeDrills(progress);
         List<CardSummary> dueCards = cardSummaries.stream()
             .filter(CardSummary::due)
             .limit(4)
@@ -111,9 +117,10 @@ public final class MobileLearningService {
                 new QuickAction("台帳フローを見る", "/mobile/ledger", "台帳"),
                 new QuickAction("障害導線を見る", "/mobile/architecture", "運用"),
                 new QuickAction("設計カードに入る", "/mobile/cards", "設計"),
-                new QuickAction("risk sandbox を開く", "/mobile/risk", "リスク")
+                new QuickAction("risk sandbox を開く", "/mobile/risk", "リスク"),
+                new QuickAction("説明ドリルを開く", "/mobile/drills", "反復")
             ),
-            progressSummary(progress, cardSummaries)
+            progressSummary(progress, cardSummaries, drillSummaries)
         );
     }
 
@@ -136,6 +143,7 @@ public final class MobileLearningService {
             progress.updatedAt(),
             progress.anchor(),
             (int) cards.stream().filter(CardSummary::due).count(),
+            (int) summarizeDrills(progress).stream().filter(DrillSummary::due).count(),
             (int) cards.stream().filter(CardSummary::bookmarked).count(),
             (int) cards.stream().filter(card -> card.progress().completed()).count(),
             cards
@@ -168,9 +176,41 @@ public final class MobileLearningService {
             snapshot.updatedAt(),
             snapshot.anchor(),
             (int) cards.stream().filter(CardSummary::due).count(),
+            (int) summarizeDrills(snapshot).stream().filter(DrillSummary::due).count(),
             (int) cards.stream().filter(CardSummary::bookmarked).count(),
             (int) cards.stream().filter(card -> card.progress().completed()).count(),
             cards
+        );
+    }
+
+    public List<DrillSummary> listDrills() {
+        return summarizeDrills(progressStore.snapshot());
+    }
+
+    public DrillDetail getDrill(String drillId) {
+        ExplanationDrill drill = Optional.ofNullable(drillIndex.get(drillId))
+            .orElseThrow(() -> new IllegalArgumentException("drill_not_found:" + drillId));
+        MobileProgressStore.DrillProgress progress = progressStore.snapshot().drills().get(drillId);
+        return new DrillDetail(drill, toDrillProgress(progress, drill));
+    }
+
+    public DrillProgressResponse applyDrillAttempt(DrillAttemptRequest request) {
+        if (request == null || request.drillId() == null || request.drillId().isBlank()) {
+            throw new IllegalArgumentException("drill_id_required");
+        }
+        int clarityScore = request.clarityScore() == null ? 1 : Math.max(0, Math.min(2, request.clarityScore()));
+        MobileProgressStore.ProgressSnapshot snapshot = progressStore.applyDrillAttempt(
+            request.drillId(),
+            clarityScore,
+            blankToNull(request.note()),
+            blankToNull(request.audioDataUrl())
+        );
+        List<DrillSummary> drills = summarizeDrills(snapshot);
+        return new DrillProgressResponse(
+            snapshot.accountId(),
+            snapshot.updatedAt(),
+            (int) drills.stream().filter(DrillSummary::due).count(),
+            drills
         );
     }
 
@@ -203,11 +243,75 @@ public final class MobileLearningService {
         );
     }
 
+    public OptionEvaluationResponse evaluateOption(OptionEvaluateRequest request) {
+        String symbol = blankToNull(request == null ? null : request.symbol());
+        String resolvedSymbol = symbol == null ? "7203" : symbol;
+        double spot = request != null && request.spotPrice() != null
+            ? request.spotPrice()
+            : marketDataService.getCurrentPrice(resolvedSymbol);
+        double strike = request != null && request.strikePrice() != null
+            ? request.strikePrice()
+            : round2(spot);
+        double volatility = Math.max(0.01, (request != null && request.volatilityPercent() != null ? request.volatilityPercent() : 24.0) / 100.0);
+        double rate = (request != null && request.ratePercent() != null ? request.ratePercent() : 0.5) / 100.0;
+        int maturityDays = Math.max(1, request != null && request.maturityDays() != null ? request.maturityDays() : 30);
+        int contracts = Math.max(1, request != null && request.contracts() != null ? request.contracts() : 1);
+        boolean call = !"PUT".equalsIgnoreCase(request == null ? null : request.optionType());
+        double t = maturityDays / 365.0;
+        double sqrtT = Math.sqrt(t);
+        double d1 = (Math.log(spot / strike) + (rate + 0.5 * volatility * volatility) * t) / (volatility * sqrtT);
+        double d2 = d1 - volatility * sqrtT;
+        double nd1 = cumulativeNormal(call ? d1 : -d1);
+        double nd2 = cumulativeNormal(call ? d2 : -d2);
+        double discountedStrike = strike * Math.exp(-rate * t);
+        double optionPrice = call
+            ? spot * cumulativeNormal(d1) - discountedStrike * cumulativeNormal(d2)
+            : discountedStrike * cumulativeNormal(-d2) - spot * cumulativeNormal(-d1);
+        double delta = call ? cumulativeNormal(d1) : cumulativeNormal(d1) - 1.0;
+        double gamma = normalDensity(d1) / (spot * volatility * sqrtT);
+        double vega = spot * normalDensity(d1) * sqrtT / 100.0;
+        double theta = ((-spot * normalDensity(d1) * volatility) / (2.0 * sqrtT)
+            - (call ? 1.0 : -1.0) * rate * discountedStrike * (call ? cumulativeNormal(d2) : cumulativeNormal(-d2))) / 365.0;
+        List<OptionPayoffPoint> payoffCurve = buildOptionPayoffCurve(call, strike, optionPrice, spot, contracts);
+        return new OptionEvaluationResponse(
+            resolvedSymbol,
+            safeName(resolvedSymbol),
+            call ? "CALL" : "PUT",
+            round2(spot),
+            round2(strike),
+            round2(volatility * 100.0),
+            round2(rate * 100.0),
+            maturityDays,
+            contracts,
+            round2(optionPrice),
+            round2(optionPrice * contracts),
+            new Greeks(
+                round4(delta),
+                round4(gamma),
+                round4(vega),
+                round4(theta)
+            ),
+            payoffCurve,
+            List.of(
+                "Black-Scholes の連続時間前提",
+                "lognormal、一定ボラ、一定金利の簡易モデル",
+                "配当、スキュー、流動性、早期行使は未考慮"
+            )
+        );
+    }
+
     static boolean isDue(MobileProgressStore.CardProgress progress, long now) {
         if (progress == null) {
             return true;
         }
         return !progress.completed() || progress.nextReviewAt() <= now;
+    }
+
+    static boolean isDrillDue(MobileProgressStore.DrillProgress progress, long now) {
+        if (progress == null) {
+            return true;
+        }
+        return progress.nextReviewAt() <= now;
     }
 
     private MainlineStatus buildMainlineStatus(
@@ -310,12 +414,52 @@ public final class MobileLearningService {
         );
     }
 
-    private ProgressSummary progressSummary(MobileProgressStore.ProgressSnapshot progress, List<CardSummary> cards) {
+    private ProgressSummary progressSummary(
+        MobileProgressStore.ProgressSnapshot progress,
+        List<CardSummary> cards,
+        List<DrillSummary> drills
+    ) {
         return new ProgressSummary(
             progress.anchor(),
             (int) cards.stream().filter(CardSummary::due).count(),
+            (int) drills.stream().filter(DrillSummary::due).count(),
             (int) cards.stream().filter(CardSummary::bookmarked).count(),
             (int) cards.stream().filter(card -> card.progress().completed()).count()
+        );
+    }
+
+    private List<DrillSummary> summarizeDrills(MobileProgressStore.ProgressSnapshot progress) {
+        long now = System.currentTimeMillis();
+        return drills.stream()
+            .map(drill -> {
+                MobileProgressStore.DrillProgress current = progress.drills().get(drill.id());
+                DrillProgress summary = toDrillProgress(current, drill);
+                return new DrillSummary(
+                    drill.id(),
+                    drill.title(),
+                    drill.category(),
+                    summary.attemptCount() == 0 || isDrillDue(current, now),
+                    summary
+                );
+            })
+            .sorted(Comparator
+                .comparing(DrillSummary::due).reversed()
+                .thenComparing(summary -> summary.progress().nextReviewAt()))
+            .toList();
+    }
+
+    private static DrillProgress toDrillProgress(MobileProgressStore.DrillProgress progress, ExplanationDrill drill) {
+        if (progress == null) {
+            return new DrillProgress(drill.id(), 0, 0L, 0, 0L, null, null);
+        }
+        return new DrillProgress(
+            progress.drillId(),
+            progress.attemptCount(),
+            progress.lastAttemptAt(),
+            progress.lastClarityScore(),
+            progress.nextReviewAt(),
+            progress.lastNote(),
+            progress.audioDataUrl()
         );
     }
 
@@ -443,6 +587,39 @@ public final class MobileLearningService {
         );
     }
 
+    private static List<OptionPayoffPoint> buildOptionPayoffCurve(
+        boolean call,
+        double strike,
+        double premium,
+        double spot,
+        int contracts
+    ) {
+        List<OptionPayoffPoint> points = new ArrayList<>();
+        for (int step = -4; step <= 4; step++) {
+            double underlying = round2(spot * (1.0 + (step * 0.08)));
+            double intrinsic = call ? Math.max(0.0, underlying - strike) : Math.max(0.0, strike - underlying);
+            double payoff = round2((intrinsic - premium) * contracts);
+            points.add(new OptionPayoffPoint(underlying, payoff));
+        }
+        return points;
+    }
+
+    private static double cumulativeNormal(double value) {
+        return 0.5 * (1.0 + erf(value / Math.sqrt(2.0)));
+    }
+
+    private static double normalDensity(double value) {
+        return Math.exp(-0.5 * value * value) / Math.sqrt(2.0 * Math.PI);
+    }
+
+    private static double erf(double value) {
+        double sign = Math.signum(value);
+        double abs = Math.abs(value);
+        double t = 1.0 / (1.0 + 0.3275911 * abs);
+        double polynomial = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+        return sign * (1.0 - polynomial * Math.exp(-abs * abs));
+    }
+
     private RiskScenario resolveRiskScenario(RiskEvaluationRequest request) {
         if (request != null && request.customShockPercent() != null) {
             String targetSymbol = blankToNull(request.targetSymbol());
@@ -514,6 +691,10 @@ public final class MobileLearningService {
         return Math.round(value * 100.0) / 100.0;
     }
 
+    private static double round4(double value) {
+        return Math.round(value * 10_000.0) / 10_000.0;
+    }
+
     private static List<LearningCard> buildCards() {
         List<LearningCard> built = new ArrayList<>(List.of(
             new LearningCard(
@@ -538,7 +719,7 @@ public final class MobileLearningService {
                 "medium",
                 "reservation をそのまま margin と呼ばない理由は何か。",
                 "reservation は注文拘束。margin はポートフォリオ全体のリスク前提を使う別物。",
-                "この repo の reservation は OMS が注文受理時に買付余力を拘束する仕組みであり、portfolio margin のように相関やボラを用いた証拠金計算ではない。面接では、reservation は operational control、margin は risk model と切り分けて話す必要がある。",
+                "この repo の reservation は OMS が注文受理時に買付余力を拘束する仕組みであり、portfolio margin のように相関やボラを用いた証拠金計算ではない。学習時も、reservation は operational control、margin は risk model と切り分けて捉える必要がある。",
                 List.of("/mobile/ledger", "/mobile/risk"),
                 List.of(
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java",
@@ -657,7 +838,7 @@ public final class MobileLearningService {
                 "easy",
                 "この mobile risk sandbox の数字を本番 risk と同一視してはいけない理由は何か。",
                 "相関、流動性、ボラ、保有期間、信頼水準を省略しているから。",
-                "この risk sandbox はポジションと現在価格に shock をかける教育用の簡易モデルであり、VaR engine ではない。面接では、数字よりも前提と限界を説明できることが重要。",
+                "この risk sandbox はポジションと現在価格に shock をかける教育用の簡易モデルであり、VaR engine ではない。数字の大小だけでなく、前提と限界を説明できることが重要。",
                 List.of("/mobile/risk"),
                 List.of(
                     "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
@@ -666,6 +847,7 @@ public final class MobileLearningService {
             )
         ));
         built.addAll(buildExtendedCards());
+        built.addAll(buildLongHorizonCards());
         return List.copyOf(built);
     }
 
@@ -678,7 +860,7 @@ public final class MobileLearningService {
                 "medium",
                 "注文 API の idempotency はどこまで保証し、何を保証しないのか。",
                 "submit 境界で二重送信を抑止するが、projection の順序保証とは別問題。",
-                "idempotency key は client retry や UI 二重送信への防波堤になるが、aggregateSeq や downstream replay の整合とは役割が違う。面接では duplicate suppression と ordering / exactly-once を混同しないことが重要。",
+                "idempotency key は client retry や UI 二重送信への防波堤になるが、aggregateSeq や downstream replay の整合とは役割が違う。duplicate suppression と ordering / exactly-once を混同しないことが重要。",
                 List.of("/mobile/orders", "/mobile/architecture"),
                 List.of(
                     "/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/server/http/orders/classic.rs",
@@ -824,6 +1006,113 @@ public final class MobileLearningService {
         );
     }
 
+    private static List<LearningCard> buildLongHorizonCards() {
+        return List.of(
+            new LearningCard(
+                "option-payoff-shape",
+                "option payoff の形をどう読むか",
+                "デリバティブ",
+                "medium",
+                "call / put の payoff curve を見たとき、最初に何を確認するべきか。",
+                "損益の非線形性、premium、break-even、水準ごとの傾き。",
+                "option payoff は現物と違って損益が非線形に変わる。strike と premium の位置関係、break-even、spot が動いたときの傾きがどこで変わるかを先に押さえると、hedge intuition を作りやすい。",
+                List.of("/mobile/risk"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
+                ),
+                List.of("option payoff", "break-even", "non-linearity")
+            ),
+            new LearningCard(
+                "greeks-vs-stress",
+                "Greeks と stress の役割差",
+                "デリバティブ",
+                "medium",
+                "delta / gamma / vega / theta と stress scenario はどう使い分けるべきか。",
+                "Greeks は局所感度、stress は大きな動きの物語。",
+                "Greeks は小さな価格変化に対する局所感度を示し、stress scenario は大きな相場変動や regime change をざっくり確認する。両者を混同せず、局所近似とシナリオ説明を分けて使うことが重要。",
+                List.of("/mobile/risk"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
+                ),
+                List.of("Greeks", "stress", "local sensitivity")
+            ),
+            new LearningCard(
+                "fx-risk-driver",
+                "FX の主要 risk driver",
+                "クロスアセット",
+                "medium",
+                "cash equities と比べたとき、FX では何が risk driver になるか。",
+                "spot、carry、funding、settlement cut-off、通貨ペア相関。",
+                "FX では価格だけでなく、金利差に基づく carry、funding、通貨ペアごとの settlement cut-off、複数通貨 exposure の相殺関係が論点になる。注文系でも base/quote の扱いを誤ると会計整合が崩れる。",
+                List.of("/mobile/cards"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                ),
+                List.of("FX", "carry", "settlement")
+            ),
+            new LearningCard(
+                "rates-duration",
+                "rates で duration を見る理由",
+                "クロスアセット",
+                "medium",
+                "金利商品のリスクを価格差だけでなく duration で見る理由は何か。",
+                "金利変化への一次感度を束ねて見るため。",
+                "rates では単純な価格差よりも、金利 1bp 変化に対する感応度で exposure を比較する方が実務的である。duration や DV01 は portfolio の方向感を素早く捉えるための代表的な尺度になる。",
+                List.of("/mobile/cards"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                ),
+                List.of("rates", "duration", "DV01")
+            ),
+            new LearningCard(
+                "credit-spread-risk",
+                "credit で価格以外に何を見るか",
+                "クロスアセット",
+                "medium",
+                "credit 商品では価格以外にどの軸を押さえるべきか。",
+                "spread、default、recovery、liquidity の4軸。",
+                "credit では clean price だけではなく、spread widening、default probability、recovery 前提、流動性の悪化が主要な論点になる。stress の物語も price shock より spread shock の方が自然なことが多い。",
+                List.of("/mobile/cards"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                ),
+                List.of("credit", "spread", "recovery")
+            ),
+            new LearningCard(
+                "cross-asset-boundary",
+                "asset class ごとに境界をずらす理由",
+                "クロスアセット",
+                "hard",
+                "equities / FX / rates / credit で同じ OMS / risk / backoffice の形をそのまま使えない理由は何か。",
+                "価格モデル、約定単位、会計単位、運用イベントが違うから。",
+                "asset class が変わると order lifecycle 自体は似ていても、risk driver、valuation、settlement、operator が見る障害が変わる。共通化する部分と専用化する部分を分けることが、設計の本質になる。",
+                List.of("/mobile/cards", "/mobile/architecture"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileArchitectureView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/mobile_risk_learning_platform_plan.md"
+                ),
+                List.of("cross-asset", "boundary", "valuation")
+            ),
+            new LearningCard(
+                "exercise-style",
+                "exercise style が system に与える違い",
+                "デリバティブ",
+                "hard",
+                "European と American の違いは pricing だけの話ではない。何が変わるか。",
+                "早期行使可否でリスク、運用、台帳イベントが増える。",
+                "American style では早期行使があり得るため、valuation だけでなく assignment、exercise event、position 変化、cash movement の説明が必要になる。system では event taxonomy と ledger 更新の種類が増える。",
+                List.of("/mobile/risk", "/mobile/ledger"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
+                ),
+                List.of("exercise", "American option", "assignment")
+            )
+        );
+    }
+
     private static List<RiskScenario> buildRiskScenarios() {
         return List.of(
             new RiskScenario(
@@ -865,6 +1154,59 @@ public final class MobileLearningService {
         );
     }
 
+    private List<ExplanationDrill> buildDrills() {
+        return List.of(
+            new ExplanationDrill(
+                "drill-order-flow",
+                "注文から台帳までを 90 秒で説明する",
+                "業務",
+                "UI から注文が入ってから final-out に至るまでを、Gateway / OMS / BackOffice / ledger の順で説明する。",
+                List.of("/mobile/orders", "/mobile/ledger", "/mobile/architecture"),
+                List.of("注文受付", "reservation", "fill", "ledger")
+            ),
+            new ExplanationDrill(
+                "drill-sequence-gap",
+                "aggregateSeq gap を説明する",
+                "運用",
+                "out-of-order なイベントが来たとき、pending orphan と DLQ をどう使い分けるか説明する。",
+                List.of("/mobile/architecture"),
+                List.of("aggregateSeq", "pending orphan", "DLQ")
+            ),
+            new ExplanationDrill(
+                "drill-risk-assumptions",
+                "risk 数字の前提を説明する",
+                "リスク",
+                "stress / historical VaR / hedge comparison の数字に対して、何が前提で何が省略されているか説明する。",
+                List.of("/mobile/risk"),
+                List.of("historical VaR", "hedge comparison", "assumption")
+            ),
+            new ExplanationDrill(
+                "drill-options-greeks",
+                "option price と Greeks を説明する",
+                "デリバティブ",
+                "Black-Scholes の入力、price、delta、gamma、vega、theta が何を意味するかを説明する。",
+                List.of("/mobile/risk"),
+                List.of("options", "Greeks", "Black-Scholes")
+            ),
+            new ExplanationDrill(
+                "drill-cross-asset",
+                "asset class ごとの違いを説明する",
+                "クロスアセット",
+                "equities / FX / rates / credit の主要な risk driver と system boundary の違いを説明する。",
+                List.of("/mobile/cards"),
+                List.of("equities", "FX", "rates", "credit")
+            ),
+            new ExplanationDrill(
+                "drill-ledger-narrative",
+                "ledger と P&L を一続きで説明する",
+                "台帳",
+                "fill、reservation release、cash delta、position 更新、realized / unrealized P&L のつながりを順に説明する。",
+                List.of("/mobile/ledger"),
+                List.of("ledger", "P&L", "reservation release")
+            )
+        );
+    }
+
     public record MobileHomeResponse(
         String accountId,
         long generatedAt,
@@ -902,6 +1244,7 @@ public final class MobileLearningService {
     public record ProgressSummary(
         MobileProgressStore.LearningAnchor anchor,
         int dueCount,
+        int dueDrillCount,
         int bookmarkedCount,
         int completedCount
     ) {
@@ -975,11 +1318,22 @@ public final class MobileLearningService {
     public record CardDetail(LearningCard card, CardProgress progress) {
     }
 
+    public record ExplanationDrill(
+        String id,
+        String title,
+        String category,
+        String prompt,
+        List<String> routes,
+        List<String> keywords
+    ) {
+    }
+
     public record ProgressResponse(
         String accountId,
         long updatedAt,
         MobileProgressStore.LearningAnchor anchor,
         int dueCount,
+        int dueDrillCount,
         int bookmarkedCount,
         int completedCount,
         List<CardSummary> cards
@@ -993,6 +1347,45 @@ public final class MobileLearningService {
         String cardId,
         Boolean bookmarked,
         Boolean correct
+    ) {
+    }
+
+    public record DrillSummary(
+        String id,
+        String title,
+        String category,
+        boolean due,
+        DrillProgress progress
+    ) {
+    }
+
+    public record DrillProgress(
+        String drillId,
+        int attemptCount,
+        long lastAttemptAt,
+        int lastClarityScore,
+        long nextReviewAt,
+        String lastNote,
+        String audioDataUrl
+    ) {
+    }
+
+    public record DrillDetail(ExplanationDrill drill, DrillProgress progress) {
+    }
+
+    public record DrillAttemptRequest(
+        String drillId,
+        Integer clarityScore,
+        String note,
+        String audioDataUrl
+    ) {
+    }
+
+    public record DrillProgressResponse(
+        String accountId,
+        long updatedAt,
+        int dueCount,
+        List<DrillSummary> drills
     ) {
     }
 
@@ -1010,6 +1403,18 @@ public final class MobileLearningService {
     public record RiskEvaluationRequest(String scenarioId, String targetSymbol, Double customShockPercent) {
     }
 
+    public record OptionEvaluateRequest(
+        String symbol,
+        String optionType,
+        Double spotPrice,
+        Double strikePrice,
+        Double volatilityPercent,
+        Double ratePercent,
+        Integer maturityDays,
+        Integer contracts
+    ) {
+    }
+
     public record RiskEvaluationResponse(
         String accountId,
         String scenarioId,
@@ -1020,6 +1425,24 @@ public final class MobileLearningService {
         List<RiskPositionImpact> positions,
         HistoricalVar historicalVar,
         HedgeComparison hedgeComparison,
+        List<String> assumptions
+    ) {
+    }
+
+    public record OptionEvaluationResponse(
+        String symbol,
+        String symbolName,
+        String optionType,
+        double spotPrice,
+        double strikePrice,
+        double volatilityPercent,
+        double ratePercent,
+        int maturityDays,
+        int contracts,
+        double optionPrice,
+        double totalPremium,
+        Greeks greeks,
+        List<OptionPayoffPoint> payoffCurve,
         List<String> assumptions
     ) {
     }
@@ -1068,5 +1491,16 @@ public final class MobileLearningService {
         double protectionAmount,
         String note
     ) {
+    }
+
+    public record Greeks(
+        double delta,
+        double gamma,
+        double vega,
+        double theta
+    ) {
+    }
+
+    public record OptionPayoffPoint(double underlyingPrice, double payoff) {
     }
 }
