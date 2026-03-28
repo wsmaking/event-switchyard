@@ -89,6 +89,17 @@ export function difficultyTone(difficulty: string) {
   }
 }
 
+export function difficultyLabel(difficulty: string) {
+  switch (difficulty) {
+    case 'hard':
+      return '難';
+    case 'medium':
+      return '中';
+    default:
+      return '易';
+  }
+}
+
 export function masteryTone(masteryLevel: number) {
   if (masteryLevel >= 3) return 'text-emerald-300';
   if (masteryLevel >= 2) return 'text-sky-300';

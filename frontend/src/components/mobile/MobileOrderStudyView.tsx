@@ -99,7 +99,7 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.22em] text-teal-100/70">
-                  {focus === 'ledger' ? 'Ledger Flow' : 'Order Lifecycle'}
+                  {focus === 'ledger' ? '台帳の流れ' : '注文の流れ'}
                 </div>
                 <h1 className="mt-2 text-2xl font-semibold text-white">{finalOut.order.symbol}</h1>
                 <div className="mt-2 text-sm leading-6 text-slate-200">
@@ -114,7 +114,7 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
             <div className="mt-5 grid grid-cols-3 gap-3">
               <InfoMetric label="数量" value={`${formatNumber(finalOut.order.quantity)} 株`} />
               <InfoMetric label="約定" value={`${formatNumber(finalOut.order.filledQuantity ?? 0)} 株`} />
-              <InfoMetric label="stream" value={orderStreamState} />
+              <InfoMetric label="配信" value={orderStreamState} />
             </div>
             {orderStreamState === 'offline' && (
               <div className="mt-4 rounded-[18px] border border-teal-300/20 bg-teal-400/10 px-4 py-3 text-xs leading-6 text-teal-50/90">
