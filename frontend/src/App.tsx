@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dashboard } from './components/Dashboard';
+import { MobileLearningConsole } from './components/mobile/MobileLearningConsole';
 import { TradingView } from './components/TradingView';
 import { StrategySettings } from './components/StrategySettings';
 
@@ -14,6 +15,30 @@ const queryClient = new QueryClient({
 
 function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'trading' | 'strategy'>('dashboard');
+  const [path, setPath] = useState(() => window.location.pathname || '/');
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPath(window.location.pathname || '/');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigate = (nextPath: string) => {
+    if ((window.location.pathname || '/') !== nextPath) {
+      window.history.pushState({}, '', nextPath);
+    }
+    setPath(nextPath);
+  };
+
+  if (path.startsWith('/mobile')) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <MobileLearningConsole path={path} onNavigate={navigate} onExit={() => navigate('/')} />
+      </QueryClientProvider>
+    );
+  }
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -31,6 +56,12 @@ function App() {
               </div>
             </div>
             <div className="flex items-center gap-6 text-sm font-medium">
+              <button
+                onClick={() => navigate('/mobile')}
+                className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-500/20"
+              >
+                Mobile Learning
+              </button>
               <button
                 onClick={() => setActiveTab('dashboard')}
                 className={`pb-4 pt-4 border-b-2 transition ${

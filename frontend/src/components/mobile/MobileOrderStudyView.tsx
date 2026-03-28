@@ -1,0 +1,328 @@
+import { useState } from 'react';
+import { useOpsOverview, useOrderFinalOut, useOrderStream, useOrders, useRunReplayScenario } from '../../hooks/useOrders';
+import { OrderSide, OrderType, TimeInForce } from '../../types/trading';
+import type { OrderRequest } from '../../types/trading';
+import { formatCurrency, formatDateTime, formatNumber, formatSignedCurrency, statusLabel, statusTone } from './mobileUtils';
+
+interface MobileOrderStudyViewProps {
+  focus: 'lifecycle' | 'ledger';
+  orderId: string | null;
+  onNavigate: (path: string) => void;
+}
+
+const replayScenarios = ['accepted', 'partial-fill', 'filled', 'canceled', 'expired', 'rejected'] as const;
+
+export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrderStudyViewProps) {
+  const { data: orders, isLoading, isError, error } = useOrders();
+  const runReplayScenario = useRunReplayScenario();
+  const [runningScenario, setRunningScenario] = useState<string | null>(null);
+  const selectedOrderId = orderId ?? orders?.[0]?.id ?? null;
+  const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(selectedOrderId);
+  const { data: opsOverview } = useOpsOverview(selectedOrderId);
+  const orderStreamState = useOrderStream(selectedOrderId);
+
+  if (isLoading) {
+    return <div className="px-4 py-6 text-sm text-[color:var(--mobile-muted)]">注文を読み込み中...</div>;
+  }
+
+  if (isError) {
+    return (
+      <div className="px-4 py-6 text-sm text-rose-200">
+        注文一覧を取得できませんでした
+        <div className="mt-2 text-xs text-rose-200/80">{error instanceof Error ? error.message : 'unknown_error'}</div>
+      </div>
+    );
+  }
+
+  if (!orders || orders.length === 0) {
+    return (
+      <div className="space-y-4 px-4 py-5">
+        <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
+          <div className="text-lg font-semibold text-white">注文がまだありません</div>
+          <div className="mt-2 text-sm leading-6 text-slate-300">
+            replay scenario で状態を seed して、timeline と final-out を学習に使えます。
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {replayScenarios.map((scenario) => (
+            <button
+              key={scenario}
+              onClick={() => runSeedScenario(scenario, setRunningScenario, runReplayScenario, onNavigate)}
+              className="rounded-[22px] border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white"
+            >
+              {scenario}
+            </button>
+          ))}
+        </div>
+        {runningScenario && <div className="text-xs text-slate-400">scenario 起動中: {runningScenario}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 px-4 py-5 pb-24">
+      <div className="overflow-x-auto pb-1">
+        <div className="flex gap-2">
+          {orders.slice(0, 8).map((order) => (
+            <button
+              key={order.id}
+              onClick={() => onNavigate(`/mobile/orders/${order.id}`)}
+              className={`min-w-[132px] rounded-[22px] border px-4 py-3 text-left ${selectedOrderId === order.id ? 'border-emerald-300/50 bg-emerald-500/10' : 'border-white/10 bg-white/5'}`}
+            >
+              <div className="text-[11px] text-slate-400">{order.symbol}</div>
+              <div className="mt-1 text-sm font-semibold text-white">{statusLabel(order.status)}</div>
+              <div className="mt-1 text-[11px] text-slate-400">{formatDateTime(order.submittedAt)}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {finalOutLoading || !finalOut ? (
+        <div className="rounded-[24px] border border-white/10 bg-white/5 px-4 py-5 text-sm text-slate-300">
+          final-out を読み込み中...
+        </div>
+      ) : (
+        <>
+          <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,118,110,0.28),rgba(15,23,42,0.95))] p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-teal-100/70">
+                  {focus === 'ledger' ? 'Ledger Flow' : 'Order Lifecycle'}
+                </div>
+                <h1 className="mt-2 text-2xl font-semibold text-white">{finalOut.order.symbol}</h1>
+                <div className="mt-2 text-sm leading-6 text-slate-200">
+                  {explainOrder(finalOut.order.status)}
+                </div>
+              </div>
+              <div className={`rounded-full border px-3 py-1 text-xs font-medium ${statusTone(finalOut.order.status)}`}>
+                {statusLabel(finalOut.order.status)}
+              </div>
+            </div>
+
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <InfoMetric label="数量" value={`${formatNumber(finalOut.order.quantity)} 株`} />
+              <InfoMetric label="約定" value={`${formatNumber(finalOut.order.filledQuantity ?? 0)} 株`} />
+              <InfoMetric label="stream" value={orderStreamState} />
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div className="text-base font-semibold text-white">Timeline</div>
+              <button onClick={() => onNavigate('/mobile/ledger')} className="text-xs font-medium text-emerald-200">
+                台帳視点へ
+              </button>
+            </div>
+            <div className="mt-4 space-y-4">
+              {finalOut.timeline.map((entry, index) => (
+                <div key={`${entry.eventType}-${entry.eventAt}-${index}`} className="flex gap-3">
+                  <div className="flex flex-col items-center">
+                    <div className={`mt-1 h-3 w-3 rounded-full ${index === finalOut.timeline.length - 1 ? 'bg-emerald-300' : 'bg-sky-300'}`} />
+                    {index < finalOut.timeline.length - 1 && <div className="mt-2 h-full w-px bg-white/10" />}
+                  </div>
+                  <div className="flex-1 rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm font-semibold text-white">{entry.label}</div>
+                      <div className="text-[11px] text-slate-500">{formatDateTime(entry.eventAt)}</div>
+                    </div>
+                    <div className="mt-2 text-sm leading-6 text-slate-300">{entry.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {focus === 'ledger' ? (
+            <section className="space-y-4">
+              <LedgerSummary finalOut={finalOut} />
+              <ImpactList
+                title="Reservations"
+                emptyText="reservation はありません"
+                items={finalOut.reservations.map((reservation) => ({
+                  key: reservation.reservationId,
+                  title: `${formatNumber(reservation.reservedQuantity)} 株 / ${reservation.status}`,
+                  body: `拘束 ${formatCurrency(reservation.reservedAmount)} / 解放 ${formatCurrency(reservation.releasedAmount)}`,
+                }))}
+              />
+              <ImpactList
+                title="Fills"
+                emptyText="fill はありません"
+                items={finalOut.fills.map((fill) => ({
+                  key: fill.fillId,
+                  title: `${formatNumber(fill.quantity)} 株 @ ${formatCurrency(fill.price)}`,
+                  body: `notional ${formatCurrency(fill.notional)} / ${formatDateTime(fill.filledAt)}`,
+                }))}
+              />
+              <ImpactList
+                title="Positions"
+                emptyText="position はありません"
+                items={finalOut.positions.map((position) => ({
+                  key: position.symbol,
+                  title: `${position.symbol} ${formatNumber(position.quantity)} 株`,
+                  body: `avg ${formatCurrency(position.avgPrice)} / uPnL ${formatSignedCurrency(position.unrealizedPnL)}`,
+                }))}
+              />
+            </section>
+          ) : (
+            <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+              <div className="text-base font-semibold text-white">説明ポイント</div>
+              <div className="mt-4 grid gap-3">
+                <NarrativeCard title="何が起きたか" body={describeLifecycle(finalOut.order.status)} />
+                <NarrativeCard
+                  title="面接で言うべきこと"
+                  body={interviewPrompt(finalOut.order.status)}
+                />
+                <NarrativeCard
+                  title="運用観点"
+                  body={`sequence gap ${opsOverview?.omsStats?.sequenceGaps ?? 0} / pending ${opsOverview?.omsStats?.pendingOrphanCount ?? 0} / dlq ${opsOverview?.omsStats?.deadLetterCount ?? 0}`}
+                />
+              </div>
+            </section>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function runSeedScenario(
+  scenario: string,
+  setRunningScenario: (value: string | null) => void,
+  runReplayScenario: ReturnType<typeof useRunReplayScenario>,
+  onNavigate: (path: string) => void
+) {
+  const request: OrderRequest = {
+    symbol: '7203',
+    side: OrderSide.BUY,
+    type: OrderType.MARKET,
+    quantity: 100,
+    price: null,
+    timeInForce: TimeInForce.GTC,
+    expireAt: null,
+  };
+  setRunningScenario(scenario);
+  runReplayScenario.mutate(
+    { scenario, request },
+    {
+      onSuccess: (order) => {
+        setRunningScenario(null);
+        onNavigate(`/mobile/orders/${order.id}`);
+      },
+      onError: () => setRunningScenario(null),
+    }
+  );
+}
+
+function explainOrder(status: string) {
+  switch (status) {
+    case 'FILLED':
+      return '注文は venue で全量約定し、cash / position / raw events が final-out に収束している状態。';
+    case 'PARTIALLY_FILLED':
+      return '一部約定により reservation が縮小し、残数量が open のまま維持されている状態。';
+    case 'REJECTED':
+      return 'Gateway または venue で拒否され、台帳影響は最小で止まっている状態。';
+    case 'CANCELED':
+      return 'cancel が venue まで届き、残拘束が release された状態。';
+    case 'EXPIRED':
+      return 'GTD 期限切れで order が失効し、残拘束が release された状態。';
+    default:
+      return 'accepted から final-out までの流れを順に追う。';
+  }
+}
+
+function describeLifecycle(status: string) {
+  switch (status) {
+    case 'PARTIALLY_FILLED':
+      return 'accepted 後に partial fill が入り、残数量を維持したまま reservation が縮小する。';
+    case 'FILLED':
+      return 'accepted 後に full fill が入り、reservation は解放され、position と cash が確定する。';
+    case 'REJECTED':
+      return '受理前または venue reject により status が terminal になり、会計影響は発生しない。';
+    case 'CANCELED':
+      return 'cancel request 後に cancel complete へ遷移し、working quantity は消える。';
+    default:
+      return 'submitted -> accepted -> terminal or working の流れを追う。';
+  }
+}
+
+function interviewPrompt(status: string) {
+  switch (status) {
+    case 'FILLED':
+      return 'timeline と fills と balance effect を並べて、注文状態と会計状態の収束を分けて話す。';
+    case 'PARTIALLY_FILLED':
+      return 'working order を維持しながら ledger をどう更新するか、projection 順序を説明する。';
+    case 'REJECTED':
+      return 'hot path で reject しても BackOffice 正本を壊さない境界を説明する。';
+    default:
+      return 'OMS と BackOffice の責務差、raw event と UI projection の差を説明する。';
+  }
+}
+
+function InfoMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-3">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-teal-50/60">{label}</div>
+      <div className="mt-2 text-sm font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function NarrativeCard({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+      <div className="text-sm font-semibold text-white">{title}</div>
+      <div className="mt-2 text-sm leading-6 text-slate-300">{body}</div>
+    </div>
+  );
+}
+
+function LedgerSummary({ finalOut }: { finalOut: NonNullable<ReturnType<typeof useOrderFinalOut>['data']> }) {
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(120,53,15,0.32),rgba(15,23,42,0.95))] p-4">
+      <div className="text-base font-semibold text-white">Balance / P&L</div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <ImpactMetric label="Cash Δ" value={formatSignedCurrency(finalOut.balanceEffect.cashDelta)} />
+        <ImpactMetric label="Avail BP Δ" value={formatSignedCurrency(finalOut.balanceEffect.availableBuyingPowerDelta)} />
+        <ImpactMetric label="Reserved BP Δ" value={formatSignedCurrency(finalOut.balanceEffect.reservedBuyingPowerDelta)} />
+        <ImpactMetric label="Realized PnL Δ" value={formatSignedCurrency(finalOut.balanceEffect.realizedPnlDelta)} />
+      </div>
+    </section>
+  );
+}
+
+function ImpactMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-amber-100/70">{label}</div>
+      <div className="mt-2 text-sm font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function ImpactList({
+  title,
+  emptyText,
+  items,
+}: {
+  title: string;
+  emptyText: string;
+  items: Array<{ key: string; title: string; body: string }>;
+}) {
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+      <div className="text-base font-semibold text-white">{title}</div>
+      <div className="mt-4 space-y-3">
+        {items.length === 0 ? (
+          <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-4 text-sm text-slate-400">{emptyText}</div>
+        ) : (
+          items.map((item) => (
+            <div key={item.key} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+              <div className="text-sm font-semibold text-white">{item.title}</div>
+              <div className="mt-2 text-sm text-slate-300">{item.body}</div>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
