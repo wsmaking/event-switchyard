@@ -9,6 +9,7 @@ struct MobileWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.setURLSchemeHandler(AppBundleSchemeHandler(), forURLScheme: AppBundleSchemeHandler.scheme)
         configuration.userContentController.add(context.coordinator, name: Coordinator.logHandlerName)
         configuration.userContentController.addUserScript(
             WKUserScript(
@@ -36,7 +37,7 @@ struct MobileWebView: UIViewRepresentable {
     }
 
     private func loadEntry(on webView: WKWebView) {
-        guard let entryURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "WebApp") else {
+        guard Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "WebApp") != nil else {
             webView.loadHTMLString(
                 """
                 <html>
@@ -50,24 +51,8 @@ struct MobileWebView: UIViewRepresentable {
             )
             return
         }
-
-        let readAccessURL = entryURL.deletingLastPathComponent()
-        do {
-            let html = try String(contentsOf: entryURL, encoding: .utf8)
-            let needsRewrite = html.contains("href=\"/") || html.contains("src=\"/") || html.contains("crossorigin")
-            if needsRewrite {
-                let normalizedHtml = html
-                    .replacingOccurrences(of: "<head>", with: "<head><base href=\"./\">")
-                    .replacingOccurrences(of: " crossorigin=\"\"", with: "")
-                    .replacingOccurrences(of: " crossorigin", with: "")
-                    .replacingOccurrences(of: "href=\"/", with: "href=\"./")
-                    .replacingOccurrences(of: "src=\"/", with: "src=\"./")
-                webView.loadHTMLString(normalizedHtml, baseURL: readAccessURL)
-            } else {
-                webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
-            }
-        } catch {
-            webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
+        if let entryURL = URL(string: "\(AppBundleSchemeHandler.scheme)://webapp/index.html") {
+            webView.load(URLRequest(url: entryURL))
         }
     }
 
@@ -197,7 +182,7 @@ struct MobileWebView: UIViewRepresentable {
                 return
             }
 
-            if url.isFileURL || url.scheme == "about" {
+            if url.scheme == AppBundleSchemeHandler.scheme || url.isFileURL || url.scheme == "about" {
                 decisionHandler(.allow)
                 return
             }
@@ -221,6 +206,111 @@ struct MobileWebView: UIViewRepresentable {
                 UIApplication.shared.open(url)
             }
             return nil
+        }
+    }
+}
+
+final class AppBundleSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "appbundle"
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let requestURL = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(AppBundleSchemeError.invalidURL)
+            return
+        }
+
+        do {
+            let fileURL = try resolveBundleURL(for: requestURL)
+            let data = try Data(contentsOf: fileURL)
+            let response = URLResponse(
+                url: requestURL,
+                mimeType: mimeType(for: fileURL.pathExtension),
+                expectedContentLength: data.count,
+                textEncodingName: textEncodingName(for: fileURL.pathExtension)
+            )
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didReceive(data)
+            urlSchemeTask.didFinish()
+        } catch {
+            urlSchemeTask.didFailWithError(error)
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+    }
+
+    private func resolveBundleURL(for requestURL: URL) throws -> URL {
+        guard var webAppURL = Bundle.main.resourceURL?.appendingPathComponent("WebApp", isDirectory: true) else {
+            throw AppBundleSchemeError.bundleMissing
+        }
+
+        let path = requestURL.path.isEmpty || requestURL.path == "/" ? "/index.html" : requestURL.path
+        for component in path.split(separator: "/") {
+            guard component != ".." else {
+                throw AppBundleSchemeError.invalidPath
+            }
+            webAppURL.appendPathComponent(String(component), isDirectory: false)
+        }
+
+        guard FileManager.default.fileExists(atPath: webAppURL.path) else {
+            throw AppBundleSchemeError.fileNotFound(webAppURL.lastPathComponent)
+        }
+        return webAppURL
+    }
+
+    private func mimeType(for pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "html":
+            return "text/html"
+        case "js", "mjs":
+            return "application/javascript"
+        case "css":
+            return "text/css"
+        case "json", "webmanifest":
+            return "application/json"
+        case "svg":
+            return "image/svg+xml"
+        case "png":
+            return "image/png"
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "gif":
+            return "image/gif"
+        case "woff":
+            return "font/woff"
+        case "woff2":
+            return "font/woff2"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
+    private func textEncodingName(for pathExtension: String) -> String? {
+        switch pathExtension.lowercased() {
+        case "html", "js", "mjs", "css", "json", "webmanifest", "svg":
+            return "utf-8"
+        default:
+            return nil
+        }
+    }
+}
+
+enum AppBundleSchemeError: LocalizedError {
+    case invalidURL
+    case invalidPath
+    case bundleMissing
+    case fileNotFound(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "invalid_appbundle_url"
+        case .invalidPath:
+            return "invalid_appbundle_path"
+        case .bundleMissing:
+            return "webapp_bundle_missing"
+        case .fileNotFound(let name):
+            return "webapp_file_not_found:\(name)"
         }
     }
 }
