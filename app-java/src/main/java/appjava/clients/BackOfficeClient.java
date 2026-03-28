@@ -107,6 +107,14 @@ public final class BackOfficeClient {
         postJson("/internal/fills/replace", new ReplaceFillsRequest(orderId, fills));
     }
 
+    public void upsertOrderState(BackOfficeOrderState state) {
+        postJson("/internal/orders/state/upsert", state);
+    }
+
+    public void replaceLedger(List<LedgerEntry> entries) {
+        postJson("/internal/ledger/replace", new ReplaceLedgerRequest(entries));
+    }
+
     public BackOfficeStats fetchStats() {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -300,6 +308,24 @@ public final class BackOfficeClient {
     }
 
     public record ReplaceFillsRequest(String orderId, List<FillView> fills) {
+    }
+
+    public record BackOfficeOrderState(
+        String orderId,
+        String accountId,
+        String symbol,
+        String side,
+        long quantity,
+        long workingPrice,
+        long submittedAt,
+        long lastEventAt,
+        String status,
+        long filledQuantity,
+        long reservedAmount
+    ) {
+    }
+
+    public record ReplaceLedgerRequest(List<LedgerEntry> entries) {
     }
 
     public record BackOfficeStats(

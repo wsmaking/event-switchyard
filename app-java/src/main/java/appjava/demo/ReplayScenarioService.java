@@ -2,7 +2,9 @@ package appjava.demo;
 
 import appjava.account.AccountOverview;
 import appjava.clients.BackOfficeClient;
+import appjava.clients.BackOfficeClient.BackOfficeOrderState;
 import appjava.clients.BackOfficeClient.BackOfficePosition;
+import appjava.clients.BackOfficeClient.LedgerEntry;
 import appjava.clients.OmsClient;
 import appjava.http.JsonHttpHandler;
 import appjava.market.MarketDataService;
@@ -95,13 +97,17 @@ public final class ReplayScenarioService {
         List<OrderEventView> events = buildEvents(order, snapshot);
         List<ReservationView> reservations = buildReservations(order, snapshot, workingPrice);
         List<FillView> fills = buildFills(order, snapshot, workingPrice);
+        BackOfficeOrderState orderState = buildOrderState(order, snapshot, workingPrice);
+        List<LedgerEntry> ledgerEntries = buildLedgerEntries(order, snapshot);
 
         omsClient.upsertOrder(order);
         omsClient.replaceOrderEvents(order.id(), events);
         omsClient.replaceReservations(accountId, reservations);
         backOfficeClient.upsertOverview(overview);
+        backOfficeClient.upsertOrderState(orderState);
         backOfficeClient.replacePositions(accountId, snapshot.positions());
         backOfficeClient.replaceFills(order.id(), fills);
+        backOfficeClient.replaceLedger(ledgerEntries);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -353,6 +359,146 @@ public final class ReplayScenarioService {
             snapshot.status() == OrderStatus.FILLED ? "TAKER" : "MAKER",
             snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt() + 1_000L
         ));
+    }
+
+    private BackOfficeOrderState buildOrderState(OrderView order, ScenarioSnapshot snapshot, double workingPrice) {
+        long lastEventAt = snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt();
+        return new BackOfficeOrderState(
+            order.id(),
+            accountId,
+            order.symbol(),
+            order.side(),
+            order.quantity(),
+            Math.round(workingPrice),
+            order.submittedAt(),
+            lastEventAt,
+            order.status().name(),
+            snapshot.filledQuantity(),
+            snapshot.reservedBuyingPower()
+        );
+    }
+
+    private List<LedgerEntry> buildLedgerEntries(OrderView order, ScenarioSnapshot snapshot) {
+        long submittedAt = order.submittedAt();
+        long acceptedAt = submittedAt + 250L;
+        long reservationAt = acceptedAt + 50L;
+        long statusAt = snapshot.statusEventAt() != null ? snapshot.statusEventAt() : submittedAt + 1_000L;
+        long signedQuantityDelta = order.side().equalsIgnoreCase("BUY") ? snapshot.filledQuantity() : -snapshot.filledQuantity();
+        long signedCashDelta = signedCashDelta(order.side(), snapshot.fillNotional());
+        java.util.ArrayList<LedgerEntry> entries = new java.util.ArrayList<>();
+
+        if (snapshot.originalReservedAmount() > 0L) {
+            entries.add(new LedgerEntry(
+                "ledger-" + order.id() + "-reserve",
+                "replay-ledger:" + order.id() + ":1",
+                accountId,
+                order.id(),
+                "RESERVATION_CREATED",
+                order.symbol(),
+                order.side(),
+                0L,
+                0L,
+                snapshot.originalReservedAmount(),
+                0L,
+                "拘束余力を計上",
+                reservationAt,
+                "replay-scenario"
+            ));
+        }
+
+        switch (snapshot.status()) {
+            case PARTIALLY_FILLED -> entries.add(new LedgerEntry(
+                "ledger-" + order.id() + "-partial-fill",
+                "replay-ledger:" + order.id() + ":2",
+                accountId,
+                order.id(),
+                "PARTIAL_FILL",
+                order.symbol(),
+                order.side(),
+                signedQuantityDelta,
+                signedCashDelta,
+                -(snapshot.originalReservedAmount() - snapshot.reservedBuyingPower()),
+                snapshot.realizedPnl(),
+                "一部約定を反映",
+                statusAt,
+                "replay-scenario"
+            ));
+            case FILLED -> entries.add(new LedgerEntry(
+                "ledger-" + order.id() + "-fill",
+                "replay-ledger:" + order.id() + ":2",
+                accountId,
+                order.id(),
+                "FULL_FILL",
+                order.symbol(),
+                order.side(),
+                signedQuantityDelta,
+                signedCashDelta,
+                -snapshot.originalReservedAmount(),
+                snapshot.realizedPnl(),
+                "全量約定を反映",
+                statusAt,
+                "replay-scenario"
+            ));
+            case CANCELED -> {
+                if (snapshot.originalReservedAmount() > 0L) {
+                    entries.add(new LedgerEntry(
+                        "ledger-" + order.id() + "-cancel",
+                        "replay-ledger:" + order.id() + ":2",
+                        accountId,
+                        order.id(),
+                        "ORDER_CANCELED",
+                        order.symbol(),
+                        order.side(),
+                        0L,
+                        0L,
+                        -snapshot.originalReservedAmount(),
+                        0L,
+                        "取消に伴い拘束を解放",
+                        statusAt,
+                        "replay-scenario"
+                    ));
+                }
+            }
+            case EXPIRED -> {
+                if (snapshot.originalReservedAmount() > 0L) {
+                    entries.add(new LedgerEntry(
+                        "ledger-" + order.id() + "-expired",
+                        "replay-ledger:" + order.id() + ":2",
+                        accountId,
+                        order.id(),
+                        "ORDER_EXPIRED",
+                        order.symbol(),
+                        order.side(),
+                        0L,
+                        0L,
+                        -snapshot.originalReservedAmount(),
+                        0L,
+                        "失効に伴い拘束を解放",
+                        statusAt,
+                        "replay-scenario"
+                    ));
+                }
+            }
+            case REJECTED -> entries.add(new LedgerEntry(
+                "ledger-" + order.id() + "-rejected",
+                "replay-ledger:" + order.id() + ":1",
+                accountId,
+                order.id(),
+                "ORDER_REJECTED",
+                order.symbol(),
+                order.side(),
+                0L,
+                0L,
+                0L,
+                0L,
+                "注文拒否",
+                statusAt,
+                "replay-scenario"
+            ));
+            default -> {
+            }
+        }
+        return List.copyOf(entries);
     }
 
     private OrderEventView event(

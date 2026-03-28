@@ -204,7 +204,7 @@ public final class GatewayAuditIntakeService {
             long expected = expectedReservationAmount(order);
             long actual = orderReadModel.findReservationsByAccountId(order.accountId()).stream()
                 .filter(reservation -> order.id().equals(reservation.orderId()))
-                .mapToLong(ReservationView::reservedAmount)
+                .mapToLong(reservation -> Math.max(0L, reservation.reservedAmount() - reservation.releasedAmount()))
                 .sum();
             expectedReserved += expected;
             actualReserved += actual;
@@ -251,6 +251,7 @@ public final class GatewayAuditIntakeService {
                 return;
             } catch (Exception exception) {
                 state.set("ERROR");
+                exception.printStackTrace(System.err);
                 try {
                     Thread.sleep(Math.max(250L, pollMs));
                 } catch (InterruptedException interruptedException) {
@@ -342,7 +343,7 @@ public final class GatewayAuditIntakeService {
         Optional<OrderView> currentOpt = orderReadModel.findById(event.orderId());
         int quantity = data.path("qty").asInt(currentOpt.map(OrderView::quantity).orElse(0));
         long filledQuantity = currentOpt.map(OrderView::filledQuantity).orElse(0L);
-        Double price = data.hasNonNull("price") ? data.get("price").asDouble() : currentOpt.map(OrderView::price).orElse(null);
+        Double price = data.hasNonNull("price") ? Double.valueOf(data.get("price").asDouble()) : currentOpt.map(OrderView::price).orElse(null);
         Long expireAt = data.hasNonNull("expireAt") ? Long.valueOf(data.get("expireAt").asLong()) : currentOpt.map(OrderView::expireAt).orElse(null);
         OrderView next = new OrderView(
             event.orderId(),
@@ -407,7 +408,7 @@ public final class GatewayAuditIntakeService {
             timelineType(nextStatus),
             event.at(),
             timelineLabel(nextStatus),
-            executionDetail(next, filledDelta, data.hasNonNull("price") ? data.get("price").asDouble() : current.price()),
+            executionDetail(next, filledDelta, data.hasNonNull("price") ? Double.valueOf(data.get("price").asDouble()) : current.price()),
             eventRef
         ));
         syncReservation(next);
@@ -512,7 +513,7 @@ public final class GatewayAuditIntakeService {
         }
         JsonNode data = safeData(event.data());
         int quantity = data.path("newQty").asInt(current.quantity());
-        Double price = data.hasNonNull("newPrice") ? data.get("newPrice").asDouble() : current.price();
+        Double price = data.hasNonNull("newPrice") ? Double.valueOf(data.get("newPrice").asDouble()) : current.price();
         OrderView next = new OrderView(
             current.id(),
             current.accountId(),

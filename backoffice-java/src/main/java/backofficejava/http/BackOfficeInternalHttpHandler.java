@@ -5,6 +5,8 @@ import backofficejava.account.AccountOverviewView;
 import backofficejava.account.FillReadModel;
 import backofficejava.account.FillView;
 import backofficejava.account.LedgerReadModel;
+import backofficejava.account.LedgerEntryView;
+import backofficejava.account.OrderProjectionState;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
@@ -47,6 +49,17 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             fillReadModel.replaceFills(request.orderId(), request.fills());
             return JsonResponse.ok(new ReplaceFillsResponse("REPLACED", request.fills().size()));
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/orders/state/upsert".equals(path)) {
+            OrderProjectionState request = readJson(exchange, OrderProjectionState.class);
+            orderProjectionStateStore.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/ledger/replace".equals(path)) {
+            ReplaceLedgerRequest request = readJson(exchange, ReplaceLedgerRequest.class);
+            ledgerReadModel.reset();
+            request.entries().forEach(ledgerReadModel::append);
+            return JsonResponse.ok(new ReplaceLedgerResponse("REPLACED", request.entries().size()));
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -68,6 +81,12 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
     }
 
     public record ReplaceFillsResponse(String status, int count) {
+    }
+
+    public record ReplaceLedgerRequest(List<LedgerEntryView> entries) {
+    }
+
+    public record ReplaceLedgerResponse(String status, int count) {
     }
 
     public record ResetResponse(String status) {

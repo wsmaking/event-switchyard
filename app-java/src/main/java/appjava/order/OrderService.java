@@ -242,7 +242,7 @@ public final class OrderService {
         OrderStatus status = mapStatus(snapshot.status());
         long filledQty = snapshot.filledQty();
         long remainingQty = Math.max(0L, snapshot.qty() - filledQty);
-        Long filledAt = status == OrderStatus.FILLED ? snapshot.lastUpdateAt() : current.filledAt();
+        Long filledAt = resolveFilledAt(status, snapshot.lastUpdateAt(), current.filledAt());
 
         OrderView updated = new OrderView(
             current.id(),
@@ -251,7 +251,7 @@ public final class OrderService {
             snapshot.side() == null ? current.side() : snapshot.side(),
             snapshot.type() == null ? current.type() : snapshot.type(),
             (int) snapshot.qty(),
-            snapshot.price() == null ? current.price() : snapshot.price().doubleValue(),
+            resolvePrice(snapshot.price(), current.price()),
             snapshot.timeInForce() == null ? current.timeInForce() : snapshot.timeInForce(),
             snapshot.expireAt() == null ? current.expireAt() : snapshot.expireAt(),
             status,
@@ -298,5 +298,19 @@ public final class OrderService {
             case "AMEND_PENDING", "REPLACE_PENDING" -> OrderStatus.AMEND_PENDING;
             default -> OrderStatus.ACCEPTED;
         };
+    }
+
+    static Long resolveFilledAt(OrderStatus status, long snapshotLastUpdateAt, Long currentFilledAt) {
+        if (status == OrderStatus.FILLED) {
+            return Long.valueOf(snapshotLastUpdateAt);
+        }
+        return currentFilledAt;
+    }
+
+    static Double resolvePrice(Long snapshotPrice, Double currentPrice) {
+        if (snapshotPrice == null) {
+            return currentPrice;
+        }
+        return snapshotPrice.doubleValue();
     }
 }
