@@ -973,6 +973,7 @@ export function TradingView() {
                       <div>処理件数: {opsOverview.omsStats.processed.toLocaleString()}</div>
                       <div>重複: {opsOverview.omsStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.omsStats.orphans.toLocaleString()}</div>
+                      <div>DLQ: {opsOverview.omsStats.deadLetterCount.toLocaleString()}</div>
                       <div>Replay回数: {opsOverview.omsStats.replays.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.omsStats.lastEventAt)}</div>
                     </div>
@@ -998,6 +999,7 @@ export function TradingView() {
                       <div>Ledger件数: {opsOverview.backOfficeStats.ledgerEntryCount.toLocaleString()}</div>
                       <div>重複: {opsOverview.backOfficeStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.backOfficeStats.orphans.toLocaleString()}</div>
+                      <div>DLQ: {opsOverview.backOfficeStats.deadLetterCount.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.backOfficeStats.lastEventAt)}</div>
                     </div>
                   ) : (
@@ -1065,6 +1067,35 @@ export function TradingView() {
                     </div>
                   ) : (
                     <div className="mt-3 text-sm text-slate-500">ledger はまだありません。</div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Orphans / DLQ</div>
+                  {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].length > 0 ? (
+                    <div className="mt-3 space-y-3">
+                      {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-rose-50">
+                              {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                            </div>
+                            <div className="text-[11px] text-rose-200">
+                              {formatEventTime(entry.recordedAt)}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-xs text-rose-100">{entry.detail}</div>
+                          <div className="mt-2 text-[11px] text-rose-200">
+                            orderId: {entry.orderId ?? '-'} / source: {entry.source}
+                          </div>
+                          <div className="mt-2 overflow-x-auto rounded-md bg-slate-950/60 p-2 text-[11px] text-slate-300">
+                            {entry.rawLine}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-slate-500">orphan / dlq はありません。</div>
                   )}
                 </div>
               </div>

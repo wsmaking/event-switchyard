@@ -26,6 +26,7 @@ public final class OmsHttpServer {
         ));
         server.createContext("/stats", new OmsStatsHttpHandler(auditIntakeService));
         server.createContext("/reconcile", new OmsReconcileHttpHandler(auditIntakeService));
+        server.createContext("/orphans", new OmsOrphanHttpHandler(auditIntakeService));
         server.createContext("/orders", new OrderHttpHandler(orderReadModel));
         server.createContext("/accounts", new AccountHttpHandler(orderReadModel));
         server.createContext("/internal/orders", new OrderInternalHttpHandler(orderReadModel));

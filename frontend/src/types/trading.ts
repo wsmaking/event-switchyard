@@ -174,6 +174,7 @@ export interface OmsStats {
   lastEventAt: number | null;
   currentOffset: number;
   currentAuditSize: number;
+  deadLetterCount: number;
 }
 
 export interface OmsReconcile {
@@ -202,6 +203,7 @@ export interface BackOfficeStats {
   currentOffset: number;
   currentAuditSize: number;
   ledgerEntryCount: number;
+  deadLetterCount: number;
 }
 
 export interface LedgerEntry {
@@ -244,9 +246,25 @@ export interface OpsOverview {
   orderId: string | null;
   omsStats: OmsStats | null;
   omsReconcile: OmsReconcile | null;
+  omsOrphans: DeadLetterEntry[];
   backOfficeStats: BackOfficeStats | null;
   backOfficeReconcile: BackOfficeReconcile | null;
   ledgerEntries: LedgerEntry[];
+  backOfficeOrphans: DeadLetterEntry[];
+}
+
+export interface DeadLetterEntry {
+  entryId: string;
+  eventRef: string;
+  accountId: string | null;
+  orderId: string | null;
+  eventType: string | null;
+  reason: string;
+  detail: string;
+  rawLine: string;
+  eventAt: number;
+  recordedAt: number;
+  source: string;
 }
 
 export interface AuditReplayResult {

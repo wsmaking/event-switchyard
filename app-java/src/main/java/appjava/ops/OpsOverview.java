@@ -10,8 +10,10 @@ public record OpsOverview(
     String orderId,
     OmsClient.OmsStats omsStats,
     OmsClient.OmsReconcile omsReconcile,
+    List<OmsClient.DeadLetterEntry> omsOrphans,
     BackOfficeClient.BackOfficeStats backOfficeStats,
     BackOfficeClient.BackOfficeReconcile backOfficeReconcile,
-    List<BackOfficeClient.LedgerEntry> ledgerEntries
+    List<BackOfficeClient.LedgerEntry> ledgerEntries,
+    List<BackOfficeClient.DeadLetterEntry> backOfficeOrphans
 ) {
 }

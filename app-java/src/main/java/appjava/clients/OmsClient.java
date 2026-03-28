@@ -185,6 +185,28 @@ public final class OmsClient {
         return postJsonWithResponse("/internal/audit/replay", new ReplayRequest(resetState), ReplayResult.class);
     }
 
+    public java.util.List<DeadLetterEntry> fetchOrphans(String orderId, int limit) {
+        try {
+            StringBuilder uri = new StringBuilder(baseUrl + "/orphans?limit=" + limit);
+            if (orderId != null && !orderId.isBlank()) {
+                uri.append("&orderId=").append(orderId);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri.toString()))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), new TypeReference<List<DeadLetterEntry>>() {});
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
     private void postJson(String path, Object payload) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -239,7 +261,8 @@ public final class OmsClient {
         long replays,
         Long lastEventAt,
         long currentOffset,
-        long currentAuditSize
+        long currentAuditSize,
+        int deadLetterCount
     ) {
     }
 
@@ -264,6 +287,21 @@ public final class OmsClient {
         long skipped,
         long duplicates,
         long orphans
+    ) {
+    }
+
+    public record DeadLetterEntry(
+        String entryId,
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String reason,
+        String detail,
+        String rawLine,
+        long eventAt,
+        long recordedAt,
+        String source
     ) {
     }
 }

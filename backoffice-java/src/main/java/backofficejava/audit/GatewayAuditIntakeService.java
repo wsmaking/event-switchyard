@@ -42,6 +42,7 @@ public final class GatewayAuditIntakeService {
     private final FillReadModel fillReadModel;
     private final OrderProjectionStateStore orderStateStore;
     private final LedgerReadModel ledgerReadModel;
+    private final InMemoryDeadLetterStore deadLetterStore;
     private final boolean enabled;
     private final Path auditPath;
     private final Path offsetPath;
@@ -98,6 +99,7 @@ public final class GatewayAuditIntakeService {
                 System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_POLL_MS", String.valueOf(DEFAULT_POLL_MS))
             )
         );
+        this.deadLetterStore = new InMemoryDeadLetterStore();
     }
 
     public void start() {
@@ -126,8 +128,13 @@ public final class GatewayAuditIntakeService {
             lastEventAt.get() == 0 ? null : lastEventAt.get(),
             currentOffset.get(),
             currentAuditSize(),
-            ledgerReadModel.find(null, null, null, Integer.MAX_VALUE, null).size()
+            ledgerReadModel.find(null, null, null, Integer.MAX_VALUE, null).size(),
+            deadLetterStore.size()
         );
+    }
+
+    public List<DeadLetterEntryView> findDeadLetters(String orderId, int limit) {
+        return deadLetterStore.find(orderId, limit);
     }
 
     public ReplayResult replayFromStart(boolean resetState) {
@@ -139,6 +146,7 @@ public final class GatewayAuditIntakeService {
                 fillReadModel.reset();
                 orderStateStore.reset();
                 ledgerReadModel.reset();
+                deadLetterStore.reset();
             }
             long offset = processAvailable(0L);
             currentOffset.set(offset);
@@ -252,6 +260,16 @@ public final class GatewayAuditIntakeService {
             event = OBJECT_MAPPER.readValue(line, GatewayAuditEvent.class);
         } catch (IOException exception) {
             skipped.incrementAndGet();
+            deadLetterStore.append(deadLetter(
+                buildEventRef(line),
+                null,
+                null,
+                null,
+                "INVALID_JSON",
+                exception.getMessage(),
+                line,
+                0L
+            ));
             return;
         }
         String eventRef = buildEventRef(line);
@@ -273,7 +291,7 @@ public final class GatewayAuditIntakeService {
 
     private void applyAccepted(GatewayAuditEvent event, String eventRef) {
         if (event.orderId() == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         JsonNode data = safeData(event.data());
@@ -327,12 +345,12 @@ public final class GatewayAuditIntakeService {
         String detail
     ) {
         if (event.orderId() == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
         if (current == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "ORDER_NOT_FOUND", "pending event の先に注文がありません");
             return;
         }
         orderStateStore.upsert(new OrderProjectionState(
@@ -369,12 +387,12 @@ public final class GatewayAuditIntakeService {
 
     private void applyAmendRequested(GatewayAuditEvent event, String eventRef) {
         if (event.orderId() == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
         if (current == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "ORDER_NOT_FOUND", "amend event の先に注文がありません");
             return;
         }
         JsonNode data = safeData(event.data());
@@ -418,12 +436,12 @@ public final class GatewayAuditIntakeService {
 
     private void applyExecutionReport(GatewayAuditEvent event, String eventRef) {
         if (event.orderId() == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
         if (current == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "ORDER_NOT_FOUND", "execution report の先に注文がありません");
             return;
         }
         JsonNode data = safeData(event.data());
@@ -485,12 +503,12 @@ public final class GatewayAuditIntakeService {
 
     private void applyOrderUpdated(GatewayAuditEvent event, String eventRef) {
         if (event.orderId() == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
         if (current == null) {
-            orphans.incrementAndGet();
+            appendOrphan(event, eventRef, "ORDER_NOT_FOUND", "order update の先に注文がありません");
             return;
         }
         JsonNode data = safeData(event.data());
@@ -641,6 +659,45 @@ public final class GatewayAuditIntakeService {
         return data == null ? OBJECT_MAPPER.createObjectNode() : data;
     }
 
+    private void appendOrphan(GatewayAuditEvent event, String eventRef, String reason, String detail) {
+        orphans.incrementAndGet();
+        deadLetterStore.append(deadLetter(
+            eventRef,
+            event.accountId(),
+            event.orderId(),
+            event.type(),
+            reason,
+            detail,
+            safeData(event.data()).toString(),
+            event.at()
+        ));
+    }
+
+    private DeadLetterEntryView deadLetter(
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String reason,
+        String detail,
+        String rawLine,
+        long eventAt
+    ) {
+        return new DeadLetterEntryView(
+            "backoffice-dlq-" + (eventRef == null ? System.nanoTime() : eventRef),
+            eventRef,
+            accountId,
+            orderId,
+            eventType,
+            reason,
+            detail,
+            rawLine,
+            eventAt,
+            System.currentTimeMillis(),
+            "gateway-audit"
+        );
+    }
+
     private static String textOr(JsonNode node, String fieldName, String fallback) {
         return node.hasNonNull(fieldName) ? node.get(fieldName).asText() : fallback;
     }
@@ -716,7 +773,8 @@ public final class GatewayAuditIntakeService {
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
-        int ledgerEntryCount
+        int ledgerEntryCount,
+        int deadLetterCount
     ) {
     }
 

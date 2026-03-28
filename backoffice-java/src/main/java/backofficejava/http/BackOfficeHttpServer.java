@@ -46,6 +46,7 @@ public final class BackOfficeHttpServer {
         ));
         server.createContext("/stats", new BackOfficeStatsHttpHandler(intakeService));
         server.createContext("/reconcile", new BackOfficeReconcileHttpHandler(intakeService));
+        server.createContext("/orphans", new BackOfficeOrphanHttpHandler(intakeService));
         server.createContext("/accounts", new AccountOverviewHttpHandler(accountOverviewReadModel));
         server.createContext("/positions", new PositionHttpHandler(positionReadModel));
         server.createContext("/fills", new FillHttpHandler(fillReadModel));

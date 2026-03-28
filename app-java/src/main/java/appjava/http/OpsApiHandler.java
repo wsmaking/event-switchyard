@@ -29,9 +29,11 @@ public final class OpsApiHandler extends JsonHttpHandler {
                 orderId,
                 omsClient.fetchStats(),
                 omsClient.fetchReconcile(resolvedAccountId),
+                omsClient.fetchOrphans(orderId, 20),
                 backOfficeClient.fetchStats(),
                 backOfficeClient.fetchReconcile(resolvedAccountId),
-                backOfficeClient.fetchLedger(resolvedAccountId, orderId, 50)
+                backOfficeClient.fetchLedger(resolvedAccountId, orderId, 50),
+                backOfficeClient.fetchOrphans(orderId, 20)
             ));
         }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/audit/replay".equals(path)) {

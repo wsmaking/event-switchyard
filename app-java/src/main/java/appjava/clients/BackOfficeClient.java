@@ -173,6 +173,29 @@ public final class BackOfficeClient {
         return postJsonWithResponse("/internal/audit/replay", new ReplayRequest(resetState), ReplayResult.class);
     }
 
+    public List<DeadLetterEntry> fetchOrphans(String orderId, int limit) {
+        try {
+            StringBuilder uri = new StringBuilder(baseUrl + "/orphans?limit=" + limit);
+            if (orderId != null && !orderId.isBlank()) {
+                uri.append("&orderId=").append(orderId);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri.toString()))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), objectMapper.getTypeFactory().constructCollectionType(List.class, DeadLetterEntry.class));
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
     private void postNoBody(String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -263,7 +286,8 @@ public final class BackOfficeClient {
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
-        int ledgerEntryCount
+        int ledgerEntryCount,
+        int deadLetterCount
     ) {
     }
 
@@ -312,6 +336,21 @@ public final class BackOfficeClient {
         long skipped,
         long duplicates,
         long orphans
+    ) {
+    }
+
+    public record DeadLetterEntry(
+        String entryId,
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String reason,
+        String detail,
+        String rawLine,
+        long eventAt,
+        long recordedAt,
+        String source
     ) {
     }
 }

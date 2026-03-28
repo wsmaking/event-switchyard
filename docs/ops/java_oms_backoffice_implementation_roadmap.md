@@ -32,9 +32,10 @@
 - OMS / BackOffice の file snapshot による restart 復元
 - `scripts/ops/run_java_replay_stack.sh` などの起動 / 停止 / smoke 導線
 - `gateway-rust` の `audit.log` を Java OMS / BackOffice が tail する intake
-- `oms-java:/stats /reconcile` `backoffice-java:/stats /reconcile /ledger`
+- `oms-java:/stats /reconcile /orphans` `backoffice-java:/stats /reconcile /ledger /orphans`
 - `app-java:/api/ops/overview` `app-java:/api/ops/audit/replay`
 - frontend からの ops 可視化と audit replay 起動
+- orphan / DLQ の保存と UI 可視化
 
 一方で、まだ未完なのは次である。
 

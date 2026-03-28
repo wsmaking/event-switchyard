@@ -245,7 +245,7 @@ scripts/ops/run_java_replay_stack.sh
 
 状態は `var/java-replay/` に保存され、再起動後も replay scenario の結果を引き継ぎます。
 
-`oms-java` と `backoffice-java` は既定で `var/gateway/audit.log` を tail し、`/stats` `/reconcile` `/ledger` を提供します。
+`oms-java` と `backoffice-java` は既定で `var/gateway/audit.log` を tail し、`/stats` `/reconcile` `/ledger` `/orphans` を提供します。
 実 event を Java 側へ再投入したい場合は `app-java` 経由で次を叩きます。
 
 ```bash
