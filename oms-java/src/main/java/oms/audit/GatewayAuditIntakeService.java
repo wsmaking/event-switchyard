@@ -37,7 +37,7 @@ public final class GatewayAuditIntakeService {
     private final OrderReadModel orderReadModel;
     private final boolean enabled;
     private final Path auditPath;
-    private final Path offsetPath;
+    private final AuditOffsetStore offsetStore;
     private final String startMode;
     private final long pollMs;
     private final Object loopLock = new Object();
@@ -54,6 +54,10 @@ public final class GatewayAuditIntakeService {
     private final Instant startedAt = Instant.now();
 
     public GatewayAuditIntakeService(OrderReadModel orderReadModel) {
+        this(orderReadModel, defaultOffsetStore());
+    }
+
+    public GatewayAuditIntakeService(OrderReadModel orderReadModel, AuditOffsetStore offsetStore) {
         this.orderReadModel = orderReadModel;
         this.enabled = parseBoolean(
             System.getProperty(
@@ -67,12 +71,7 @@ public final class GatewayAuditIntakeService {
                 System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_PATH", "var/gateway/audit.log")
             )
         );
-        this.offsetPath = resolvePath(
-            System.getProperty(
-                "oms.gateway.audit.offset.path",
-                System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_OFFSET_PATH", "var/java-replay/oms/audit.offset")
-            )
-        );
+        this.offsetStore = offsetStore;
         this.startMode = System.getProperty(
             "oms.gateway.audit.start.mode",
             System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_START_MODE", "tail")
@@ -102,7 +101,7 @@ public final class GatewayAuditIntakeService {
             enabled,
             state.get(),
             auditPath.toString(),
-            offsetPath.toString(),
+            offsetStore.describe(),
             startMode,
             startedAt,
             processed.get(),
@@ -786,27 +785,11 @@ public final class GatewayAuditIntakeService {
     }
 
     private long readOffset() {
-        try {
-            if (!Files.exists(offsetPath)) {
-                return 0L;
-            }
-            String raw = Files.readString(offsetPath).trim();
-            if (raw.isEmpty()) {
-                return 0L;
-            }
-            return Long.parseLong(raw);
-        } catch (Exception exception) {
-            return 0L;
-        }
+        return offsetStore.readOffset();
     }
 
     private void writeOffset(long offset) {
-        try {
-            Files.createDirectories(offsetPath.getParent());
-            Files.writeString(offsetPath, Long.toString(offset), StandardCharsets.UTF_8);
-        } catch (IOException exception) {
-            throw new IllegalStateException("failed_to_write_oms_audit_offset:" + offsetPath, exception);
-        }
+        offsetStore.writeOffset(offset);
     }
 
     private static boolean parseBoolean(String raw) {
@@ -824,6 +807,16 @@ public final class GatewayAuditIntakeService {
             current = current.getParent();
         }
         return current != null ? current : Path.of("").toAbsolutePath().normalize();
+    }
+
+    private static AuditOffsetStore defaultOffsetStore() {
+        Path offsetPath = resolvePath(
+            System.getProperty(
+                "oms.gateway.audit.offset.path",
+                System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_OFFSET_PATH", "var/java-replay/oms/audit.offset")
+            )
+        );
+        return new FileAuditOffsetStore(offsetPath);
     }
 
     private static String buildEventRef(String line) {
