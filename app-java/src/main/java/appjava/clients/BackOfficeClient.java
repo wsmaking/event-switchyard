@@ -153,6 +153,25 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public BackOfficeBusStats fetchBusStats() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/internal/bus/stats"))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), BackOfficeBusStats.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public List<LedgerEntry> fetchLedger(String requestedAccountId, String orderId, int limit) {
         try {
             StringBuilder uri = new StringBuilder(baseUrl + "/ledger?accountId=" + requestedAccountId + "&limit=" + limit);
@@ -360,6 +379,23 @@ public final class BackOfficeClient {
         long expectedRealizedPnl,
         List<BackOfficePosition> positions,
         List<String> issues
+    ) {
+    }
+
+    public record BackOfficeBusStats(
+        boolean enabled,
+        boolean kafkaEnabled,
+        String state,
+        String topic,
+        String groupId,
+        String startedAt,
+        long received,
+        long applied,
+        long duplicates,
+        long pending,
+        long deadLetters,
+        long errors,
+        Long lastEventAt
     ) {
     }
 

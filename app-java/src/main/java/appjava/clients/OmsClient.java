@@ -181,6 +181,24 @@ public final class OmsClient {
         return null;
     }
 
+    public OmsBusStats fetchBusStats() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/internal/bus/stats"))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), OmsBusStats.class);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public ReplayResult replayGatewayAudit(boolean resetState) {
         return postJsonWithResponse("/internal/audit/replay", new ReplayRequest(resetState), ReplayResult.class);
     }
@@ -305,6 +323,23 @@ public final class OmsClient {
         long actualReservedAmount,
         long reservedGapAmount,
         List<String> issues
+    ) {
+    }
+
+    public record OmsBusStats(
+        boolean enabled,
+        boolean kafkaEnabled,
+        String state,
+        String topic,
+        String groupId,
+        String startedAt,
+        long received,
+        long applied,
+        long duplicates,
+        long pending,
+        long deadLetters,
+        long errors,
+        Long lastEventAt
     ) {
     }
 

@@ -998,6 +998,15 @@ export function TradingView() {
                   ) : (
                     <div className="mt-3 text-sm text-slate-500">OMS stats はありません。</div>
                   )}
+                  {opsOverview.omsBusStats && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>bus state: {opsOverview.omsBusStats.state}</div>
+                      <div>bus received: {opsOverview.omsBusStats.received.toLocaleString()}</div>
+                      <div>bus applied: {opsOverview.omsBusStats.applied.toLocaleString()}</div>
+                      <div>bus pending: {opsOverview.omsBusStats.pending.toLocaleString()}</div>
+                      <div>bus errors: {opsOverview.omsBusStats.errors.toLocaleString()}</div>
+                    </div>
+                  )}
                   {opsOverview.omsReconcile && (
                     <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
                       <div>open orders: {opsOverview.omsReconcile.openOrders.toLocaleString()}</div>
@@ -1023,6 +1032,15 @@ export function TradingView() {
                     </div>
                   ) : (
                     <div className="mt-3 text-sm text-slate-500">BackOffice stats はありません。</div>
+                  )}
+                  {opsOverview.backOfficeBusStats && (
+                    <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">
+                      <div>bus state: {opsOverview.backOfficeBusStats.state}</div>
+                      <div>bus received: {opsOverview.backOfficeBusStats.received.toLocaleString()}</div>
+                      <div>bus applied: {opsOverview.backOfficeBusStats.applied.toLocaleString()}</div>
+                      <div>bus pending: {opsOverview.backOfficeBusStats.pending.toLocaleString()}</div>
+                      <div>bus errors: {opsOverview.backOfficeBusStats.errors.toLocaleString()}</div>
+                    </div>
                   )}
                   {opsOverview.backOfficeReconcile && (
                     <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3 text-xs text-slate-300">

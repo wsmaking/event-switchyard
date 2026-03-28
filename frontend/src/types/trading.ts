@@ -243,14 +243,32 @@ export interface BackOfficeReconcile {
   issues: string[];
 }
 
+export interface BusStats {
+  enabled: boolean;
+  kafkaEnabled: boolean;
+  state: string;
+  topic: string;
+  groupId: string;
+  startedAt: string;
+  received: number;
+  applied: number;
+  duplicates: number;
+  pending: number;
+  deadLetters: number;
+  errors: number;
+  lastEventAt: number | null;
+}
+
 export interface OpsOverview {
   accountId: string;
   orderId: string | null;
   omsStats: OmsStats | null;
+  omsBusStats: BusStats | null;
   omsReconcile: OmsReconcile | null;
   omsOrphans: DeadLetterEntry[];
   omsPendingOrphans: PendingOrphanEntry[];
   backOfficeStats: BackOfficeStats | null;
+  backOfficeBusStats: BusStats | null;
   backOfficeReconcile: BackOfficeReconcile | null;
   ledgerEntries: LedgerEntry[];
   backOfficeOrphans: DeadLetterEntry[];
