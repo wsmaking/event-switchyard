@@ -266,6 +266,42 @@ scripts/ops/smoke_business_replay_stack.sh
 scripts/ops/stop_business_replay_stack.sh
 ```
 
+## Business Mainline Stack
+
+Kafka / PostgreSQL / TCP venue simulator を含めた本線導線です。
+
+### 1. backend start
+
+```bash
+scripts/ops/run_business_mainline_stack.sh
+```
+
+起動後の endpoint:
+
+- `gateway-rust`: `http://localhost:8081`
+- `app-java`: `http://localhost:8080`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+
+この導線は次を前提に起動します。
+
+- Docker Compose の `postgres` `kafka` `zookeeper`
+- Kotlin `gateway.exchange.TcpExchangeSimulatorMain`
+- `gateway-rust` の `kafka-bus` feature build
+- `oms-java` / `backoffice-java` の `postgres + kafka` mode
+
+### 2. smoke
+
+```bash
+scripts/ops/smoke_business_mainline_stack.sh
+```
+
+### 3. stop
+
+```bash
+scripts/ops/stop_business_mainline_stack.sh
+```
+
 ## Java Replay Stack
 
 UI から注文し、OMS / BackOffice の最終 out まで追う Java replay 環境は別導線で起動します。
