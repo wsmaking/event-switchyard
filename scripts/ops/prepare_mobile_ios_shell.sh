@@ -5,6 +5,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WEBAPP_DIR="$ROOT_DIR/ios/MobileLearningShell/WebApp"
 
+echo "[icons] iOS app icons"
+"$ROOT_DIR/scripts/ops/render_mobile_ios_app_icons.sh"
+
 echo "[build] frontend mobile bundle"
 (
   cd "$ROOT_DIR/frontend"
