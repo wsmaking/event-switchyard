@@ -227,6 +227,43 @@ curl -sS http://127.0.0.1:8081/health
 curl -sS http://127.0.0.1:8081/metrics | head
 ```
 
+## Java Replay Stack
+
+UI から注文し、OMS / BackOffice の最終 out まで追う Java replay 環境は別導線で起動します。
+
+### 1. backend start
+
+```bash
+scripts/ops/run_java_replay_stack.sh
+```
+
+起動後の endpoint:
+
+- `app-java`: `http://localhost:8080`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+
+状態は `var/java-replay/` に保存され、再起動後も replay scenario の結果を引き継ぎます。
+
+### 2. frontend start
+
+```bash
+cd frontend
+npm run dev
+```
+
+### 3. smoke
+
+```bash
+scripts/ops/smoke_java_replay_stack.sh
+```
+
+### 4. stop
+
+```bash
+scripts/ops/stop_java_replay_stack.sh
+```
+
 ## strategy quick start
 
 ### 1. adapt

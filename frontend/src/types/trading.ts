@@ -100,8 +100,12 @@ export interface AccountOverview {
 export interface OrderFinalOut {
   order: Order;
   accountOverview: AccountOverview;
+  balanceEffect: BalanceEffect;
+  reservations: Reservation[];
+  fills: Fill[];
   positions: Position[];
   timeline: OrderTimelineEntry[];
+  rawEvents: RawEvent[];
 }
 
 export interface OrderTimelineEntry {
@@ -109,6 +113,50 @@ export interface OrderTimelineEntry {
   eventAt: number;
   label: string;
   detail: string;
+}
+
+export interface BalanceEffect {
+  cashDelta: number;
+  availableBuyingPowerDelta: number;
+  reservedBuyingPowerDelta: number;
+  realizedPnlDelta: number;
+}
+
+export interface Reservation {
+  reservationId: string;
+  accountId: string;
+  orderId: string;
+  symbol: string;
+  side: OrderSide;
+  reservedQuantity: number;
+  reservedAmount: number;
+  releasedAmount: number;
+  status: string;
+  openedAt: number;
+  updatedAt: number;
+}
+
+export interface Fill {
+  fillId: string;
+  orderId: string;
+  accountId: string;
+  symbol: string;
+  side: OrderSide;
+  quantity: number;
+  price: number;
+  notional: number;
+  liquidity: string;
+  filledAt: number;
+}
+
+export interface RawEvent {
+  orderId: string;
+  eventType: string;
+  eventAt: number;
+  label: string;
+  detail: string;
+  source: string;
+  eventRef: string;
 }
 
 export interface StrategyConfig {

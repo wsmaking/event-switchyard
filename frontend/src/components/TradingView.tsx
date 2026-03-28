@@ -777,7 +777,7 @@ export function TradingView() {
           {finalOutLoading ? (
             <div className="mt-4 text-sm text-slate-500">読み込み中...</div>
           ) : finalOut ? (
-            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-4">
+            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3">
               <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
                 <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Order</div>
                 <div className="mt-3 flex items-center justify-between">
@@ -810,6 +810,63 @@ export function TradingView() {
                   <div>建玉数: {finalOut.accountOverview.positionCount.toLocaleString()}</div>
                   <div>実現損益: ¥{finalOut.accountOverview.realizedPnl.toLocaleString()}</div>
                 </div>
+                <div className="mt-4 rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Balance Delta</div>
+                  <div className="mt-2 space-y-2 text-xs text-slate-300">
+                    <div>現金差分: {finalOut.balanceEffect.cashDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.cashDelta.toLocaleString()}</div>
+                    <div>利用可能余力差分: {finalOut.balanceEffect.availableBuyingPowerDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.availableBuyingPowerDelta.toLocaleString()}</div>
+                    <div>拘束余力差分: {finalOut.balanceEffect.reservedBuyingPowerDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.reservedBuyingPowerDelta.toLocaleString()}</div>
+                    <div>実現損益差分: {finalOut.balanceEffect.realizedPnlDelta >= 0 ? '+' : ''}¥{finalOut.balanceEffect.realizedPnlDelta.toLocaleString()}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Reservations</div>
+                {finalOut.reservations.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.reservations.map((reservation) => (
+                      <div key={reservation.reservationId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-100">{reservation.symbol}</div>
+                          <div className="text-xs text-slate-400">{reservation.status}</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-400">
+                          {reservation.reservedQuantity.toLocaleString()}株 / 拘束 ¥{reservation.reservedAmount.toLocaleString()}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          解放 ¥{reservation.releasedAmount.toLocaleString()} / 更新 {new Date(reservation.updatedAt).toLocaleTimeString('ja-JP')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">reservation はありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Fills</div>
+                {finalOut.fills.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.fills.map((fill) => (
+                      <div key={fill.fillId} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{fill.quantity.toLocaleString()}株</div>
+                          <div className="text-[11px] text-slate-500">
+                            {new Date(fill.filledAt).toLocaleTimeString('ja-JP')}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">
+                          {fill.side} / ¥{fill.price.toLocaleString()} / 約定代金 ¥{fill.notional.toLocaleString()}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">Liquidity: {fill.liquidity}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">fill はありません。</div>
+                )}
               </div>
 
               <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
@@ -851,6 +908,26 @@ export function TradingView() {
                   </div>
                 ) : (
                   <div className="mt-3 text-sm text-slate-500">イベントはまだありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Raw Event Ref</div>
+                {finalOut.rawEvents.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {finalOut.rawEvents.map((event) => (
+                      <div key={event.eventRef} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{event.eventType}</div>
+                          <div className="text-[11px] text-slate-500">{event.source}</div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">{event.eventRef}</div>
+                        <div className="mt-1 text-[11px] text-slate-500">{event.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">raw event はありません。</div>
                 )}
               </div>
             </div>

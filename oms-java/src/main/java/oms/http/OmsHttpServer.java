@@ -22,7 +22,9 @@ public final class OmsHttpServer {
             JsonHttpHandler.JsonResponse.ok(new HealthResponse("UP", "oms-java"))
         ));
         server.createContext("/orders", new OrderHttpHandler(orderReadModel));
+        server.createContext("/accounts", new AccountHttpHandler(orderReadModel));
         server.createContext("/internal/orders", new OrderInternalHttpHandler(orderReadModel));
+        server.createContext("/internal/accounts", new OrderInternalHttpHandler(orderReadModel));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         System.out.println("oms-java listening on http://localhost:" + port);

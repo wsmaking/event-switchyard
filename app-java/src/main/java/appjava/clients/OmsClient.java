@@ -1,6 +1,8 @@
 package appjava.clients;
 
+import appjava.order.OrderEventView;
 import appjava.order.OrderView;
+import appjava.order.ReservationView;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -66,6 +68,46 @@ public final class OmsClient {
         }
     }
 
+    public List<OrderEventView> fetchOrderEvents(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/orders/" + orderId + "/events"))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return List.of();
+            }
+            return objectMapper.readValue(response.body(), new TypeReference<List<OrderEventView>>() {});
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    public List<ReservationView> fetchReservations(String accountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/accounts/" + accountId + "/reservations"))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return List.of();
+            }
+            return objectMapper.readValue(response.body(), new TypeReference<List<ReservationView>>() {});
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     public void upsertOrder(OrderView orderView) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -81,6 +123,14 @@ public final class OmsClient {
         }
     }
 
+    public void replaceOrderEvents(String orderId, List<OrderEventView> events) {
+        postJson("/internal/orders/events/replace", new ReplaceOrderEventsRequest(orderId, events));
+    }
+
+    public void replaceReservations(String accountId, List<ReservationView> reservations) {
+        postJson("/internal/accounts/reservations/replace", new ReplaceReservationsRequest(accountId, reservations));
+    }
+
     public void reset() {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -93,5 +143,26 @@ public final class OmsClient {
             Thread.currentThread().interrupt();
         } catch (Exception ignored) {
         }
+    }
+
+    private void postJson(String path, Object payload) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path))
+                .timeout(Duration.ofSeconds(3))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
+                .build();
+            httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+    }
+
+    public record ReplaceOrderEventsRequest(String orderId, List<OrderEventView> events) {
+    }
+
+    public record ReplaceReservationsRequest(String accountId, List<ReservationView> reservations) {
     }
 }

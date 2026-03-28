@@ -1,31 +1,45 @@
 package backofficejava.account;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 public final class InMemoryAccountOverviewReadModel implements AccountOverviewReadModel {
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+        .registerModule(new JavaTimeModule())
+        .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
     private final String seedAccountId;
+    private final Path statePath;
     private final ConcurrentMap<String, AccountOverviewView> accounts = new ConcurrentHashMap<>();
 
     public InMemoryAccountOverviewReadModel(String accountId) {
         this.seedAccountId = accountId;
-        reset();
+        this.statePath = resolveStatePath();
+        load();
     }
 
     @Override
-    public Optional<AccountOverviewView> findByAccountId(String accountId) {
+    public synchronized Optional<AccountOverviewView> findByAccountId(String accountId) {
         return Optional.ofNullable(accounts.get(accountId));
     }
 
     @Override
-    public void upsert(AccountOverviewView view) {
+    public synchronized void upsert(AccountOverviewView view) {
         accounts.put(view.accountId(), view);
+        persist();
     }
 
     @Override
-    public void reset() {
+    public synchronized void reset() {
         accounts.clear();
         accounts.put(
             seedAccountId,
@@ -39,5 +53,42 @@ public final class InMemoryAccountOverviewReadModel implements AccountOverviewRe
                 Instant.parse("2026-03-28T00:00:01Z")
             )
         );
+        persist();
+    }
+
+    private void load() {
+        try {
+            if (!Files.exists(statePath)) {
+                reset();
+                return;
+            }
+            Snapshot snapshot = OBJECT_MAPPER.readValue(statePath.toFile(), Snapshot.class);
+            accounts.clear();
+            if (snapshot.accounts() != null) {
+                snapshot.accounts().forEach(view -> accounts.put(view.accountId(), view));
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("failed_to_load_backoffice_accounts:" + statePath, e);
+        }
+    }
+
+    private void persist() {
+        try {
+            Files.createDirectories(statePath.getParent());
+            OBJECT_MAPPER.writeValue(statePath.toFile(), new Snapshot(accounts.values().stream().toList()));
+        } catch (IOException e) {
+            throw new IllegalStateException("failed_to_persist_backoffice_accounts:" + statePath, e);
+        }
+    }
+
+    private Path resolveStatePath() {
+        String configured = System.getProperty(
+            "backoffice.accounts.path",
+            System.getenv().getOrDefault("BACKOFFICE_ACCOUNTS_PATH", "var/java-replay/backoffice/accounts.json")
+        );
+        return Path.of(configured).toAbsolutePath();
+    }
+
+    private record Snapshot(java.util.List<AccountOverviewView> accounts) {
     }
 }

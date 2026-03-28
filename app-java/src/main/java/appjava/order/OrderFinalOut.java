@@ -8,7 +8,11 @@ import java.util.List;
 public record OrderFinalOut(
     OrderView order,
     AccountOverview accountOverview,
+    BalanceEffectView balanceEffect,
+    List<ReservationView> reservations,
+    List<FillView> fills,
     List<UiPosition> positions,
-    List<OrderTimelineEntry> timeline
+    List<OrderTimelineEntry> timeline,
+    List<OrderEventView> rawEvents
 ) {
 }

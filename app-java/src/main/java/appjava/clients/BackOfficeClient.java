@@ -1,6 +1,7 @@
 package appjava.clients;
 
 import appjava.account.AccountOverview;
+import appjava.order.FillView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
@@ -66,6 +67,26 @@ public final class BackOfficeClient {
         return List.of();
     }
 
+    public List<FillView> fetchFills(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/fills?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                FillsResponse parsed = objectMapper.readValue(response.body(), FillsResponse.class);
+                return parsed.fills == null ? List.of() : parsed.fills;
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -80,6 +101,10 @@ public final class BackOfficeClient {
 
     public void replacePositions(String requestedAccountId, List<BackOfficePosition> positions) {
         postJson("/internal/positions/replace", new ReplacePositionsRequest(requestedAccountId, positions));
+    }
+
+    public void replaceFills(String orderId, List<FillView> fills) {
+        postJson("/internal/fills/replace", new ReplaceFillsRequest(orderId, fills));
     }
 
     private void postNoBody(String path) {
@@ -129,5 +154,11 @@ public final class BackOfficeClient {
     }
 
     public record ReplacePositionsRequest(String accountId, List<BackOfficePosition> positions) {
+    }
+
+    public record FillsResponse(List<FillView> fills) {
+    }
+
+    public record ReplaceFillsRequest(String orderId, List<FillView> fills) {
     }
 }

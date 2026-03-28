@@ -1,6 +1,7 @@
 package oms.http;
 
 import com.sun.net.httpserver.HttpExchange;
+import oms.order.OrderEventView;
 import oms.order.OrderReadModel;
 import oms.order.OrderView;
 
@@ -28,6 +29,10 @@ public final class OrderHttpHandler extends JsonHttpHandler {
             Optional<OrderView> order = orderReadModel.findById(segments[2]);
             return order.<JsonResponse>map(JsonResponse::ok)
                 .orElseThrow(() -> new NotFoundException("order_not_found:" + segments[2]));
+        }
+        if (segments.length == 4 && "orders".equals(segments[1]) && "events".equals(segments[3])) {
+            List<OrderEventView> events = orderReadModel.findEventsByOrderId(segments[2]);
+            return JsonResponse.ok(events);
         }
 
         throw new NotFoundException("route_not_found:" + path);

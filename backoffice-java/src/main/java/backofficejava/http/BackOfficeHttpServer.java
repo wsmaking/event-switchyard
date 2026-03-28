@@ -1,6 +1,7 @@
 package backofficejava.http;
 
 import backofficejava.account.AccountOverviewReadModel;
+import backofficejava.account.FillReadModel;
 import backofficejava.account.PositionReadModel;
 import com.sun.net.httpserver.HttpServer;
 
@@ -12,15 +13,18 @@ public final class BackOfficeHttpServer {
     private final int port;
     private final AccountOverviewReadModel accountOverviewReadModel;
     private final PositionReadModel positionReadModel;
+    private final FillReadModel fillReadModel;
 
     public BackOfficeHttpServer(
         int port,
         AccountOverviewReadModel accountOverviewReadModel,
-        PositionReadModel positionReadModel
+        PositionReadModel positionReadModel,
+        FillReadModel fillReadModel
     ) {
         this.port = port;
         this.accountOverviewReadModel = accountOverviewReadModel;
         this.positionReadModel = positionReadModel;
+        this.fillReadModel = fillReadModel;
     }
 
     public void start() throws IOException {
@@ -30,8 +34,9 @@ public final class BackOfficeHttpServer {
         ));
         server.createContext("/accounts", new AccountOverviewHttpHandler(accountOverviewReadModel));
         server.createContext("/positions", new PositionHttpHandler(positionReadModel));
-        server.createContext("/demo/reset", new DemoResetHttpHandler(accountOverviewReadModel, positionReadModel));
-        server.createContext("/internal", new BackOfficeInternalHttpHandler(accountOverviewReadModel, positionReadModel));
+        server.createContext("/fills", new FillHttpHandler(fillReadModel));
+        server.createContext("/demo/reset", new DemoResetHttpHandler(accountOverviewReadModel, positionReadModel, fillReadModel));
+        server.createContext("/internal", new BackOfficeInternalHttpHandler(accountOverviewReadModel, positionReadModel, fillReadModel));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         System.out.println("backoffice-java listening on http://localhost:" + port);

@@ -1,6 +1,7 @@
 package appjava.http;
 
 import appjava.clients.BackOfficeClient;
+import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.market.MarketDataService;
 import appjava.order.OrderService;
@@ -15,6 +16,7 @@ public final class AppHttpServer {
     private final String accountId;
     private final MarketDataService marketDataService;
     private final BackOfficeClient backOfficeClient;
+    private final OmsClient omsClient;
     private final OrderService orderService;
     private final ReplayScenarioService replayScenarioService;
 
@@ -23,6 +25,7 @@ public final class AppHttpServer {
         String accountId,
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
+        OmsClient omsClient,
         OrderService orderService,
         ReplayScenarioService replayScenarioService
     ) {
@@ -30,6 +33,7 @@ public final class AppHttpServer {
         this.accountId = accountId;
         this.marketDataService = marketDataService;
         this.backOfficeClient = backOfficeClient;
+        this.omsClient = omsClient;
         this.orderService = orderService;
         this.replayScenarioService = replayScenarioService;
     }
@@ -39,7 +43,7 @@ public final class AppHttpServer {
         server.createContext("/health", new JsonHttpHandler(exchange ->
             JsonHttpHandler.JsonResponse.ok(new HealthResponse("UP", "app-java"))
         ));
-        server.createContext("/api/orders", new OrderApiHandler(accountId, marketDataService, backOfficeClient, orderService));
+        server.createContext("/api/orders", new OrderApiHandler(accountId, marketDataService, backOfficeClient, omsClient, orderService));
         server.createContext("/api/positions", new PositionApiHandler(accountId, marketDataService, backOfficeClient));
         server.createContext("/api/market", new MarketApiHandler(marketDataService));
         server.createContext("/api/accounts", new AccountApiHandler(backOfficeClient));

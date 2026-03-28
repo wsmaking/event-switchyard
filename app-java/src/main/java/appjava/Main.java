@@ -34,6 +34,7 @@ public final class Main {
             accountId,
             marketDataService,
             backOfficeClient,
+            omsClient,
             orderService,
             replayScenarioService
         );
