@@ -5,6 +5,7 @@ import backofficejava.account.InMemoryFillReadModel;
 import backofficejava.account.InMemoryLedgerReadModel;
 import backofficejava.account.InMemoryOrderProjectionStateStore;
 import backofficejava.account.InMemoryPositionReadModel;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -15,6 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class GatewayAuditIntakeServiceTest {
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     @TempDir
     Path tempDir;
 
@@ -35,6 +38,7 @@ class GatewayAuditIntakeServiceTest {
         System.setProperty("backoffice.order.state.path", tempDir.resolve("orders.json").toString());
         System.setProperty("backoffice.gateway.audit.path", auditPath.toString());
         System.setProperty("backoffice.gateway.audit.offset.path", tempDir.resolve("audit.offset").toString());
+        System.setProperty("backoffice.aggregate.sequence.path", tempDir.resolve("aggregate-sequence.json").toString());
         System.setProperty("backoffice.gateway.audit.enable", "true");
         System.setProperty("backoffice.gateway.audit.start.mode", "tail");
 
@@ -77,6 +81,7 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("backoffice.order.state.path");
             System.clearProperty("backoffice.gateway.audit.path");
             System.clearProperty("backoffice.gateway.audit.offset.path");
+            System.clearProperty("backoffice.aggregate.sequence.path");
             System.clearProperty("backoffice.gateway.audit.enable");
             System.clearProperty("backoffice.gateway.audit.start.mode");
         }
@@ -99,6 +104,7 @@ class GatewayAuditIntakeServiceTest {
         System.setProperty("backoffice.pending.orphan.path", tempDir.resolve("pending-orphans.json").toString());
         System.setProperty("backoffice.gateway.audit.path", auditPath.toString());
         System.setProperty("backoffice.gateway.audit.offset.path", tempDir.resolve("pending-audit.offset").toString());
+        System.setProperty("backoffice.aggregate.sequence.path", tempDir.resolve("pending-aggregate-sequence.json").toString());
         System.setProperty("backoffice.gateway.audit.enable", "true");
         System.setProperty("backoffice.gateway.audit.start.mode", "tail");
 
@@ -130,8 +136,92 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("backoffice.pending.orphan.path");
             System.clearProperty("backoffice.gateway.audit.path");
             System.clearProperty("backoffice.gateway.audit.offset.path");
+            System.clearProperty("backoffice.aggregate.sequence.path");
             System.clearProperty("backoffice.gateway.audit.enable");
             System.clearProperty("backoffice.gateway.audit.start.mode");
+        }
+    }
+
+    @Test
+    void busSequenceGapReplaysPendingExecutionAfterAcceptance() {
+        System.setProperty("backoffice.accounts.path", tempDir.resolve("bus-accounts.json").toString());
+        System.setProperty("backoffice.positions.path", tempDir.resolve("bus-positions.json").toString());
+        System.setProperty("backoffice.fills.path", tempDir.resolve("bus-fills.json").toString());
+        System.setProperty("backoffice.ledger.path", tempDir.resolve("bus-ledger.json").toString());
+        System.setProperty("backoffice.order.state.path", tempDir.resolve("bus-orders.json").toString());
+        System.setProperty("backoffice.pending.orphan.path", tempDir.resolve("bus-pending-orphans.json").toString());
+        System.setProperty("backoffice.aggregate.sequence.path", tempDir.resolve("bus-aggregate-sequence.json").toString());
+
+        try {
+            var accountReadModel = new InMemoryAccountOverviewReadModel("acct_demo");
+            var positionReadModel = new InMemoryPositionReadModel("acct_demo");
+            var fillReadModel = new InMemoryFillReadModel();
+            var orderStateStore = new InMemoryOrderProjectionStateStore();
+            var ledgerReadModel = new InMemoryLedgerReadModel();
+            GatewayAuditIntakeService service = new GatewayAuditIntakeService(
+                accountReadModel,
+                positionReadModel,
+                fillReadModel,
+                orderStateStore,
+                ledgerReadModel
+            );
+
+            GatewayAuditEvent executionReport = new GatewayAuditEvent(
+                "ExecutionReport",
+                1711600001000L,
+                "acct_demo",
+                "ord_bus_1",
+                OBJECT_MAPPER.readTree("""
+                    {"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}
+                    """)
+            );
+            GatewayAuditIntakeService.IngestResult pending = service.ingestSequencedEvent(
+                executionReport,
+                "evt-bo-bus-2",
+                """
+                {"eventId":"evt-bo-bus-2","eventType":"ExecutionReport","schemaVersion":2,"sourceSystem":"gateway-rust","aggregateId":"ord_bus_1","aggregateSeq":2,"occurredAt":"2024-03-28T00:00:01Z","ingestedAt":"2024-03-28T00:00:01Z","accountId":"acct_demo","orderId":"ord_bus_1","venueOrderId":"venue-1","correlationId":"corr-1","causationId":"evt-bo-bus-1","data":{"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}}
+                """,
+                "ord_bus_1",
+                2L
+            );
+            assertEquals("PENDING", pending.status());
+            assertEquals(1, service.snapshot().pendingOrphanCount());
+
+            GatewayAuditEvent accepted = new GatewayAuditEvent(
+                "OrderAccepted",
+                1711600000000L,
+                "acct_demo",
+                "ord_bus_1",
+                OBJECT_MAPPER.readTree("""
+                    {"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-bus"}
+                    """)
+            );
+            GatewayAuditIntakeService.IngestResult applied = service.ingestSequencedEvent(
+                accepted,
+                "evt-bo-bus-1",
+                """
+                {"eventId":"evt-bo-bus-1","eventType":"OrderAccepted","schemaVersion":2,"sourceSystem":"gateway-rust","aggregateId":"ord_bus_1","aggregateSeq":1,"occurredAt":"2024-03-28T00:00:00Z","ingestedAt":"2024-03-28T00:00:00Z","accountId":"acct_demo","orderId":"ord_bus_1","venueOrderId":"venue-1","correlationId":"corr-1","causationId":"","data":{"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-bus"}}
+                """,
+                "ord_bus_1",
+                1L
+            );
+            assertEquals("APPLIED", applied.status());
+
+            assertEquals(0, service.snapshot().pendingOrphanCount());
+            assertEquals(1L, service.snapshot().sequenceGaps());
+            assertEquals(1, service.snapshot().aggregateProgressCount());
+            assertEquals(1, positionReadModel.findByAccountId("acct_demo").size());
+            assertEquals(1, fillReadModel.findByOrderId("ord_bus_1").size());
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        } finally {
+            System.clearProperty("backoffice.accounts.path");
+            System.clearProperty("backoffice.positions.path");
+            System.clearProperty("backoffice.fills.path");
+            System.clearProperty("backoffice.ledger.path");
+            System.clearProperty("backoffice.order.state.path");
+            System.clearProperty("backoffice.pending.orphan.path");
+            System.clearProperty("backoffice.aggregate.sequence.path");
         }
     }
 }

@@ -32,7 +32,8 @@ public final class Main {
             ledgerReadModel,
             runtime.auditOffsetStore(),
             runtime.deadLetterStore(),
-            runtime.pendingOrphanStore()
+            runtime.pendingOrphanStore(),
+            runtime.aggregateSequenceStore()
         );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(intakeService);
         BackOfficeHttpServer server = new BackOfficeHttpServer(

@@ -102,10 +102,12 @@ public final class BusEventIntakeService {
                 return new IngestResult("INVALID", event.eventId(), false, "unsupported_schema_version");
             }
             String eventRef = buildEventRef(event);
-            GatewayAuditIntakeService.IngestResult result = auditIntakeService.ingestEvent(
+            GatewayAuditIntakeService.IngestResult result = auditIntakeService.ingestSequencedEvent(
                 toGatewayAuditEvent(event),
                 eventRef,
-                OBJECT_MAPPER.writeValueAsString(event)
+                OBJECT_MAPPER.writeValueAsString(event),
+                firstNonBlank(event.aggregateId(), event.orderId()),
+                event.aggregateSeq()
             );
             received.incrementAndGet();
             lastEventAt.accumulateAndGet(parseEpochMillis(event.occurredAt()), Math::max);

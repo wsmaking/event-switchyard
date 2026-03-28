@@ -1,5 +1,6 @@
 package oms.audit;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import oms.order.InMemoryOrderReadModel;
 import oms.order.OrderReadModel;
 import oms.order.OrderStatus;
@@ -13,6 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class GatewayAuditIntakeServiceTest {
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     @TempDir
     Path tempDir;
 
@@ -28,9 +31,11 @@ class GatewayAuditIntakeServiceTest {
 
         Path statePath = tempDir.resolve("oms-state.json");
         Path offsetPath = tempDir.resolve("oms.offset");
+        Path aggregateSequencePath = tempDir.resolve("oms-aggregate-sequence.json");
         System.setProperty("oms.state.path", statePath.toString());
         System.setProperty("oms.gateway.audit.path", auditPath.toString());
         System.setProperty("oms.gateway.audit.offset.path", offsetPath.toString());
+        System.setProperty("oms.aggregate.sequence.path", aggregateSequencePath.toString());
         System.setProperty("oms.gateway.audit.enable", "true");
         System.setProperty("oms.gateway.audit.start.mode", "tail");
 
@@ -52,6 +57,7 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("oms.state.path");
             System.clearProperty("oms.gateway.audit.path");
             System.clearProperty("oms.gateway.audit.offset.path");
+            System.clearProperty("oms.aggregate.sequence.path");
             System.clearProperty("oms.gateway.audit.enable");
             System.clearProperty("oms.gateway.audit.start.mode");
         }
@@ -70,6 +76,7 @@ class GatewayAuditIntakeServiceTest {
         System.setProperty("oms.gateway.audit.path", auditPath.toString());
         System.setProperty("oms.gateway.audit.offset.path", tempDir.resolve("oms-pending.offset").toString());
         System.setProperty("oms.pending.orphan.path", tempDir.resolve("oms-pending-orphans.json").toString());
+        System.setProperty("oms.aggregate.sequence.path", tempDir.resolve("oms-pending-aggregate-sequence.json").toString());
         System.setProperty("oms.gateway.audit.enable", "true");
         System.setProperty("oms.gateway.audit.start.mode", "tail");
 
@@ -87,8 +94,75 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("oms.gateway.audit.path");
             System.clearProperty("oms.gateway.audit.offset.path");
             System.clearProperty("oms.pending.orphan.path");
+            System.clearProperty("oms.aggregate.sequence.path");
             System.clearProperty("oms.gateway.audit.enable");
             System.clearProperty("oms.gateway.audit.start.mode");
+        }
+    }
+
+    @Test
+    void busSequenceGapReplaysPendingExecutionAfterAcceptance() {
+        System.setProperty("oms.state.path", tempDir.resolve("oms-bus-state.json").toString());
+        System.setProperty("oms.pending.orphan.path", tempDir.resolve("oms-bus-pending.json").toString());
+        System.setProperty("oms.aggregate.sequence.path", tempDir.resolve("oms-bus-aggregate-sequence.json").toString());
+
+        try {
+            OrderReadModel readModel = new InMemoryOrderReadModel("acct_demo");
+            GatewayAuditIntakeService service = new GatewayAuditIntakeService(readModel);
+
+            GatewayAuditEvent executionReport = new GatewayAuditEvent(
+                "ExecutionReport",
+                1711600001000L,
+                "acct_demo",
+                "ord_bus_1",
+                OBJECT_MAPPER.readTree("""
+                    {"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}
+                    """)
+            );
+            GatewayAuditIntakeService.IngestResult pending = service.ingestSequencedEvent(
+                executionReport,
+                "evt-bus-2",
+                """
+                {"eventId":"evt-bus-2","eventType":"ExecutionReport","schemaVersion":2,"sourceSystem":"gateway-rust","aggregateId":"ord_bus_1","aggregateSeq":2,"occurredAt":"2024-03-28T00:00:01Z","ingestedAt":"2024-03-28T00:00:01Z","accountId":"acct_demo","orderId":"ord_bus_1","venueOrderId":"venue-1","correlationId":"corr-1","causationId":"evt-bus-1","data":{"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}}
+                """,
+                "ord_bus_1",
+                2L
+            );
+            assertEquals("PENDING", pending.status());
+            assertEquals(1, service.snapshot().pendingOrphanCount());
+
+            GatewayAuditEvent accepted = new GatewayAuditEvent(
+                "OrderAccepted",
+                1711600000000L,
+                "acct_demo",
+                "ord_bus_1",
+                OBJECT_MAPPER.readTree("""
+                    {"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-bus"}
+                    """)
+            );
+            GatewayAuditIntakeService.IngestResult applied = service.ingestSequencedEvent(
+                accepted,
+                "evt-bus-1",
+                """
+                {"eventId":"evt-bus-1","eventType":"OrderAccepted","schemaVersion":2,"sourceSystem":"gateway-rust","aggregateId":"ord_bus_1","aggregateSeq":1,"occurredAt":"2024-03-28T00:00:00Z","ingestedAt":"2024-03-28T00:00:00Z","accountId":"acct_demo","orderId":"ord_bus_1","venueOrderId":"venue-1","correlationId":"corr-1","causationId":"","data":{"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-bus"}}
+                """,
+                "ord_bus_1",
+                1L
+            );
+            assertEquals("APPLIED", applied.status());
+
+            var order = readModel.findById("ord_bus_1").orElseThrow();
+            assertEquals(OrderStatus.FILLED, order.status());
+            assertEquals(100L, order.filledQuantity());
+            assertEquals(0, service.snapshot().pendingOrphanCount());
+            assertEquals(1L, service.snapshot().sequenceGaps());
+            assertEquals(1, service.snapshot().aggregateProgressCount());
+        } catch (Exception exception) {
+            throw new AssertionError(exception);
+        } finally {
+            System.clearProperty("oms.state.path");
+            System.clearProperty("oms.pending.orphan.path");
+            System.clearProperty("oms.aggregate.sequence.path");
         }
     }
 }

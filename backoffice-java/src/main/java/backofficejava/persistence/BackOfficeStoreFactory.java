@@ -11,11 +11,14 @@ import backofficejava.account.JdbcBackOfficeStore;
 import backofficejava.account.LedgerReadModel;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
+import backofficejava.audit.AggregateSequenceStore;
 import backofficejava.audit.AuditOffsetStore;
 import backofficejava.audit.DeadLetterStore;
 import backofficejava.audit.FileAuditOffsetStore;
+import backofficejava.audit.InMemoryAggregateSequenceStore;
 import backofficejava.audit.InMemoryDeadLetterStore;
 import backofficejava.audit.InMemoryPendingOrphanStore;
+import backofficejava.audit.JdbcAggregateSequenceStore;
 import backofficejava.audit.JdbcAuditOffsetStore;
 import backofficejava.audit.JdbcDeadLetterStore;
 import backofficejava.audit.JdbcPendingOrphanStore;
@@ -35,12 +38,14 @@ public final class BackOfficeStoreFactory {
             SqlMigrationRunner.run(
                 connectionFactory,
                 "db/migration/V1__backoffice_schema.sql",
-                "db/migration/V2__backoffice_orphan_state.sql"
+                "db/migration/V2__backoffice_orphan_state.sql",
+                "db/migration/V3__backoffice_aggregate_progress.sql"
             );
             JdbcBackOfficeStore store = new JdbcBackOfficeStore(connectionFactory, accountId);
             AuditOffsetStore offsetStore = new JdbcAuditOffsetStore(connectionFactory, "gateway-audit");
             DeadLetterStore deadLetterStore = new JdbcDeadLetterStore(connectionFactory);
             PendingOrphanStore pendingOrphanStore = new JdbcPendingOrphanStore(connectionFactory);
+            AggregateSequenceStore aggregateSequenceStore = new JdbcAggregateSequenceStore(connectionFactory);
             return new BackOfficeRuntime(
                 store.accountOverviewReadModel(),
                 store.positionReadModel(),
@@ -50,6 +55,7 @@ public final class BackOfficeStoreFactory {
                 offsetStore,
                 deadLetterStore,
                 pendingOrphanStore,
+                aggregateSequenceStore,
                 "postgres"
             );
         }
@@ -74,6 +80,7 @@ public final class BackOfficeStoreFactory {
             new FileAuditOffsetStore(offsetPath),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),
+            new InMemoryAggregateSequenceStore(),
             "memory"
         );
     }

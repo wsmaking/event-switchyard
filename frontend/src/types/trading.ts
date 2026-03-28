@@ -170,12 +170,14 @@ export interface OmsStats {
   skipped: number;
   duplicates: number;
   orphans: number;
+  sequenceGaps: number;
   replays: number;
   lastEventAt: number | null;
   currentOffset: number;
   currentAuditSize: number;
   deadLetterCount: number;
   pendingOrphanCount: number;
+  aggregateProgressCount: number;
 }
 
 export interface OmsReconcile {
@@ -199,6 +201,7 @@ export interface BackOfficeStats {
   skipped: number;
   duplicates: number;
   orphans: number;
+  sequenceGaps: number;
   replays: number;
   lastEventAt: number | null;
   currentOffset: number;
@@ -206,6 +209,7 @@ export interface BackOfficeStats {
   ledgerEntryCount: number;
   deadLetterCount: number;
   pendingOrphanCount: number;
+  aggregateProgressCount: number;
 }
 
 export interface LedgerEntry {

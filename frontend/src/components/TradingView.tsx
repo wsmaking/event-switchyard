@@ -990,8 +990,10 @@ export function TradingView() {
                       <div>処理件数: {opsOverview.omsStats.processed.toLocaleString()}</div>
                       <div>重複: {opsOverview.omsStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.omsStats.orphans.toLocaleString()}</div>
+                      <div>Seq Gap: {opsOverview.omsStats.sequenceGaps.toLocaleString()}</div>
                       <div>DLQ: {opsOverview.omsStats.deadLetterCount.toLocaleString()}</div>
                       <div>Pending: {opsOverview.omsStats.pendingOrphanCount.toLocaleString()}</div>
+                      <div>Seq State: {opsOverview.omsStats.aggregateProgressCount.toLocaleString()}</div>
                       <div>Replay回数: {opsOverview.omsStats.replays.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.omsStats.lastEventAt)}</div>
                     </div>
@@ -1026,8 +1028,10 @@ export function TradingView() {
                       <div>Ledger件数: {opsOverview.backOfficeStats.ledgerEntryCount.toLocaleString()}</div>
                       <div>重複: {opsOverview.backOfficeStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.backOfficeStats.orphans.toLocaleString()}</div>
+                      <div>Seq Gap: {opsOverview.backOfficeStats.sequenceGaps.toLocaleString()}</div>
                       <div>DLQ: {opsOverview.backOfficeStats.deadLetterCount.toLocaleString()}</div>
                       <div>Pending: {opsOverview.backOfficeStats.pendingOrphanCount.toLocaleString()}</div>
+                      <div>Seq State: {opsOverview.backOfficeStats.aggregateProgressCount.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.backOfficeStats.lastEventAt)}</div>
                     </div>
                   ) : (

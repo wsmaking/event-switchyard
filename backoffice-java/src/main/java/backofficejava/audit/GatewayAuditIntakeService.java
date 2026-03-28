@@ -10,6 +10,7 @@ import backofficejava.account.OrderProjectionState;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
+import backofficejava.bus.BusEventV2;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -44,6 +45,7 @@ public final class GatewayAuditIntakeService {
     private final LedgerReadModel ledgerReadModel;
     private final DeadLetterStore deadLetterStore;
     private final PendingOrphanStore pendingOrphanStore;
+    private final AggregateSequenceStore aggregateSequenceStore;
     private final boolean enabled;
     private final Path auditPath;
     private final AuditOffsetStore offsetStore;
@@ -54,6 +56,7 @@ public final class GatewayAuditIntakeService {
     private final AtomicLong skipped = new AtomicLong();
     private final AtomicLong duplicates = new AtomicLong();
     private final AtomicLong orphans = new AtomicLong();
+    private final AtomicLong sequenceGaps = new AtomicLong();
     private final AtomicLong replays = new AtomicLong();
     private final AtomicLong currentOffset = new AtomicLong();
     private final AtomicLong lastEventAt = new AtomicLong();
@@ -75,7 +78,8 @@ public final class GatewayAuditIntakeService {
             ledgerReadModel,
             defaultOffsetStore(),
             new InMemoryDeadLetterStore(),
-            new InMemoryPendingOrphanStore()
+            new InMemoryPendingOrphanStore(),
+            new InMemoryAggregateSequenceStore()
         );
     }
 
@@ -95,7 +99,8 @@ public final class GatewayAuditIntakeService {
             ledgerReadModel,
             offsetStore,
             new InMemoryDeadLetterStore(),
-            new InMemoryPendingOrphanStore()
+            new InMemoryPendingOrphanStore(),
+            new InMemoryAggregateSequenceStore()
         );
     }
 
@@ -107,7 +112,8 @@ public final class GatewayAuditIntakeService {
         LedgerReadModel ledgerReadModel,
         AuditOffsetStore offsetStore,
         DeadLetterStore deadLetterStore,
-        PendingOrphanStore pendingOrphanStore
+        PendingOrphanStore pendingOrphanStore,
+        AggregateSequenceStore aggregateSequenceStore
     ) {
         this.accountOverviewReadModel = accountOverviewReadModel;
         this.positionReadModel = positionReadModel;
@@ -139,6 +145,7 @@ public final class GatewayAuditIntakeService {
         );
         this.deadLetterStore = deadLetterStore;
         this.pendingOrphanStore = pendingOrphanStore;
+        this.aggregateSequenceStore = aggregateSequenceStore;
     }
 
     public void start() {
@@ -163,13 +170,15 @@ public final class GatewayAuditIntakeService {
             skipped.get(),
             duplicates.get(),
             orphans.get(),
+            sequenceGaps.get(),
             replays.get(),
             lastEventAt.get() == 0 ? null : lastEventAt.get(),
             currentOffset.get(),
             currentAuditSize(),
             ledgerReadModel.find(null, null, null, Integer.MAX_VALUE, null).size(),
             deadLetterStore.size(),
-            pendingOrphanStore.size()
+            pendingOrphanStore.size(),
+            aggregateSequenceStore.size()
         );
     }
 
@@ -192,6 +201,7 @@ public final class GatewayAuditIntakeService {
                 ledgerReadModel.reset();
                 deadLetterStore.reset();
                 pendingOrphanStore.reset();
+                aggregateSequenceStore.reset();
             }
             long offset = processAvailable(0L);
             currentOffset.set(offset);
@@ -215,9 +225,17 @@ public final class GatewayAuditIntakeService {
             if (entry == null) {
                 return new DeadLetterRequeueResult("NOT_FOUND", eventRef, "NOT_FOUND", pendingOrphanStore.size(), deadLetterStore.size());
             }
-            GatewayAuditEvent event;
+            DecodedEnvelope envelope;
             try {
-                event = OBJECT_MAPPER.readValue(entry.rawLine(), GatewayAuditEvent.class);
+                envelope = decodeStoredEnvelope(
+                    entry.eventRef(),
+                    entry.rawLine(),
+                    entry.accountId(),
+                    entry.orderId(),
+                    entry.eventType(),
+                    entry.eventAt(),
+                    entry.source()
+                );
             } catch (IOException exception) {
                 deadLetterStore.append(deadLetter(
                     entry.eventRef(),
@@ -231,16 +249,16 @@ public final class GatewayAuditIntakeService {
                 ));
                 return new DeadLetterRequeueResult("FAILED", eventRef, "PARSE_FAILED", pendingOrphanStore.size(), deadLetterStore.size());
             }
-            boolean applied = handleEvent(event, entry.eventRef(), entry.rawLine(), true);
-            boolean queuedPending = event.orderId() != null && pendingOrphanStore.find(event.orderId(), Integer.MAX_VALUE).stream()
+            IngestResult result = ingestDecodedEnvelope(envelope, true);
+            boolean queuedPending = envelope.event().orderId() != null && pendingOrphanStore.find(envelope.event().orderId(), Integer.MAX_VALUE).stream()
                 .anyMatch(candidate -> eventRef.equals(candidate.eventRef()));
-            if (applied || queuedPending) {
+            if (result.applied() || queuedPending || "DUPLICATE".equals(result.status())) {
                 deadLetterStore.removeByEventRef(eventRef);
             }
             return new DeadLetterRequeueResult(
-                applied || queuedPending ? "REQUEUED" : "UNCHANGED",
+                result.applied() || queuedPending || "DUPLICATE".equals(result.status()) ? "REQUEUED" : "UNCHANGED",
                 eventRef,
-                applied ? "REPROCESSED" : queuedPending ? "PENDING" : "STILL_DLQ",
+                result.applied() ? "REPROCESSED" : queuedPending ? "PENDING" : "DUPLICATE".equals(result.status()) ? "DUPLICATE" : "STILL_DLQ",
                 pendingOrphanStore.size(),
                 deadLetterStore.size()
             );
@@ -248,9 +266,35 @@ public final class GatewayAuditIntakeService {
     }
 
     public IngestResult ingestEvent(GatewayAuditEvent event, String eventRef, String rawLine) {
+        return ingestEventInternal(event, eventRef, rawLine, null);
+    }
+
+    public IngestResult ingestSequencedEvent(
+        GatewayAuditEvent event,
+        String eventRef,
+        String rawLine,
+        String aggregateId,
+        long aggregateSeq
+    ) {
+        return ingestEventInternal(event, eventRef, rawLine, new SequenceContext(aggregateId, aggregateSeq, "gateway-bus"));
+    }
+
+    private IngestResult ingestEventInternal(
+        GatewayAuditEvent event,
+        String eventRef,
+        String rawLine,
+        SequenceContext sequenceContext
+    ) {
         synchronized (loopLock) {
-            String normalizedEventRef = eventRef == null || eventRef.isBlank() ? "bus-" + System.nanoTime() : eventRef;
+            String normalizedEventRef = eventRef == null || eventRef.isBlank() ? "event-" + System.nanoTime() : eventRef;
             String normalizedRawLine = rawLine == null || rawLine.isBlank() ? serializeEvent(event) : rawLine;
+            if (sequenceContext != null) {
+                IngestResult sequenceResult = validateSequence(event, normalizedEventRef, normalizedRawLine, sequenceContext);
+                if (sequenceResult != null) {
+                    lastEventAt.accumulateAndGet(event.at(), Math::max);
+                    return sequenceResult;
+                }
+            }
             if (ledgerReadModel.containsEventRef(normalizedEventRef)) {
                 duplicates.incrementAndGet();
                 return new IngestResult("DUPLICATE", normalizedEventRef, event.orderId(), false);
@@ -258,6 +302,12 @@ public final class GatewayAuditIntakeService {
             boolean applied = handleEvent(event, normalizedEventRef, normalizedRawLine, true);
             lastEventAt.accumulateAndGet(event.at(), Math::max);
             if (applied) {
+                if (sequenceContext != null) {
+                    aggregateSequenceStore.markApplied(sequenceContext.aggregateId(), sequenceContext.aggregateSeq(), normalizedEventRef, event.at());
+                }
+                if (event.orderId() != null) {
+                    replayPendingLocked(event.orderId());
+                }
                 return new IngestResult("APPLIED", normalizedEventRef, event.orderId(), true);
             }
             if (deadLetterStore.findByEventRef(normalizedEventRef) != null) {
@@ -382,20 +432,13 @@ public final class GatewayAuditIntakeService {
             ));
             return;
         }
-        String eventRef = buildEventRef(line);
-        if (ledgerReadModel.containsEventRef(eventRef)) {
-            duplicates.incrementAndGet();
-            return;
-        }
-
-        handleEvent(event, eventRef, line, true);
-        lastEventAt.accumulateAndGet(event.at(), Math::max);
+        ingestEvent(event, buildEventRef(line), line);
     }
 
     private boolean handleEvent(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         return switch (event.type()) {
             case "OrderAccepted" -> {
-                applyAccepted(event, eventRef);
+                applyAccepted(event, eventRef, rawLine);
                 yield true;
             }
             case "ExecutionReport" -> applyExecutionReport(event, eventRef, rawLine, queueIfMissing);
@@ -404,6 +447,8 @@ public final class GatewayAuditIntakeService {
             case "CancelRejected" -> applyCancelRejected(event, eventRef, rawLine, queueIfMissing);
             case "AmendRejected" -> applyAmendRejected(event, eventRef, rawLine, queueIfMissing);
             case "OrderUpdated" -> applyOrderUpdated(event, eventRef, rawLine, queueIfMissing);
+            case "CancelAccepted" -> applyTerminalStatus(event, eventRef, rawLine, queueIfMissing, "CANCELED", "ORDER_CANCELED", "取消完了");
+            case "Expired" -> applyTerminalStatus(event, eventRef, rawLine, queueIfMissing, "EXPIRED", "ORDER_EXPIRED", "失効");
             default -> {
                 skipped.incrementAndGet();
                 yield true;
@@ -411,9 +456,9 @@ public final class GatewayAuditIntakeService {
         };
     }
 
-    private void applyAccepted(GatewayAuditEvent event, String eventRef) {
+    private void applyAccepted(GatewayAuditEvent event, String eventRef, String rawLine) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return;
         }
         JsonNode data = safeData(event.data());
@@ -456,7 +501,6 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
-        replayPendingLocked(event.orderId());
         processed.incrementAndGet();
     }
 
@@ -470,7 +514,7 @@ public final class GatewayAuditIntakeService {
         String detail
     ) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -512,7 +556,7 @@ public final class GatewayAuditIntakeService {
 
     private boolean applyAmendRequested(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -561,7 +605,7 @@ public final class GatewayAuditIntakeService {
 
     private boolean applyCancelRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -606,7 +650,7 @@ public final class GatewayAuditIntakeService {
 
     private boolean applyAmendRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -656,7 +700,7 @@ public final class GatewayAuditIntakeService {
 
     private boolean applyExecutionReport(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -723,7 +767,7 @@ public final class GatewayAuditIntakeService {
 
     private boolean applyOrderUpdated(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
         if (event.orderId() == null) {
-            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
             return false;
         }
         OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
@@ -759,6 +803,64 @@ public final class GatewayAuditIntakeService {
             0L,
             0L,
             status + " / filled=" + filledTotal,
+            event.at(),
+            "gateway-audit"
+        ));
+        processed.incrementAndGet();
+        return true;
+    }
+
+    private boolean applyTerminalStatus(
+        GatewayAuditEvent event,
+        String eventRef,
+        String rawLine,
+        boolean queueIfMissing,
+        String nextStatus,
+        String eventType,
+        String detail
+    ) {
+        if (event.orderId() == null) {
+            appendOrphan(event, eventRef, rawLine, "MISSING_ORDER_ID", "orderId がありません");
+            return false;
+        }
+        OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
+        if (current == null) {
+            return handleMissingOrder(event, eventRef, rawLine, queueIfMissing, "ORDER_NOT_FOUND", detail + " の先に注文がありません");
+        }
+        JsonNode data = safeData(event.data());
+        long filledQty = Math.max(current.filledQuantity(), data.path("filledQty").asLong(current.filledQuantity()));
+        long remainingQuantity = Math.max(0L, current.quantity() - filledQty);
+        long nextReserved = "BUY".equalsIgnoreCase(current.side()) && !isTerminalStatus(nextStatus)
+            ? remainingQuantity * current.workingPrice()
+            : 0L;
+        long reservedDelta = nextReserved - current.reservedAmount();
+        orderStateStore.upsert(new OrderProjectionState(
+            current.orderId(),
+            current.accountId(),
+            current.symbol(),
+            current.side(),
+            current.quantity(),
+            current.workingPrice(),
+            current.submittedAt(),
+            event.at(),
+            normalizedStatus(nextStatus),
+            filledQty,
+            nextReserved
+        ));
+        applyOverviewDelta(current.accountId(), 0L, reservedDelta, 0L);
+        appendLedger(new LedgerEntryView(
+            "ledger-" + current.orderId() + "-" + eventType.toLowerCase() + "-" + event.at(),
+            eventRef,
+            current.accountId(),
+            current.orderId(),
+            eventType,
+            current.symbol(),
+            current.side(),
+            0L,
+            0L,
+            reservedDelta,
+            0L,
+            textOr(data, "reason", detail),
             event.at(),
             "gateway-audit"
         ));
@@ -865,29 +967,45 @@ public final class GatewayAuditIntakeService {
 
     private int replayPendingLocked(String orderId) {
         int reprocessed = 0;
-        for (PendingOrphanEntryView entry : pendingOrphanStore.find(orderId, Integer.MAX_VALUE)) {
-            GatewayAuditEvent event;
-            try {
-                event = OBJECT_MAPPER.readValue(entry.rawLine(), GatewayAuditEvent.class);
-            } catch (IOException exception) {
-                deadLetterStore.append(deadLetter(
-                    entry.eventRef(),
-                    entry.accountId(),
-                    entry.orderId(),
-                    entry.eventType(),
-                    "PENDING_REPLAY_PARSE_FAILED",
-                    exception.getMessage(),
-                    entry.rawLine(),
-                    entry.eventAt()
-                ));
-                pendingOrphanStore.removeByEventRef(entry.eventRef());
-                continue;
+        boolean advanced;
+        do {
+            advanced = false;
+            for (PendingOrphanEntryView entry : pendingOrphanStore.find(orderId, Integer.MAX_VALUE)) {
+                DecodedEnvelope envelope;
+                try {
+                    envelope = decodeStoredEnvelope(
+                        entry.eventRef(),
+                        entry.rawLine(),
+                        entry.accountId(),
+                        entry.orderId(),
+                        entry.eventType(),
+                        entry.eventAt(),
+                        entry.source()
+                    );
+                } catch (IOException exception) {
+                    deadLetterStore.append(deadLetter(
+                        entry.eventRef(),
+                        entry.accountId(),
+                        entry.orderId(),
+                        entry.eventType(),
+                        "PENDING_REPLAY_PARSE_FAILED",
+                        exception.getMessage(),
+                        entry.rawLine(),
+                        entry.eventAt()
+                    ));
+                    pendingOrphanStore.removeByEventRef(entry.eventRef());
+                    continue;
+                }
+                IngestResult result = ingestDecodedEnvelope(envelope, false);
+                if (result.applied() || "DUPLICATE".equals(result.status()) || "DLQ".equals(result.status())) {
+                    pendingOrphanStore.removeByEventRef(entry.eventRef());
+                    if (result.applied()) {
+                        reprocessed++;
+                        advanced = true;
+                    }
+                }
             }
-            if (handleEvent(event, entry.eventRef(), entry.rawLine(), false)) {
-                pendingOrphanStore.removeByEventRef(entry.eventRef());
-                reprocessed++;
-            }
-        }
+        } while (advanced);
         return reprocessed;
     }
 
@@ -917,7 +1035,7 @@ public final class GatewayAuditIntakeService {
         return false;
     }
 
-    private void appendOrphan(GatewayAuditEvent event, String eventRef, String reason, String detail) {
+    private void appendOrphan(GatewayAuditEvent event, String eventRef, String rawLine, String reason, String detail) {
         orphans.incrementAndGet();
         deadLetterStore.append(deadLetter(
             eventRef,
@@ -926,7 +1044,7 @@ public final class GatewayAuditIntakeService {
             event.type(),
             reason,
             detail,
-            serializeEvent(event),
+            rawLine == null || rawLine.isBlank() ? serializeEvent(event) : rawLine,
             event.at()
         ));
     }
@@ -954,6 +1072,125 @@ public final class GatewayAuditIntakeService {
             System.currentTimeMillis(),
             "gateway-audit"
         );
+    }
+
+    private IngestResult ingestDecodedEnvelope(DecodedEnvelope envelope, boolean queueIfMissing) {
+        String normalizedEventRef = envelope.eventRef() == null || envelope.eventRef().isBlank()
+            ? "event-" + System.nanoTime()
+            : envelope.eventRef();
+        if (envelope.sequenceContext() != null) {
+            IngestResult sequenceResult = validateSequence(
+                envelope.event(),
+                normalizedEventRef,
+                envelope.rawLine(),
+                envelope.sequenceContext()
+            );
+            if (sequenceResult != null) {
+                lastEventAt.accumulateAndGet(envelope.event().at(), Math::max);
+                return sequenceResult;
+            }
+        }
+        if (ledgerReadModel.containsEventRef(normalizedEventRef)) {
+            duplicates.incrementAndGet();
+            return new IngestResult("DUPLICATE", normalizedEventRef, envelope.event().orderId(), false);
+        }
+        boolean applied = handleEvent(envelope.event(), normalizedEventRef, envelope.rawLine(), queueIfMissing);
+        lastEventAt.accumulateAndGet(envelope.event().at(), Math::max);
+        if (applied) {
+            if (envelope.sequenceContext() != null) {
+                aggregateSequenceStore.markApplied(
+                    envelope.sequenceContext().aggregateId(),
+                    envelope.sequenceContext().aggregateSeq(),
+                    normalizedEventRef,
+                    envelope.event().at()
+                );
+            }
+            if (queueIfMissing && envelope.event().orderId() != null) {
+                replayPendingLocked(envelope.event().orderId());
+            }
+            return new IngestResult("APPLIED", normalizedEventRef, envelope.event().orderId(), true);
+        }
+        if (deadLetterStore.findByEventRef(normalizedEventRef) != null) {
+            return new IngestResult("DLQ", normalizedEventRef, envelope.event().orderId(), false);
+        }
+        return new IngestResult("PENDING", normalizedEventRef, envelope.event().orderId(), false);
+    }
+
+    private IngestResult validateSequence(
+        GatewayAuditEvent event,
+        String eventRef,
+        String rawLine,
+        SequenceContext sequenceContext
+    ) {
+        if (sequenceContext.aggregateId() == null || sequenceContext.aggregateId().isBlank() || sequenceContext.aggregateSeq() <= 0L) {
+            deadLetterStore.append(deadLetter(
+                eventRef,
+                event.accountId(),
+                event.orderId(),
+                event.type(),
+                "INVALID_AGGREGATE_SEQUENCE",
+                "aggregateId または aggregateSeq が不正です",
+                rawLine,
+                event.at()
+            ));
+            return new IngestResult("DLQ", eventRef, event.orderId(), false);
+        }
+        long lastApplied = aggregateSequenceStore.readLastApplied(sequenceContext.aggregateId());
+        if (sequenceContext.aggregateSeq() <= lastApplied) {
+            duplicates.incrementAndGet();
+            return new IngestResult("DUPLICATE", eventRef, event.orderId(), false);
+        }
+        if (sequenceContext.aggregateSeq() > lastApplied + 1L) {
+            sequenceGaps.incrementAndGet();
+            pendingOrphanStore.append(new PendingOrphanEntryView(
+                "backoffice-pending-" + eventRef,
+                eventRef,
+                event.accountId(),
+                event.orderId(),
+                event.type(),
+                "SEQUENCE_GAP_EXPECTED_" + (lastApplied + 1L) + "_GOT_" + sequenceContext.aggregateSeq(),
+                rawLine,
+                event.at(),
+                System.currentTimeMillis(),
+                sequenceContext.source()
+            ));
+            return new IngestResult("PENDING", eventRef, event.orderId(), false);
+        }
+        return null;
+    }
+
+    private DecodedEnvelope decodeStoredEnvelope(
+        String eventRef,
+        String rawLine,
+        String fallbackAccountId,
+        String fallbackOrderId,
+        String fallbackEventType,
+        long fallbackEventAt,
+        String fallbackSource
+    ) throws IOException {
+        JsonNode root = OBJECT_MAPPER.readTree(rawLine);
+        if (root.has("schemaVersion") || root.has("aggregateSeq")) {
+            BusEventV2 busEvent = OBJECT_MAPPER.treeToValue(root, BusEventV2.class);
+            GatewayAuditEvent event = new GatewayAuditEvent(
+                firstNonBlank(busEvent.eventType(), fallbackEventType),
+                parseEpochMillis(busEvent.occurredAt(), fallbackEventAt),
+                firstNonBlank(busEvent.accountId(), fallbackAccountId),
+                firstNonBlank(busEvent.orderId(), firstNonBlank(busEvent.aggregateId(), fallbackOrderId)),
+                busEvent.data()
+            );
+            return new DecodedEnvelope(
+                event,
+                eventRef,
+                rawLine,
+                new SequenceContext(
+                    firstNonBlank(busEvent.aggregateId(), event.orderId()),
+                    busEvent.aggregateSeq(),
+                    firstNonBlank(fallbackSource, "gateway-bus")
+                )
+            );
+        }
+        GatewayAuditEvent event = OBJECT_MAPPER.treeToValue(root, GatewayAuditEvent.class);
+        return new DecodedEnvelope(event, eventRef, rawLine, null);
     }
 
     private static String textOr(JsonNode node, String fieldName, String fallback) {
@@ -1030,6 +1267,17 @@ public final class GatewayAuditIntakeService {
         }
     }
 
+    private static long parseEpochMillis(String occurredAt, long fallback) {
+        if (occurredAt == null || occurredAt.isBlank()) {
+            return fallback;
+        }
+        return Instant.parse(occurredAt).toEpochMilli();
+    }
+
+    private static String firstNonBlank(String primary, String fallback) {
+        return primary != null && !primary.isBlank() ? primary : fallback;
+    }
+
     private static double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
     }
@@ -1045,13 +1293,15 @@ public final class GatewayAuditIntakeService {
         long skipped,
         long duplicates,
         long orphans,
+        long sequenceGaps,
         long replays,
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
         int ledgerEntryCount,
         int deadLetterCount,
-        int pendingOrphanCount
+        int pendingOrphanCount,
+        int aggregateProgressCount
     ) {
     }
 
@@ -1111,5 +1361,16 @@ public final class GatewayAuditIntakeService {
     }
 
     private record PositionMutation(List<PositionView> positions, long realizedPnlDelta) {
+    }
+
+    private record SequenceContext(String aggregateId, long aggregateSeq, String source) {
+    }
+
+    private record DecodedEnvelope(
+        GatewayAuditEvent event,
+        String eventRef,
+        String rawLine,
+        SequenceContext sequenceContext
+    ) {
     }
 }

@@ -306,12 +306,14 @@ public final class OmsClient {
         long skipped,
         long duplicates,
         long orphans,
+        long sequenceGaps,
         long replays,
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
         int deadLetterCount,
-        int pendingOrphanCount
+        int pendingOrphanCount,
+        int aggregateProgressCount
     ) {
     }
 

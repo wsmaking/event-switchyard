@@ -358,13 +358,15 @@ public final class BackOfficeClient {
         long skipped,
         long duplicates,
         long orphans,
+        long sequenceGaps,
         long replays,
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
         int ledgerEntryCount,
         int deadLetterCount,
-        int pendingOrphanCount
+        int pendingOrphanCount,
+        int aggregateProgressCount
     ) {
     }
 

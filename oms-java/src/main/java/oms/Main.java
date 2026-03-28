@@ -20,7 +20,8 @@ public final class Main {
             readModel,
             runtime.auditOffsetStore(),
             runtime.deadLetterStore(),
-            runtime.pendingOrphanStore()
+            runtime.pendingOrphanStore(),
+            runtime.aggregateSequenceStore()
         );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(auditIntakeService);
         OmsHttpServer server = new OmsHttpServer(port, readModel, auditIntakeService, busEventIntakeService);
