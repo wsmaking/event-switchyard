@@ -17,7 +17,7 @@ echo "[build] frontend mobile bundle"
 echo "[sync] iOS WebApp resources"
 mkdir -p "$WEBAPP_DIR"
 rsync -a --delete --exclude '.gitignore' "$ROOT_DIR/frontend/dist/" "$WEBAPP_DIR/"
-perl -0pi -e 's/href="\/([^"]+)"/href=".\/$1"/g; s/src="\/([^"]+)"/src=".\/$1"/g' "$WEBAPP_DIR/index.html"
+perl -0pi -e 's/\s+crossorigin(?:="")?//g; s/href="\/([^"]+)"/href=".\/$1"/g; s/src="\/([^"]+)"/src=".\/$1"/g' "$WEBAPP_DIR/index.html"
 
 echo "[ok] iOS shell resources prepared"
 echo "  xcodeproj : $ROOT_DIR/ios/MobileLearningShell.xcodeproj"
