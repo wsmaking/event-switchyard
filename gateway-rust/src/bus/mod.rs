@@ -218,6 +218,26 @@ impl BusPublisher {
         }
     }
 
+    pub fn publish_raw_blocking(&self, key: &str, payload: Vec<u8>) -> bool {
+        if !self.enabled {
+            self.stats.publish_dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        #[cfg(feature = "kafka-bus")]
+        {
+            return self.publish_blocking_kafka_raw(key, payload);
+        }
+
+        #[cfg(not(feature = "kafka-bus"))]
+        {
+            let _ = key;
+            let _ = payload;
+            self.stats.publish_dropped.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -291,6 +311,24 @@ impl BusPublisher {
 
     #[cfg(feature = "kafka-bus")]
     fn publish_blocking_kafka(&self, event: BusEvent) -> bool {
+        let payload = match serde_json::to_vec(&event) {
+            Ok(p) => p,
+            Err(err) => {
+                self.stats.publish_dropped.fetch_add(1, Ordering::Relaxed);
+                warn!("kafka publish serialization failed: {}", err);
+                return false;
+            }
+        };
+        let key = event
+            .order_id
+            .as_deref()
+            .unwrap_or(event.account_id.as_str());
+
+        self.publish_blocking_kafka_raw(key, payload)
+    }
+
+    #[cfg(feature = "kafka-bus")]
+    fn publish_blocking_kafka_raw(&self, key: &str, payload: Vec<u8>) -> bool {
         let mut guard = match self.kafka.producer.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -309,19 +347,6 @@ impl BusPublisher {
                 return false;
             }
         };
-
-        let payload = match serde_json::to_vec(&event) {
-            Ok(p) => p,
-            Err(err) => {
-                self.stats.publish_dropped.fetch_add(1, Ordering::Relaxed);
-                warn!("kafka publish serialization failed: {}", err);
-                return false;
-            }
-        };
-        let key = event
-            .order_id
-            .as_deref()
-            .unwrap_or(event.account_id.as_str());
 
         match producer.send_result(
             FutureRecord::to(&self.kafka.topic)
