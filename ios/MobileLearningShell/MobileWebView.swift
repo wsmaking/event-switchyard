@@ -9,11 +9,22 @@ struct MobileWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.userContentController.add(context.coordinator, name: Coordinator.logHandlerName)
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: Coordinator.debugBridgeScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 16.4, *) {
+            webView.isInspectable = true
+        }
         loadEntry(on: webView)
         return webView
     }
@@ -44,6 +55,7 @@ struct MobileWebView: UIViewRepresentable {
         do {
             let html = try String(contentsOf: entryURL, encoding: .utf8)
             let normalizedHtml = html
+                .replacingOccurrences(of: "<head>", with: "<head><base href=\"./\">")
                 .replacingOccurrences(of: "href=\"/", with: "href=\"./")
                 .replacingOccurrences(of: "src=\"/", with: "src=\"./")
             webView.loadHTMLString(normalizedHtml, baseURL: readAccessURL)
@@ -52,7 +64,79 @@ struct MobileWebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+        static let logHandlerName = "mobileLog"
+        static let debugBridgeScript = """
+        (function () {
+          if (window.__mobileShellDebugInstalled) {
+            return;
+          }
+          window.__mobileShellDebugInstalled = true;
+          function stringify(value) {
+            if (typeof value === 'string') return value;
+            try { return JSON.stringify(value); } catch (_) { return String(value); }
+          }
+          function post(kind, payload) {
+            try {
+              window.webkit.messageHandlers.mobileLog.postMessage({
+                kind: kind,
+                payload: stringify(payload),
+                href: String(location.href)
+              });
+            } catch (_) {}
+          }
+          ['log', 'warn', 'error'].forEach(function (level) {
+            var original = console[level];
+            console[level] = function () {
+              post('console.' + level, Array.prototype.slice.call(arguments).map(stringify).join(' '));
+              if (original) {
+                original.apply(console, arguments);
+              }
+            };
+          });
+          window.addEventListener('error', function (event) {
+            post('window.error', {
+              message: event.message,
+              source: event.filename,
+              line: event.lineno,
+              column: event.colno
+            });
+          });
+          window.addEventListener('unhandledrejection', function (event) {
+            var reason = event.reason;
+            post('window.unhandledrejection', reason && (reason.stack || reason.message || reason));
+          });
+          post('bootstrap', 'debug bridge ready');
+        })();
+        """
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == Self.logHandlerName else {
+                return
+            }
+            print("[MobileShell][JS]", message.body)
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            print("[MobileShell] didStartProvisionalNavigation", webView.url?.absoluteString ?? "nil")
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            print("[MobileShell] didFinish", webView.url?.absoluteString ?? "nil")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("[MobileShell] didFail", error.localizedDescription)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            print("[MobileShell] didFailProvisionalNavigation", error.localizedDescription)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            print("[MobileShell] webContentProcessDidTerminate")
+        }
+
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,

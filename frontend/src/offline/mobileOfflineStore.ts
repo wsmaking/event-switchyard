@@ -708,10 +708,11 @@ function loadState(): OfflineState {
 }
 
 function readStorage(): OfflineState | null {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getBrowserStorage();
+  if (!storage) {
     return null;
   }
-  const raw = window.localStorage.getItem(STORAGE_KEY);
+  const raw = storage.getItem(STORAGE_KEY);
   if (!raw) {
     return null;
   }
@@ -727,10 +728,22 @@ function readStorage(): OfflineState | null {
 }
 
 function saveState(state: OfflineState) {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getBrowserStorage();
+  if (!storage) {
     return;
   }
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  storage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function getBrowserStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function createSeedState(): OfflineState {
