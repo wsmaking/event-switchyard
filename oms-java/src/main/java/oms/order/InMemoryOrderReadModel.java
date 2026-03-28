@@ -134,7 +134,16 @@ public final class InMemoryOrderReadModel implements OrderReadModel {
             "oms.state.path",
             System.getenv().getOrDefault("OMS_STATE_PATH", "var/java-replay/oms/state.json")
         );
-        return Path.of(configured).toAbsolutePath();
+        Path path = Path.of(configured);
+        return path.isAbsolute() ? path : workspaceRoot().resolve(path).normalize();
+    }
+
+    private Path workspaceRoot() {
+        Path current = Path.of("").toAbsolutePath().normalize();
+        while (current != null && !Files.exists(current.resolve("settings.gradle"))) {
+            current = current.getParent();
+        }
+        return current != null ? current : Path.of("").toAbsolutePath().normalize();
     }
 
     private record Snapshot(

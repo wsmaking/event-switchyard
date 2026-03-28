@@ -78,7 +78,16 @@ public final class InMemoryFillReadModel implements FillReadModel {
             "backoffice.fills.path",
             System.getenv().getOrDefault("BACKOFFICE_FILLS_PATH", "var/java-replay/backoffice/fills.json")
         );
-        return Path.of(configured).toAbsolutePath();
+        Path path = Path.of(configured);
+        return path.isAbsolute() ? path : workspaceRoot().resolve(path).normalize();
+    }
+
+    private Path workspaceRoot() {
+        Path current = Path.of("").toAbsolutePath().normalize();
+        while (current != null && !Files.exists(current.resolve("settings.gradle"))) {
+            current = current.getParent();
+        }
+        return current != null ? current : Path.of("").toAbsolutePath().normalize();
     }
 
     private record Snapshot(Map<String, List<FillView>> fillsByOrderId) {
