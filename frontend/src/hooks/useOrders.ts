@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import type { AuditReplayResult, OpsOverview, Order, OrderFinalOut, OrderRequest } from '../types/trading';
+import { useEffect, useState } from 'react';
+import type { AuditReplayResult, OpsOverview, Order, OrderFinalOut, OrderRequest, OrphanRequeueResult } from '../types/trading';
 
 const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
@@ -96,6 +97,22 @@ async function replayGatewayAudit(): Promise<AuditReplayResult> {
   return response.json();
 }
 
+async function requeueOrphans(orderId: string | null): Promise<OrphanRequeueResult> {
+  const response = await fetch(`${API_BASE_URL}/api/ops/orphans/requeue`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ orderId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 export function useOrders() {
   return useQuery({
     queryKey: ['orders'],
@@ -171,4 +188,60 @@ export function useReplayGatewayAudit() {
       queryClient.invalidateQueries({ queryKey: ['opsOverview'] });
     },
   });
+}
+
+export function useRequeueOrphans() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: requeueOrphans,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['positions'] });
+      queryClient.invalidateQueries({ queryKey: ['orderFinalOut'] });
+      queryClient.invalidateQueries({ queryKey: ['opsOverview'] });
+    },
+  });
+}
+
+export function useOrderStream(orderId: string | null) {
+  const queryClient = useQueryClient();
+  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'open' | 'error'>(
+    orderId ? 'connecting' : 'idle'
+  );
+
+  useEffect(() => {
+    if (!orderId) {
+      setConnectionState('idle');
+      return;
+    }
+
+    setConnectionState('connecting');
+    const eventSource = new EventSource(`${API_BASE_URL}/api/order-stream?orderId=${encodeURIComponent(orderId)}`);
+    const refresh = () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['positions'] });
+      queryClient.invalidateQueries({ queryKey: ['orderFinalOut'] });
+      queryClient.invalidateQueries({ queryKey: ['opsOverview'] });
+    };
+
+    eventSource.addEventListener('ready', () => {
+      setConnectionState('open');
+      refresh();
+    });
+    eventSource.addEventListener('update', () => {
+      setConnectionState('open');
+      refresh();
+    });
+    eventSource.onerror = () => {
+      setConnectionState('error');
+    };
+
+    return () => {
+      eventSource.close();
+      setConnectionState('idle');
+    };
+  }, [orderId, queryClient]);
+
+  return connectionState;
 }

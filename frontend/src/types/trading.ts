@@ -175,6 +175,7 @@ export interface OmsStats {
   currentOffset: number;
   currentAuditSize: number;
   deadLetterCount: number;
+  pendingOrphanCount: number;
 }
 
 export interface OmsReconcile {
@@ -204,6 +205,7 @@ export interface BackOfficeStats {
   currentAuditSize: number;
   ledgerEntryCount: number;
   deadLetterCount: number;
+  pendingOrphanCount: number;
 }
 
 export interface LedgerEntry {
@@ -247,10 +249,12 @@ export interface OpsOverview {
   omsStats: OmsStats | null;
   omsReconcile: OmsReconcile | null;
   omsOrphans: DeadLetterEntry[];
+  omsPendingOrphans: PendingOrphanEntry[];
   backOfficeStats: BackOfficeStats | null;
   backOfficeReconcile: BackOfficeReconcile | null;
   ledgerEntries: LedgerEntry[];
   backOfficeOrphans: DeadLetterEntry[];
+  backOfficePendingOrphans: PendingOrphanEntry[];
 }
 
 export interface DeadLetterEntry {
@@ -265,6 +269,34 @@ export interface DeadLetterEntry {
   eventAt: number;
   recordedAt: number;
   source: string;
+}
+
+export interface PendingOrphanEntry {
+  entryId: string;
+  eventRef: string;
+  accountId: string | null;
+  orderId: string | null;
+  eventType: string | null;
+  reason: string;
+  rawLine: string;
+  eventAt: number;
+  recordedAt: number;
+  source: string;
+}
+
+export interface OrphanRequeueResult {
+  oms: {
+    status: string;
+    orderId: string | null;
+    reprocessed: number;
+    pendingRemaining: number;
+  } | null;
+  backOffice: {
+    status: string;
+    orderId: string | null;
+    reprocessed: number;
+    pendingRemaining: number;
+  } | null;
 }
 
 export interface AuditReplayResult {

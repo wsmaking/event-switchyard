@@ -49,6 +49,7 @@ public final class AppHttpServer {
         server.createContext("/api/accounts", new AccountApiHandler(backOfficeClient));
         server.createContext("/api/demo", new DemoApiHandler(marketDataService, backOfficeClient, orderService, replayScenarioService));
         server.createContext("/api/ops", new OpsApiHandler(accountId, omsClient, backOfficeClient));
+        server.createContext("/api/order-stream", new OrderStreamHandler(omsClient, backOfficeClient));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("app-java listening on http://localhost:" + port);

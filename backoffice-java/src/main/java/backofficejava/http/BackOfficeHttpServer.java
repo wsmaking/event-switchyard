@@ -47,6 +47,7 @@ public final class BackOfficeHttpServer {
         server.createContext("/stats", new BackOfficeStatsHttpHandler(intakeService));
         server.createContext("/reconcile", new BackOfficeReconcileHttpHandler(intakeService));
         server.createContext("/orphans", new BackOfficeOrphanHttpHandler(intakeService));
+        server.createContext("/orphans/pending", new BackOfficePendingOrphanHttpHandler(intakeService));
         server.createContext("/accounts", new AccountOverviewHttpHandler(accountOverviewReadModel));
         server.createContext("/positions", new PositionHttpHandler(positionReadModel));
         server.createContext("/fills", new FillHttpHandler(fillReadModel));
@@ -72,6 +73,7 @@ public final class BackOfficeHttpServer {
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));
+        server.createContext("/internal/orphans", new BackOfficeInternalOrphanHttpHandler(intakeService));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         System.out.println("backoffice-java listening on http://localhost:" + port);

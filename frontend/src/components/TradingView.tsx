@@ -2,6 +2,8 @@ import { useState } from 'react';
 import {
   useOrderFinalOut,
   useOpsOverview,
+  useOrderStream,
+  useRequeueOrphans,
   useReplayGatewayAudit,
   useOrders,
   useResetDemo,
@@ -29,6 +31,7 @@ export function TradingView() {
   const resetDemo = useResetDemo();
   const runReplayScenario = useRunReplayScenario();
   const replayGatewayAudit = useReplayGatewayAudit();
+  const requeueOrphans = useRequeueOrphans();
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // フォーム状態
@@ -154,6 +157,7 @@ export function TradingView() {
   const effectiveSelectedOrderId = selectedOrderId ?? orders?.[0]?.id ?? null;
   const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(effectiveSelectedOrderId);
   const { data: opsOverview, isLoading: opsOverviewLoading } = useOpsOverview(effectiveSelectedOrderId);
+  const orderStreamState = useOrderStream(effectiveSelectedOrderId);
 
   const statusTone = (status: OrderStatus) => {
     switch (status) {
@@ -781,13 +785,24 @@ export function TradingView() {
                 {effectiveSelectedOrderId ? `Order: ${effectiveSelectedOrderId}` : '注文未選択'}
               </span>
             </div>
-            <button
-              onClick={() => replayGatewayAudit.mutate()}
-              disabled={replayGatewayAudit.isPending}
-              className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {replayGatewayAudit.isPending ? 'Gateway Audit Replay中...' : 'Gateway Audit Replay'}
-            </button>
+            <div className="flex items-center gap-3">
+              <span className={`rounded-full px-3 py-1 text-[11px] font-medium ${
+                orderStreamState === 'open'
+                  ? 'bg-emerald-500/15 text-emerald-100'
+                  : orderStreamState === 'error'
+                    ? 'bg-rose-500/15 text-rose-100'
+                    : 'bg-slate-800/70 text-slate-300'
+              }`}>
+                Live {orderStreamState}
+              </span>
+              <button
+                onClick={() => replayGatewayAudit.mutate()}
+                disabled={replayGatewayAudit.isPending}
+                className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {replayGatewayAudit.isPending ? 'Gateway Audit Replay中...' : 'Gateway Audit Replay'}
+              </button>
+            </div>
           </div>
 
           {finalOutLoading ? (
@@ -974,6 +989,7 @@ export function TradingView() {
                       <div>重複: {opsOverview.omsStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.omsStats.orphans.toLocaleString()}</div>
                       <div>DLQ: {opsOverview.omsStats.deadLetterCount.toLocaleString()}</div>
+                      <div>Pending: {opsOverview.omsStats.pendingOrphanCount.toLocaleString()}</div>
                       <div>Replay回数: {opsOverview.omsStats.replays.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.omsStats.lastEventAt)}</div>
                     </div>
@@ -1000,6 +1016,7 @@ export function TradingView() {
                       <div>重複: {opsOverview.backOfficeStats.duplicates.toLocaleString()}</div>
                       <div>孤児: {opsOverview.backOfficeStats.orphans.toLocaleString()}</div>
                       <div>DLQ: {opsOverview.backOfficeStats.deadLetterCount.toLocaleString()}</div>
+                      <div>Pending: {opsOverview.backOfficeStats.pendingOrphanCount.toLocaleString()}</div>
                       <div>最終イベント: {formatEventTime(opsOverview.backOfficeStats.lastEventAt)}</div>
                     </div>
                   ) : (
@@ -1041,6 +1058,18 @@ export function TradingView() {
                       OMS replay: {replayGatewayAudit.data.oms?.status ?? 'N/A'} / BackOffice replay: {replayGatewayAudit.data.backOffice?.status ?? 'N/A'}
                     </div>
                   )}
+                  <button
+                    onClick={() => requeueOrphans.mutate(effectiveSelectedOrderId)}
+                    disabled={requeueOrphans.isPending}
+                    className="mt-4 rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-100 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {requeueOrphans.isPending ? 'Pending Orphan Requeue中...' : 'Pending Orphan Requeue'}
+                  </button>
+                  {requeueOrphans.isSuccess && requeueOrphans.data && (
+                    <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/10 p-3 text-xs text-sky-100">
+                      OMS reprocessed: {requeueOrphans.data.oms?.reprocessed ?? 0} / BackOffice reprocessed: {requeueOrphans.data.backOffice?.reprocessed ?? 0}
+                    </div>
+                  )}
                 </div>
 
                 <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
@@ -1071,6 +1100,32 @@ export function TradingView() {
                 </div>
 
                 <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
+                  <div className="mb-3 text-xs uppercase tracking-[0.2em] text-slate-500">Pending Orphans</div>
+                  {[...opsOverview.omsPendingOrphans, ...opsOverview.backOfficePendingOrphans].length > 0 ? (
+                    <div className="mb-6 space-y-3">
+                      {[...opsOverview.omsPendingOrphans, ...opsOverview.backOfficePendingOrphans].map((entry) => (
+                        <div key={entry.entryId} className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-semibold text-amber-50">
+                              {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                            </div>
+                            <div className="text-[11px] text-amber-200">
+                              {formatEventTime(entry.recordedAt)}
+                            </div>
+                          </div>
+                          <div className="mt-2 text-[11px] text-amber-100">
+                            orderId: {entry.orderId ?? '-'} / source: {entry.source}
+                          </div>
+                          <div className="mt-2 overflow-x-auto rounded-md bg-slate-950/60 p-2 text-[11px] text-slate-300">
+                            {entry.rawLine}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mb-6 text-sm text-slate-500">pending orphan はありません。</div>
+                  )}
+
                   <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Orphans / DLQ</div>
                   {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].length > 0 ? (
                     <div className="mt-3 space-y-3">

@@ -207,6 +207,32 @@ public final class OmsClient {
         return List.of();
     }
 
+    public java.util.List<PendingOrphanEntry> fetchPendingOrphans(String orderId, int limit) {
+        try {
+            StringBuilder uri = new StringBuilder(baseUrl + "/orphans/pending?limit=" + limit);
+            if (orderId != null && !orderId.isBlank()) {
+                uri.append("&orderId=").append(orderId);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri.toString()))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), new TypeReference<List<PendingOrphanEntry>>() {});
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
+    public RequeueResult requeuePendingOrphans(String orderId) {
+        return postJsonWithResponse("/internal/orphans/requeue", new RequeueRequest(orderId), RequeueResult.class);
+    }
+
     private void postJson(String path, Object payload) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -262,7 +288,8 @@ public final class OmsClient {
         Long lastEventAt,
         long currentOffset,
         long currentAuditSize,
-        int deadLetterCount
+        int deadLetterCount,
+        int pendingOrphanCount
     ) {
     }
 
@@ -302,6 +329,31 @@ public final class OmsClient {
         long eventAt,
         long recordedAt,
         String source
+    ) {
+    }
+
+    public record PendingOrphanEntry(
+        String entryId,
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String reason,
+        String rawLine,
+        long eventAt,
+        long recordedAt,
+        String source
+    ) {
+    }
+
+    public record RequeueRequest(String orderId) {
+    }
+
+    public record RequeueResult(
+        String status,
+        String orderId,
+        int reprocessed,
+        int pendingRemaining
     ) {
     }
 }

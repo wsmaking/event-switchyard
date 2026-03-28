@@ -56,4 +56,39 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("oms.gateway.audit.start.mode");
         }
     }
+
+    @Test
+    void replayConsumesPendingExecutionReportAfterAcceptance() throws Exception {
+        Path auditPath = tempDir.resolve("audit-pending.log");
+        Files.writeString(auditPath, """
+            {"type":"ExecutionReport","at":1711600001000,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}}
+            {"type":"OrderAccepted","at":1711600002000,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-pending"}}
+            {"type":"OrderUpdated","at":1711600002001,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"status":"FILLED","filledQty":100}}
+            """);
+
+        System.setProperty("oms.state.path", tempDir.resolve("oms-pending-state.json").toString());
+        System.setProperty("oms.gateway.audit.path", auditPath.toString());
+        System.setProperty("oms.gateway.audit.offset.path", tempDir.resolve("oms-pending.offset").toString());
+        System.setProperty("oms.pending.orphan.path", tempDir.resolve("oms-pending-orphans.json").toString());
+        System.setProperty("oms.gateway.audit.enable", "true");
+        System.setProperty("oms.gateway.audit.start.mode", "tail");
+
+        try {
+            OrderReadModel readModel = new InMemoryOrderReadModel("acct_demo");
+            GatewayAuditIntakeService service = new GatewayAuditIntakeService(readModel);
+            service.replayFromStart(true);
+
+            var order = readModel.findById("ord_test_pending").orElseThrow();
+            assertEquals(OrderStatus.FILLED, order.status());
+            assertEquals(100L, order.filledQuantity());
+            assertEquals(0, service.snapshot().pendingOrphanCount());
+        } finally {
+            System.clearProperty("oms.state.path");
+            System.clearProperty("oms.gateway.audit.path");
+            System.clearProperty("oms.gateway.audit.offset.path");
+            System.clearProperty("oms.pending.orphan.path");
+            System.clearProperty("oms.gateway.audit.enable");
+            System.clearProperty("oms.gateway.audit.start.mode");
+        }
+    }
 }

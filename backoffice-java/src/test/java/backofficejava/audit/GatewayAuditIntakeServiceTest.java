@@ -81,4 +81,57 @@ class GatewayAuditIntakeServiceTest {
             System.clearProperty("backoffice.gateway.audit.start.mode");
         }
     }
+
+    @Test
+    void replayConsumesPendingExecutionReportAfterAcceptance() throws Exception {
+        Path auditPath = tempDir.resolve("audit-pending.log");
+        Files.writeString(auditPath, """
+            {"type":"ExecutionReport","at":1711600001000,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"status":"FILLED","filledQtyDelta":100,"filledQtyTotal":100,"price":2800}}
+            {"type":"OrderAccepted","at":1711600002000,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"symbol":"7203","side":"BUY","type":"LIMIT","qty":100,"price":2800,"timeInForce":"GTC","expireAt":null,"clientOrderId":"cli-pending"}}
+            {"type":"OrderUpdated","at":1711600002001,"accountId":"acct_demo","orderId":"ord_test_pending","data":{"status":"FILLED","filledQty":100}}
+            """);
+
+        System.setProperty("backoffice.accounts.path", tempDir.resolve("pending-accounts.json").toString());
+        System.setProperty("backoffice.positions.path", tempDir.resolve("pending-positions.json").toString());
+        System.setProperty("backoffice.fills.path", tempDir.resolve("pending-fills.json").toString());
+        System.setProperty("backoffice.ledger.path", tempDir.resolve("pending-ledger.json").toString());
+        System.setProperty("backoffice.order.state.path", tempDir.resolve("pending-orders.json").toString());
+        System.setProperty("backoffice.pending.orphan.path", tempDir.resolve("pending-orphans.json").toString());
+        System.setProperty("backoffice.gateway.audit.path", auditPath.toString());
+        System.setProperty("backoffice.gateway.audit.offset.path", tempDir.resolve("pending-audit.offset").toString());
+        System.setProperty("backoffice.gateway.audit.enable", "true");
+        System.setProperty("backoffice.gateway.audit.start.mode", "tail");
+
+        try {
+            var accountReadModel = new InMemoryAccountOverviewReadModel("acct_demo");
+            var positionReadModel = new InMemoryPositionReadModel("acct_demo");
+            var fillReadModel = new InMemoryFillReadModel();
+            var orderStateStore = new InMemoryOrderProjectionStateStore();
+            var ledgerReadModel = new InMemoryLedgerReadModel();
+            GatewayAuditIntakeService service = new GatewayAuditIntakeService(
+                accountReadModel,
+                positionReadModel,
+                fillReadModel,
+                orderStateStore,
+                ledgerReadModel
+            );
+
+            service.replayFromStart(true);
+
+            assertEquals(0, service.snapshot().pendingOrphanCount());
+            assertEquals(1, positionReadModel.findByAccountId("acct_demo").size());
+            assertEquals(1, fillReadModel.findByOrderId("ord_test_pending").size());
+        } finally {
+            System.clearProperty("backoffice.accounts.path");
+            System.clearProperty("backoffice.positions.path");
+            System.clearProperty("backoffice.fills.path");
+            System.clearProperty("backoffice.ledger.path");
+            System.clearProperty("backoffice.order.state.path");
+            System.clearProperty("backoffice.pending.orphan.path");
+            System.clearProperty("backoffice.gateway.audit.path");
+            System.clearProperty("backoffice.gateway.audit.offset.path");
+            System.clearProperty("backoffice.gateway.audit.enable");
+            System.clearProperty("backoffice.gateway.audit.start.mode");
+        }
+    }
 }

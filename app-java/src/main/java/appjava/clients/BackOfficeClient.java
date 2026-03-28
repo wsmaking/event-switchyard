@@ -196,6 +196,33 @@ public final class BackOfficeClient {
         return List.of();
     }
 
+    public List<PendingOrphanEntry> fetchPendingOrphans(String orderId, int limit) {
+        try {
+            StringBuilder uri = new StringBuilder(baseUrl + "/orphans/pending?limit=" + limit);
+            if (orderId != null && !orderId.isBlank()) {
+                uri.append("&orderId=").append(orderId);
+            }
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri.toString()))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), objectMapper.getTypeFactory().constructCollectionType(List.class, PendingOrphanEntry.class));
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
+    public RequeueResult requeuePendingOrphans(String orderId) {
+        return postJsonWithResponse("/internal/orphans/requeue", new RequeueRequest(orderId), RequeueResult.class);
+    }
+
     private void postNoBody(String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -287,7 +314,8 @@ public final class BackOfficeClient {
         long currentOffset,
         long currentAuditSize,
         int ledgerEntryCount,
-        int deadLetterCount
+        int deadLetterCount,
+        int pendingOrphanCount
     ) {
     }
 
@@ -351,6 +379,31 @@ public final class BackOfficeClient {
         long eventAt,
         long recordedAt,
         String source
+    ) {
+    }
+
+    public record PendingOrphanEntry(
+        String entryId,
+        String eventRef,
+        String accountId,
+        String orderId,
+        String eventType,
+        String reason,
+        String rawLine,
+        long eventAt,
+        long recordedAt,
+        String source
+    ) {
+    }
+
+    public record RequeueRequest(String orderId) {
+    }
+
+    public record RequeueResult(
+        String status,
+        String orderId,
+        int reprocessed,
+        int pendingRemaining
     ) {
     }
 }

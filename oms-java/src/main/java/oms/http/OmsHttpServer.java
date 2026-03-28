@@ -27,11 +27,13 @@ public final class OmsHttpServer {
         server.createContext("/stats", new OmsStatsHttpHandler(auditIntakeService));
         server.createContext("/reconcile", new OmsReconcileHttpHandler(auditIntakeService));
         server.createContext("/orphans", new OmsOrphanHttpHandler(auditIntakeService));
+        server.createContext("/orphans/pending", new OmsPendingOrphanHttpHandler(auditIntakeService));
         server.createContext("/orders", new OrderHttpHandler(orderReadModel));
         server.createContext("/accounts", new AccountHttpHandler(orderReadModel));
         server.createContext("/internal/orders", new OrderInternalHttpHandler(orderReadModel));
         server.createContext("/internal/accounts", new OrderInternalHttpHandler(orderReadModel));
         server.createContext("/internal/audit", new OmsInternalAuditHttpHandler(auditIntakeService));
+        server.createContext("/internal/orphans", new OmsInternalOrphanHttpHandler(auditIntakeService));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         System.out.println("oms-java listening on http://localhost:" + port);

@@ -11,9 +11,11 @@ public record OpsOverview(
     OmsClient.OmsStats omsStats,
     OmsClient.OmsReconcile omsReconcile,
     List<OmsClient.DeadLetterEntry> omsOrphans,
+    List<OmsClient.PendingOrphanEntry> omsPendingOrphans,
     BackOfficeClient.BackOfficeStats backOfficeStats,
     BackOfficeClient.BackOfficeReconcile backOfficeReconcile,
     List<BackOfficeClient.LedgerEntry> ledgerEntries,
-    List<BackOfficeClient.DeadLetterEntry> backOfficeOrphans
+    List<BackOfficeClient.DeadLetterEntry> backOfficeOrphans,
+    List<BackOfficeClient.PendingOrphanEntry> backOfficePendingOrphans
 ) {
 }
