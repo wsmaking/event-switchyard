@@ -1,6 +1,7 @@
 package oms;
 
 import oms.audit.GatewayAuditIntakeService;
+import oms.bus.BusEventIntakeService;
 import oms.http.OmsHttpServer;
 import oms.order.OrderReadModel;
 import oms.persistence.OmsRuntime;
@@ -16,9 +17,11 @@ public final class Main {
         OmsRuntime runtime = OmsStoreFactory.create(accountId);
         OrderReadModel readModel = runtime.orderReadModel();
         GatewayAuditIntakeService auditIntakeService = new GatewayAuditIntakeService(readModel, runtime.auditOffsetStore());
-        OmsHttpServer server = new OmsHttpServer(port, readModel, auditIntakeService);
+        BusEventIntakeService busEventIntakeService = new BusEventIntakeService(auditIntakeService);
+        OmsHttpServer server = new OmsHttpServer(port, readModel, auditIntakeService, busEventIntakeService);
         server.start();
         System.out.println("oms-java store mode=" + runtime.storeMode());
         auditIntakeService.start();
+        busEventIntakeService.start();
     }
 }

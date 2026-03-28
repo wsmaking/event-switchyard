@@ -6,6 +6,7 @@ import backofficejava.account.LedgerReadModel;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.audit.GatewayAuditIntakeService;
+import backofficejava.bus.BusEventIntakeService;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -31,6 +32,7 @@ public final class Main {
             ledgerReadModel,
             runtime.auditOffsetStore()
         );
+        BusEventIntakeService busEventIntakeService = new BusEventIntakeService(intakeService);
         BackOfficeHttpServer server = new BackOfficeHttpServer(
             port,
             accountOverviewReadModel,
@@ -38,10 +40,12 @@ public final class Main {
             fillReadModel,
             orderProjectionStateStore,
             ledgerReadModel,
-            intakeService
+            intakeService,
+            busEventIntakeService
         );
         server.start();
         intakeService.start();
+        busEventIntakeService.start();
         System.out.println("backoffice-java store mode=" + runtime.storeMode());
     }
 }

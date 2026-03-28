@@ -2,6 +2,7 @@ package oms.http;
 
 import com.sun.net.httpserver.HttpServer;
 import oms.audit.GatewayAuditIntakeService;
+import oms.bus.BusEventIntakeService;
 import oms.order.OrderReadModel;
 
 import java.io.IOException;
@@ -12,11 +13,18 @@ public final class OmsHttpServer {
     private final int port;
     private final OrderReadModel orderReadModel;
     private final GatewayAuditIntakeService auditIntakeService;
+    private final BusEventIntakeService busEventIntakeService;
 
-    public OmsHttpServer(int port, OrderReadModel orderReadModel, GatewayAuditIntakeService auditIntakeService) {
+    public OmsHttpServer(
+        int port,
+        OrderReadModel orderReadModel,
+        GatewayAuditIntakeService auditIntakeService,
+        BusEventIntakeService busEventIntakeService
+    ) {
         this.port = port;
         this.orderReadModel = orderReadModel;
         this.auditIntakeService = auditIntakeService;
+        this.busEventIntakeService = busEventIntakeService;
     }
 
     public void start() throws IOException {
@@ -33,6 +41,7 @@ public final class OmsHttpServer {
         server.createContext("/internal/orders", new OrderInternalHttpHandler(orderReadModel));
         server.createContext("/internal/accounts", new OrderInternalHttpHandler(orderReadModel));
         server.createContext("/internal/audit", new OmsInternalAuditHttpHandler(auditIntakeService));
+        server.createContext("/internal/bus", new OmsInternalBusHttpHandler(busEventIntakeService));
         server.createContext("/internal/orphans", new OmsInternalOrphanHttpHandler(auditIntakeService));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();

@@ -187,6 +187,26 @@ public final class GatewayAuditIntakeService {
         }
     }
 
+    public IngestResult ingestEvent(GatewayAuditEvent event, String eventRef, String rawLine) {
+        synchronized (loopLock) {
+            String normalizedEventRef = eventRef == null || eventRef.isBlank() ? "bus-" + System.nanoTime() : eventRef;
+            String normalizedRawLine = rawLine == null || rawLine.isBlank() ? serializeEvent(event) : rawLine;
+            if (event.orderId() != null && isDuplicate(event.orderId(), normalizedEventRef)) {
+                duplicates.incrementAndGet();
+                return new IngestResult("DUPLICATE", normalizedEventRef, event.orderId(), false);
+            }
+            boolean applied = handleEvent(event, normalizedEventRef, normalizedRawLine, true);
+            lastEventAt.accumulateAndGet(event.at(), Math::max);
+            if (applied) {
+                return new IngestResult("APPLIED", normalizedEventRef, event.orderId(), true);
+            }
+            if (deadLetterStore.findByEventRef(normalizedEventRef) != null) {
+                return new IngestResult("DLQ", normalizedEventRef, event.orderId(), false);
+            }
+            return new IngestResult("PENDING", normalizedEventRef, event.orderId(), false);
+        }
+    }
+
     public ReconcileReport reconcile(String requestedAccountId) {
         List<OrderView> orders = orderReadModel.findAll().stream()
             .filter(order -> requestedAccountId == null || requestedAccountId.isBlank() || requestedAccountId.equals(order.accountId()))
@@ -889,6 +909,14 @@ public final class GatewayAuditIntakeService {
         long actualReservedAmount,
         long reservedGapAmount,
         List<String> issues
+    ) {
+    }
+
+    public record IngestResult(
+        String status,
+        String eventRef,
+        String orderId,
+        boolean applied
     ) {
     }
 }

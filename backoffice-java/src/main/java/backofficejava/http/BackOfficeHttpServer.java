@@ -6,6 +6,7 @@ import backofficejava.account.LedgerReadModel;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.audit.GatewayAuditIntakeService;
+import backofficejava.bus.BusEventIntakeService;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -20,6 +21,7 @@ public final class BackOfficeHttpServer {
     private final OrderProjectionStateStore orderProjectionStateStore;
     private final LedgerReadModel ledgerReadModel;
     private final GatewayAuditIntakeService intakeService;
+    private final BusEventIntakeService busEventIntakeService;
 
     public BackOfficeHttpServer(
         int port,
@@ -28,7 +30,8 @@ public final class BackOfficeHttpServer {
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
-        GatewayAuditIntakeService intakeService
+        GatewayAuditIntakeService intakeService,
+        BusEventIntakeService busEventIntakeService
     ) {
         this.port = port;
         this.accountOverviewReadModel = accountOverviewReadModel;
@@ -37,6 +40,7 @@ public final class BackOfficeHttpServer {
         this.orderProjectionStateStore = orderProjectionStateStore;
         this.ledgerReadModel = ledgerReadModel;
         this.intakeService = intakeService;
+        this.busEventIntakeService = busEventIntakeService;
     }
 
     public void start() throws IOException {
@@ -73,6 +77,7 @@ public final class BackOfficeHttpServer {
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));
+        server.createContext("/internal/bus", new BackOfficeInternalBusHttpHandler(busEventIntakeService));
         server.createContext("/internal/orphans", new BackOfficeInternalOrphanHttpHandler(intakeService));
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
