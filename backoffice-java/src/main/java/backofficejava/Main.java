@@ -30,7 +30,9 @@ public final class Main {
             fillReadModel,
             orderProjectionStateStore,
             ledgerReadModel,
-            runtime.auditOffsetStore()
+            runtime.auditOffsetStore(),
+            runtime.deadLetterStore(),
+            runtime.pendingOrphanStore()
         );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(intakeService);
         BackOfficeHttpServer server = new BackOfficeHttpServer(

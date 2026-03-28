@@ -186,8 +186,8 @@ fn publish_bus_record(bus: &BusPublisher, record: BusRecord) -> bool {
 
 fn to_bus_event_v1(event: AuditEvent) -> Option<BusRecord> {
     match event.event_type.as_str() {
-        "OrderAccepted" | "AmendRequested" | "CancelRequested" | "ExecutionReport"
-        | "OrderUpdated" => Some(BusRecord::V1(BusEvent {
+        "OrderAccepted" | "AmendRequested" | "AmendRejected" | "CancelRequested"
+        | "CancelRejected" | "ExecutionReport" | "OrderUpdated" => Some(BusRecord::V1(BusEvent {
             event_type: event.event_type,
             at: crate::bus::format_event_time(event.at),
             account_id: event.account_id,
@@ -200,8 +200,8 @@ fn to_bus_event_v1(event: AuditEvent) -> Option<BusRecord> {
 
 fn to_bus_event_v2(event: AuditEvent, next_offset: u64) -> Option<BusRecord> {
     match event.event_type.as_str() {
-        "OrderAccepted" | "AmendRequested" | "CancelRequested" | "ExecutionReport"
-        | "OrderUpdated" => {
+        "OrderAccepted" | "AmendRequested" | "AmendRejected" | "CancelRequested"
+        | "CancelRejected" | "ExecutionReport" | "OrderUpdated" => {
             let aggregate_id = event
                 .order_id
                 .clone()

@@ -433,6 +433,7 @@ public final class JdbcBackOfficeStore {
             execute(connection, "DELETE FROM bo_ledger_entries");
             execute(connection, "DELETE FROM bo_event_dedup");
             execute(connection, "DELETE FROM bo_dead_letter");
+            execute(connection, "DELETE FROM bo_pending_orphan");
             execute(connection, "DELETE FROM bo_account_overview");
             insertSeedAccount(connection);
         }, "failed_to_reset_backoffice_store");

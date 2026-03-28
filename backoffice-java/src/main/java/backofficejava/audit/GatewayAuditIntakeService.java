@@ -42,8 +42,8 @@ public final class GatewayAuditIntakeService {
     private final FillReadModel fillReadModel;
     private final OrderProjectionStateStore orderStateStore;
     private final LedgerReadModel ledgerReadModel;
-    private final InMemoryDeadLetterStore deadLetterStore;
-    private final InMemoryPendingOrphanStore pendingOrphanStore;
+    private final DeadLetterStore deadLetterStore;
+    private final PendingOrphanStore pendingOrphanStore;
     private final boolean enabled;
     private final Path auditPath;
     private final AuditOffsetStore offsetStore;
@@ -73,7 +73,9 @@ public final class GatewayAuditIntakeService {
             fillReadModel,
             orderStateStore,
             ledgerReadModel,
-            defaultOffsetStore()
+            defaultOffsetStore(),
+            new InMemoryDeadLetterStore(),
+            new InMemoryPendingOrphanStore()
         );
     }
 
@@ -84,6 +86,28 @@ public final class GatewayAuditIntakeService {
         OrderProjectionStateStore orderStateStore,
         LedgerReadModel ledgerReadModel,
         AuditOffsetStore offsetStore
+    ) {
+        this(
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderStateStore,
+            ledgerReadModel,
+            offsetStore,
+            new InMemoryDeadLetterStore(),
+            new InMemoryPendingOrphanStore()
+        );
+    }
+
+    public GatewayAuditIntakeService(
+        AccountOverviewReadModel accountOverviewReadModel,
+        PositionReadModel positionReadModel,
+        FillReadModel fillReadModel,
+        OrderProjectionStateStore orderStateStore,
+        LedgerReadModel ledgerReadModel,
+        AuditOffsetStore offsetStore,
+        DeadLetterStore deadLetterStore,
+        PendingOrphanStore pendingOrphanStore
     ) {
         this.accountOverviewReadModel = accountOverviewReadModel;
         this.positionReadModel = positionReadModel;
@@ -113,8 +137,8 @@ public final class GatewayAuditIntakeService {
                 System.getenv().getOrDefault("BACKOFFICE_GATEWAY_AUDIT_POLL_MS", String.valueOf(DEFAULT_POLL_MS))
             )
         );
-        this.deadLetterStore = new InMemoryDeadLetterStore();
-        this.pendingOrphanStore = new InMemoryPendingOrphanStore();
+        this.deadLetterStore = deadLetterStore;
+        this.pendingOrphanStore = pendingOrphanStore;
     }
 
     public void start() {
@@ -377,6 +401,8 @@ public final class GatewayAuditIntakeService {
             case "ExecutionReport" -> applyExecutionReport(event, eventRef, rawLine, queueIfMissing);
             case "CancelRequested" -> applyPendingState(event, eventRef, rawLine, queueIfMissing, "CANCEL_PENDING", "CANCEL_REQUESTED", "取消要求");
             case "AmendRequested" -> applyAmendRequested(event, eventRef, rawLine, queueIfMissing);
+            case "CancelRejected" -> applyCancelRejected(event, eventRef, rawLine, queueIfMissing);
+            case "AmendRejected" -> applyAmendRejected(event, eventRef, rawLine, queueIfMissing);
             case "OrderUpdated" -> applyOrderUpdated(event, eventRef, rawLine, queueIfMissing);
             default -> {
                 skipped.incrementAndGet();
@@ -526,6 +552,101 @@ public final class GatewayAuditIntakeService {
             reservedDelta,
             0L,
             "数量 " + quantity + " / 価格 " + workingPrice,
+            event.at(),
+            "gateway-audit"
+        ));
+        processed.incrementAndGet();
+        return true;
+    }
+
+    private boolean applyCancelRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
+        if (event.orderId() == null) {
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            return false;
+        }
+        OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
+        if (current == null) {
+            return handleMissingOrder(event, eventRef, rawLine, queueIfMissing, "ORDER_NOT_FOUND", "cancel reject の先に注文がありません");
+        }
+        JsonNode data = safeData(event.data());
+        String nextStatus = normalizedStatus(textOr(data, "status", current.status()));
+        long filledQty = data.path("filledQty").asLong(current.filledQuantity());
+        orderStateStore.upsert(new OrderProjectionState(
+            current.orderId(),
+            current.accountId(),
+            current.symbol(),
+            current.side(),
+            current.quantity(),
+            current.workingPrice(),
+            current.submittedAt(),
+            event.at(),
+            nextStatus,
+            Math.max(current.filledQuantity(), filledQty),
+            current.reservedAmount()
+        ));
+        appendLedger(new LedgerEntryView(
+            "ledger-" + current.orderId() + "-cancel-rejected",
+            eventRef,
+            current.accountId(),
+            current.orderId(),
+            "CANCEL_REJECTED",
+            current.symbol(),
+            current.side(),
+            0L,
+            0L,
+            0L,
+            0L,
+            textOr(data, "reason", "取消拒否"),
+            event.at(),
+            "gateway-audit"
+        ));
+        processed.incrementAndGet();
+        return true;
+    }
+
+    private boolean applyAmendRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
+        if (event.orderId() == null) {
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            return false;
+        }
+        OrderProjectionState current = orderStateStore.findByOrderId(event.orderId()).orElse(null);
+        if (current == null) {
+            return handleMissingOrder(event, eventRef, rawLine, queueIfMissing, "ORDER_NOT_FOUND", "amend reject の先に注文がありません");
+        }
+        JsonNode data = safeData(event.data());
+        long quantity = data.path("qty").asLong(current.quantity());
+        long workingPrice = data.hasNonNull("price") ? data.get("price").asLong() : current.workingPrice();
+        long filledQty = data.path("filledQty").asLong(current.filledQuantity());
+        long remainingQty = Math.max(0L, quantity - filledQty);
+        long nextReserved = "BUY".equalsIgnoreCase(current.side()) ? remainingQty * workingPrice : 0L;
+        long reservedDelta = nextReserved - current.reservedAmount();
+        orderStateStore.upsert(new OrderProjectionState(
+            current.orderId(),
+            current.accountId(),
+            current.symbol(),
+            current.side(),
+            quantity,
+            workingPrice,
+            current.submittedAt(),
+            event.at(),
+            normalizedStatus(textOr(data, "status", current.status())),
+            Math.max(current.filledQuantity(), filledQty),
+            nextReserved
+        ));
+        applyOverviewDelta(current.accountId(), 0L, reservedDelta, 0L);
+        appendLedger(new LedgerEntryView(
+            "ledger-" + current.orderId() + "-amend-rejected",
+            eventRef,
+            current.accountId(),
+            current.orderId(),
+            "AMEND_REJECTED",
+            current.symbol(),
+            current.side(),
+            0L,
+            0L,
+            reservedDelta,
+            0L,
+            textOr(data, "reason", "訂正拒否"),
             event.at(),
             "gateway-audit"
         ));

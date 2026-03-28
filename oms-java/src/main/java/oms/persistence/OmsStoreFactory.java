@@ -1,8 +1,14 @@
 package oms.persistence;
 
 import oms.audit.AuditOffsetStore;
+import oms.audit.DeadLetterStore;
 import oms.audit.FileAuditOffsetStore;
+import oms.audit.InMemoryDeadLetterStore;
+import oms.audit.InMemoryPendingOrphanStore;
 import oms.audit.JdbcAuditOffsetStore;
+import oms.audit.JdbcDeadLetterStore;
+import oms.audit.JdbcPendingOrphanStore;
+import oms.audit.PendingOrphanStore;
 import oms.order.InMemoryOrderReadModel;
 import oms.order.JdbcOrderReadModel;
 import oms.order.OrderReadModel;
@@ -18,10 +24,16 @@ public final class OmsStoreFactory {
         String storeMode = System.getenv().getOrDefault("OMS_STORE_MODE", "memory").trim().toLowerCase();
         if ("postgres".equals(storeMode)) {
             JdbcConnectionFactory connectionFactory = JdbcConnectionFactory.fromEnvironment("OMS", "oms");
-            SqlMigrationRunner.run(connectionFactory, "db/migration/V1__oms_schema.sql");
+            SqlMigrationRunner.run(
+                connectionFactory,
+                "db/migration/V1__oms_schema.sql",
+                "db/migration/V2__oms_orphan_state.sql"
+            );
             OrderReadModel orderReadModel = new JdbcOrderReadModel(connectionFactory);
             AuditOffsetStore offsetStore = new JdbcAuditOffsetStore(connectionFactory, "gateway-audit");
-            return new OmsRuntime(orderReadModel, offsetStore, "postgres");
+            DeadLetterStore deadLetterStore = new JdbcDeadLetterStore(connectionFactory);
+            PendingOrphanStore pendingOrphanStore = new JdbcPendingOrphanStore(connectionFactory);
+            return new OmsRuntime(orderReadModel, offsetStore, deadLetterStore, pendingOrphanStore, "postgres");
         }
 
         Path offsetPath = resolvePath(
@@ -30,7 +42,13 @@ public final class OmsStoreFactory {
                 System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_OFFSET_PATH", "var/java-replay/oms/audit.offset")
             )
         );
-        return new OmsRuntime(new InMemoryOrderReadModel(accountId), new FileAuditOffsetStore(offsetPath), "memory");
+        return new OmsRuntime(
+            new InMemoryOrderReadModel(accountId),
+            new FileAuditOffsetStore(offsetPath),
+            new InMemoryDeadLetterStore(),
+            new InMemoryPendingOrphanStore(),
+            "memory"
+        );
     }
 
     private static Path resolvePath(String configured) {

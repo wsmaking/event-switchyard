@@ -86,6 +86,7 @@ fn build_test_state_with_audit_log(audit_log: Arc<AuditLog>) -> AppState {
         order_store: Arc::new(OrderStore::new()),
         sharded_store: Arc::new(ShardedOrderStore::new_with_ttl_and_shards(86_400_000, 64)),
         order_id_map: Arc::new(OrderIdMap::new()),
+        venue_order_control: None,
         sse_hub: Arc::new(SseHub::new()),
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,

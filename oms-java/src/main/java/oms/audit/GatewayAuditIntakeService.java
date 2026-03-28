@@ -41,8 +41,8 @@ public final class GatewayAuditIntakeService {
     private final String startMode;
     private final long pollMs;
     private final Object loopLock = new Object();
-    private final InMemoryDeadLetterStore deadLetterStore;
-    private final InMemoryPendingOrphanStore pendingOrphanStore;
+    private final DeadLetterStore deadLetterStore;
+    private final PendingOrphanStore pendingOrphanStore;
     private final AtomicLong processed = new AtomicLong();
     private final AtomicLong skipped = new AtomicLong();
     private final AtomicLong duplicates = new AtomicLong();
@@ -54,10 +54,19 @@ public final class GatewayAuditIntakeService {
     private final Instant startedAt = Instant.now();
 
     public GatewayAuditIntakeService(OrderReadModel orderReadModel) {
-        this(orderReadModel, defaultOffsetStore());
+        this(orderReadModel, defaultOffsetStore(), new InMemoryDeadLetterStore(), new InMemoryPendingOrphanStore());
     }
 
     public GatewayAuditIntakeService(OrderReadModel orderReadModel, AuditOffsetStore offsetStore) {
+        this(orderReadModel, offsetStore, new InMemoryDeadLetterStore(), new InMemoryPendingOrphanStore());
+    }
+
+    public GatewayAuditIntakeService(
+        OrderReadModel orderReadModel,
+        AuditOffsetStore offsetStore,
+        DeadLetterStore deadLetterStore,
+        PendingOrphanStore pendingOrphanStore
+    ) {
         this.orderReadModel = orderReadModel;
         this.enabled = parseBoolean(
             System.getProperty(
@@ -82,8 +91,8 @@ public final class GatewayAuditIntakeService {
                 System.getenv().getOrDefault("OMS_GATEWAY_AUDIT_POLL_MS", String.valueOf(DEFAULT_POLL_MS))
             )
         );
-        this.deadLetterStore = new InMemoryDeadLetterStore();
-        this.pendingOrphanStore = new InMemoryPendingOrphanStore();
+        this.deadLetterStore = deadLetterStore;
+        this.pendingOrphanStore = pendingOrphanStore;
     }
 
     public void start() {
@@ -346,6 +355,8 @@ public final class GatewayAuditIntakeService {
             case "OrderUpdated" -> applyOrderUpdated(event, eventRef, rawLine, queueIfMissing);
             case "CancelRequested" -> applyPendingState(event, eventRef, rawLine, queueIfMissing, OrderStatus.CANCEL_PENDING, "CANCEL_REQUESTED", "取消要求");
             case "AmendRequested" -> applyAmendRequested(event, eventRef, rawLine, queueIfMissing);
+            case "CancelRejected" -> applyCancelRejected(event, eventRef, rawLine, queueIfMissing);
+            case "AmendRejected" -> applyAmendRejected(event, eventRef, rawLine, queueIfMissing);
             default -> {
                 skipped.incrementAndGet();
                 yield true;
@@ -558,6 +569,96 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "訂正要求",
             "数量 " + quantity + " / 価格 " + (price == null ? "-" : Math.round(price)),
+            eventRef
+        ));
+        syncReservation(next);
+        processed.incrementAndGet();
+        return true;
+    }
+
+    private boolean applyCancelRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
+        if (event.orderId() == null) {
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            return false;
+        }
+        OrderView current = orderReadModel.findById(event.orderId()).orElse(null);
+        if (current == null) {
+            return handleMissingOrder(event, eventRef, rawLine, queueIfMissing, "ORDER_NOT_FOUND", "cancel reject の先に注文がありません");
+        }
+        JsonNode data = safeData(event.data());
+        OrderStatus nextStatus = mapStatus(textOr(data, "status", current.status().name()), current.status());
+        long filledQty = data.path("filledQty").asLong(current.filledQuantity());
+        OrderView next = new OrderView(
+            current.id(),
+            current.accountId(),
+            current.symbol(),
+            current.side(),
+            current.type(),
+            current.quantity(),
+            current.price(),
+            current.timeInForce(),
+            current.expireAt(),
+            nextStatus,
+            current.submittedAt(),
+            current.filledAt(),
+            current.executionTimeMs(),
+            textOr(data, "reason", current.statusReason()),
+            filledQty,
+            Math.max(0L, current.quantity() - filledQty)
+        );
+        orderReadModel.upsert(next);
+        appendEvent(next.id(), orderEvent(
+            next.id(),
+            "CANCEL_REJECTED",
+            event.at(),
+            "取消拒否",
+            textOr(data, "reason", "取消拒否"),
+            eventRef
+        ));
+        syncReservation(next);
+        processed.incrementAndGet();
+        return true;
+    }
+
+    private boolean applyAmendRejected(GatewayAuditEvent event, String eventRef, String rawLine, boolean queueIfMissing) {
+        if (event.orderId() == null) {
+            appendOrphan(event, eventRef, "MISSING_ORDER_ID", "orderId がありません");
+            return false;
+        }
+        OrderView current = orderReadModel.findById(event.orderId()).orElse(null);
+        if (current == null) {
+            return handleMissingOrder(event, eventRef, rawLine, queueIfMissing, "ORDER_NOT_FOUND", "amend reject の先に注文がありません");
+        }
+        JsonNode data = safeData(event.data());
+        int quantity = data.path("qty").asInt(current.quantity());
+        Double price = data.hasNonNull("price") ? Double.valueOf(data.get("price").asDouble()) : current.price();
+        OrderStatus nextStatus = mapStatus(textOr(data, "status", current.status().name()), current.status());
+        long filledQty = data.path("filledQty").asLong(current.filledQuantity());
+        OrderView next = new OrderView(
+            current.id(),
+            current.accountId(),
+            current.symbol(),
+            current.side(),
+            current.type(),
+            quantity,
+            price,
+            current.timeInForce(),
+            current.expireAt(),
+            nextStatus,
+            current.submittedAt(),
+            current.filledAt(),
+            current.executionTimeMs(),
+            textOr(data, "reason", current.statusReason()),
+            filledQty,
+            Math.max(0L, quantity - filledQty)
+        );
+        orderReadModel.upsert(next);
+        appendEvent(next.id(), orderEvent(
+            next.id(),
+            "AMEND_REJECTED",
+            event.at(),
+            "訂正拒否",
+            textOr(data, "reason", "訂正拒否"),
             eventRef
         ));
         syncReservation(next);

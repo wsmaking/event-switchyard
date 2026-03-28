@@ -16,7 +16,12 @@ public final class Main {
         String accountId = System.getProperty("oms.account.id", System.getenv().getOrDefault("ACCOUNT_ID", "acct_demo"));
         OmsRuntime runtime = OmsStoreFactory.create(accountId);
         OrderReadModel readModel = runtime.orderReadModel();
-        GatewayAuditIntakeService auditIntakeService = new GatewayAuditIntakeService(readModel, runtime.auditOffsetStore());
+        GatewayAuditIntakeService auditIntakeService = new GatewayAuditIntakeService(
+            readModel,
+            runtime.auditOffsetStore(),
+            runtime.deadLetterStore(),
+            runtime.pendingOrphanStore()
+        );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(auditIntakeService);
         OmsHttpServer server = new OmsHttpServer(port, readModel, auditIntakeService, busEventIntakeService);
         server.start();

@@ -47,7 +47,7 @@ use tokio::sync::mpsc::{
     Receiver, Sender, UnboundedReceiver,
     error::{TryRecvError, TrySendError},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::audit::AuditLog;
 use crate::audit::{AuditAppendWithReceipt, AuditDurableNotification, AuditEvent};
@@ -1479,6 +1479,7 @@ pub(super) struct AppState {
     pub(super) sharded_store: Arc<ShardedOrderStore>,
     /// 注文IDマッピング（内部ID ↔ 外部ID）
     pub(super) order_id_map: Arc<OrderIdMap>,
+    pub(super) venue_order_control: Option<Arc<dyn crate::exchange::VenueOrderControl>>,
     pub(super) sse_hub: Arc<SseHub>,
     pub(super) order_id_seq: Arc<AtomicU64>,
     pub(super) audit_log: Arc<AuditLog>,
@@ -2974,6 +2975,22 @@ pub async fn run(
         order_store,
         sharded_store,
         order_id_map,
+        venue_order_control: std::env::var("EXCHANGE_TCP_HOST").ok().and_then(|host| {
+            let port = std::env::var("EXCHANGE_TCP_PORT")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(9901);
+            match crate::exchange::TcpVenueOrderControl::connect(&host, port) {
+                Ok(control) => {
+                    info!(exchange_host = %host, exchange_port = port, "venue order control enabled");
+                    Some(Arc::new(control) as Arc<dyn crate::exchange::VenueOrderControl>)
+                }
+                Err(error) => {
+                    warn!(exchange_host = %host, exchange_port = port, %error, "failed to enable venue order control");
+                    None
+                }
+            }
+        }),
         sse_hub,
         order_id_seq: Arc::new(AtomicU64::new(1)),
         audit_log,

@@ -241,6 +241,7 @@ public final class JdbcOrderReadModel implements OrderReadModel {
             execute(connection, "DELETE FROM oms_event_dedup");
             execute(connection, "DELETE FROM oms_outbox");
             execute(connection, "DELETE FROM oms_dead_letter");
+            execute(connection, "DELETE FROM oms_pending_orphan");
         }, "failed_to_reset_oms_store");
     }
 
