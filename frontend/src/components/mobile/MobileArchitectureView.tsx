@@ -1,4 +1,4 @@
-import { useOpsOverview, useOrderStream } from '../../hooks/useOrders';
+import { useMobileOpsOverview, useMobileOrderStream } from '../../hooks/useMobileStudy';
 import type { MobileHome } from '../../types/mobile';
 
 interface MobileArchitectureViewProps {
@@ -7,8 +7,8 @@ interface MobileArchitectureViewProps {
 }
 
 export function MobileArchitectureView({ home, orderId }: MobileArchitectureViewProps) {
-  const { data: opsOverview, isLoading, isError, error } = useOpsOverview(orderId);
-  const streamState = useOrderStream(orderId);
+  const { data: opsOverview, isLoading, isError, error } = useMobileOpsOverview(orderId);
+  const streamState = useMobileOrderStream(orderId);
 
   if (isLoading) {
     return <div className="px-4 py-6 text-sm text-[color:var(--mobile-muted)]">ops overview を読み込み中...</div>;
@@ -34,7 +34,7 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
         <div className="text-[11px] uppercase tracking-[0.22em] text-cyan-100/70">Architecture Map</div>
         <h1 className="mt-2 text-2xl font-semibold text-white">注文から ledger までの責務境界</h1>
         <p className="mt-2 text-sm leading-6 text-slate-300">
-          hot path を壊さず、projection と ops を Java 側へ寄せる現在の構成を一枚で確認する。
+          hot path を壊さず、projection と ops を Java 側へ寄せる構成を一枚で確認する。offline 時は on-device pack の写像として読む。
         </p>
         <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
           <span className={`h-2 w-2 rounded-full ${pulseActive ? 'animate-pulse bg-cyan-300' : 'bg-slate-500'}`} />
@@ -89,6 +89,9 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
           <Bullet body="OMS は注文状態、BackOffice は ledger / cash / positions の正本責務。" />
           <Bullet body="aggregateSeq gap は pending orphan として保留し、DLQ は operator action に回す。" />
           <Bullet body={home?.mainlineStatus.summary ?? 'mainline status を確認して運用説明へ繋ぐ。'} />
+          {home?.deliveryMode === 'ON_DEVICE' && (
+            <Bullet body="server が無い場合は同じ画面を端末内 state で再生し、反復導線は止めない。" />
+          )}
         </div>
       </section>
     </div>

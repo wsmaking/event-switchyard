@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useMobileHome, useUpdateMobileProgress } from '../../hooks/useMobileLearning';
-import { useOrders } from '../../hooks/useOrders';
+import { useMobileOrders } from '../../hooks/useMobileStudy';
 import type { MobileRouteState } from '../../types/mobile';
 import { MobileArchitectureView } from './MobileArchitectureView';
 import { MobileCardsView } from './MobileCardsView';
@@ -18,7 +18,7 @@ interface MobileLearningConsoleProps {
 export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearningConsoleProps) {
   const route = parseMobileRoute(path);
   const { data: home, isLoading, isError, error } = useMobileHome();
-  const { data: orders } = useOrders();
+  const { data: orders } = useMobileOrders();
   const updateProgress = useUpdateMobileProgress();
   const lastAnchorRef = useRef<string | null>(null);
 
@@ -60,12 +60,19 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
             <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-200/70">Event Switchyard</div>
             <div className="mt-1 text-base font-semibold text-white">Mobile Learning Console</div>
           </div>
-          <button
-            onClick={onExit}
-            className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200"
-          >
-            Desktop
-          </button>
+          <div className="flex items-center gap-2">
+            {home?.deliveryMode === 'ON_DEVICE' && (
+              <div className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-2 text-[11px] font-medium text-emerald-100">
+                on-device
+              </div>
+            )}
+            <button
+              onClick={onExit}
+              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200"
+            >
+              Desktop
+            </button>
+          </div>
         </div>
       </header>
 

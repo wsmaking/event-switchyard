@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { useOpsOverview, useOrderFinalOut, useOrderStream, useOrders, useRunReplayScenario } from '../../hooks/useOrders';
+import {
+  useMobileOpsOverview,
+  useMobileOrderFinalOut,
+  useMobileOrderStream,
+  useMobileOrders,
+  useRunMobileReplayScenario,
+} from '../../hooks/useMobileStudy';
 import { OrderSide, OrderType, TimeInForce } from '../../types/trading';
 import type { OrderRequest } from '../../types/trading';
 import { formatCurrency, formatDateTime, formatNumber, formatSignedCurrency, statusLabel, statusTone } from './mobileUtils';
@@ -13,13 +19,13 @@ interface MobileOrderStudyViewProps {
 const replayScenarios = ['accepted', 'partial-fill', 'filled', 'canceled', 'expired', 'rejected'] as const;
 
 export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrderStudyViewProps) {
-  const { data: orders, isLoading, isError, error } = useOrders();
-  const runReplayScenario = useRunReplayScenario();
+  const { data: orders, isLoading, isError, error } = useMobileOrders();
+  const runReplayScenario = useRunMobileReplayScenario();
   const [runningScenario, setRunningScenario] = useState<string | null>(null);
   const selectedOrderId = orderId ?? orders?.[0]?.id ?? null;
-  const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(selectedOrderId);
-  const { data: opsOverview } = useOpsOverview(selectedOrderId);
-  const orderStreamState = useOrderStream(selectedOrderId);
+  const { data: finalOut, isLoading: finalOutLoading } = useMobileOrderFinalOut(selectedOrderId);
+  const { data: opsOverview } = useMobileOpsOverview(selectedOrderId);
+  const orderStreamState = useMobileOrderStream(selectedOrderId);
 
   if (isLoading) {
     return <div className="px-4 py-6 text-sm text-[color:var(--mobile-muted)]">注文を読み込み中...</div>;
@@ -110,6 +116,11 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
               <InfoMetric label="約定" value={`${formatNumber(finalOut.order.filledQuantity ?? 0)} 株`} />
               <InfoMetric label="stream" value={orderStreamState} />
             </div>
+            {orderStreamState === 'offline' && (
+              <div className="mt-4 rounded-[18px] border border-teal-300/20 bg-teal-400/10 px-4 py-3 text-xs leading-6 text-teal-50/90">
+                on-device pack で再生中。order stream は local storage の state を参照しています。
+              </div>
+            )}
           </section>
 
           <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
@@ -202,7 +213,7 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
 function runSeedScenario(
   scenario: string,
   setRunningScenario: (value: string | null) => void,
-  runReplayScenario: ReturnType<typeof useRunReplayScenario>,
+  runReplayScenario: ReturnType<typeof useRunMobileReplayScenario>,
   onNavigate: (path: string) => void
 ) {
   const request: OrderRequest = {
@@ -290,7 +301,7 @@ function NarrativeCard({ title, body }: { title: string; body: string }) {
   );
 }
 
-function LedgerSummary({ finalOut }: { finalOut: NonNullable<ReturnType<typeof useOrderFinalOut>['data']> }) {
+function LedgerSummary({ finalOut }: { finalOut: NonNullable<ReturnType<typeof useMobileOrderFinalOut>['data']> }) {
   return (
     <section className="rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(120,53,15,0.32),rgba(15,23,42,0.95))] p-4">
       <div className="text-base font-semibold text-white">Balance / P&L</div>
@@ -386,8 +397,8 @@ function LedgerRail({
   entries,
   rawEventIndex,
 }: {
-  entries: NonNullable<ReturnType<typeof useOpsOverview>['data']>['ledgerEntries'];
-  rawEventIndex: Map<string, NonNullable<ReturnType<typeof useOrderFinalOut>['data']>['rawEvents'][number]>;
+  entries: NonNullable<ReturnType<typeof useMobileOpsOverview>['data']>['ledgerEntries'];
+  rawEventIndex: Map<string, NonNullable<ReturnType<typeof useMobileOrderFinalOut>['data']>['rawEvents'][number]>;
 }) {
   return (
     <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">

@@ -1,8 +1,9 @@
-const VERSION = 'switchyard-pwa-v1';
+const VERSION = 'switchyard-pwa-v2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const SHELL_URLS = [
   '/',
+  '/mobile',
   '/manifest.webmanifest',
   '/app-icon.svg',
   '/app-icon-192.png',
@@ -62,6 +63,10 @@ async function networkFirstDocument(request) {
     const cached = await cache.match(request);
     if (cached) {
       return cached;
+    }
+    const pathname = new URL(request.url).pathname;
+    if (pathname.startsWith('/mobile')) {
+      return (await caches.match('/mobile')) || caches.match('/');
     }
     return caches.match('/');
   }

@@ -44,7 +44,7 @@ export function MobileHomeView({
             </p>
           </div>
           <div className={`rounded-full px-3 py-1 text-[11px] font-medium ${home.mainlineStatus.healthy ? 'bg-emerald-400/15 text-emerald-100' : 'bg-amber-400/15 text-amber-100'}`}>
-            {home.mainlineStatus.healthy ? 'mainline stable' : '要確認'}
+            {home.deliveryMode === 'ON_DEVICE' ? 'on-device' : home.mainlineStatus.healthy ? 'mainline stable' : '要確認'}
           </div>
         </div>
 
@@ -74,6 +74,16 @@ export function MobileHomeView({
           <div className="mt-2 text-lg font-semibold text-white">iPhone に追加</div>
           <div className="mt-2 text-sm leading-6 text-emerald-50/80">
             Safari の共有メニューから「ホーム画面に追加」を選ぶと、アプリ形態で開けます。
+          </div>
+        </section>
+      )}
+
+      {home.deliveryMode === 'ON_DEVICE' && (
+        <section className="rounded-[24px] border border-sky-300/20 bg-sky-500/10 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-sky-100/70">On Device</div>
+          <div className="mt-2 text-lg font-semibold text-white">端末内データで継続中</div>
+          <div className="mt-2 text-sm leading-6 text-sky-50/80">
+            server が無くても cards、drills、risk、replay scenario を継続できます。進捗はこの端末の local storage に保存されます。
           </div>
         </section>
       )}
