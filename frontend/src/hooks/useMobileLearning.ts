@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { isMobileAppPath } from '../appBase';
 import type {
   MobileCardDetail,
   MobileCardSummary,
@@ -51,7 +52,7 @@ async function fetchJsonWithOfflineFallback<T>(path: string, fallback: () => T |
 }
 
 function isMobileLearningRoute() {
-  return typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile');
+  return typeof window !== 'undefined' && isMobileAppPath(window.location.pathname || '/');
 }
 
 export function useMobileHome() {

@@ -30,6 +30,10 @@ export function toBrowserPath(appPath: string) {
   return normalized === '/' ? basePath : `${basePath}${normalized}`;
 }
 
+export function isMobileAppPath(browserPath: string) {
+  return toAppPath(browserPath).startsWith('/mobile');
+}
+
 function normalizePath(path: string) {
   if (!path || path === '') {
     return '/';
