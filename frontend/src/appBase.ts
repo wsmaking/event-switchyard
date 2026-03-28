@@ -38,7 +38,11 @@ export function isMobileAppPath(browserPath: string) {
 }
 
 export function isLocalBundleRuntime() {
-  return typeof window !== 'undefined' && window.location.protocol === 'file:';
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  const protocol = window.location.protocol;
+  return protocol === 'file:' || protocol === 'appbundle:';
 }
 
 export function isMobileRuntime() {
