@@ -3,6 +3,7 @@ package oms.audit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import oms.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -74,7 +75,8 @@ public final class InMemoryDeadLetterStore {
                 entries.sort(Comparator.comparingLong(DeadLetterEntryView::recordedAt).reversed());
             }
         } catch (IOException exception) {
-            throw new IllegalStateException("failed_to_load_oms_dead_letters:" + statePath, exception);
+            StateFileRecovery.recover(statePath, "oms_dead_letters", exception);
+            reset();
         }
     }
 

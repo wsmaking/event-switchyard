@@ -3,6 +3,7 @@ package backofficejava.account;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import backofficejava.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -81,7 +82,8 @@ public final class InMemoryLedgerReadModel implements LedgerReadModel {
                 entries.sort(Comparator.comparingLong(LedgerEntryView::eventAt));
             }
         } catch (IOException exception) {
-            throw new IllegalStateException("failed_to_load_backoffice_ledger:" + statePath, exception);
+            StateFileRecovery.recover(statePath, "backoffice_ledger", exception);
+            reset();
         }
     }
 

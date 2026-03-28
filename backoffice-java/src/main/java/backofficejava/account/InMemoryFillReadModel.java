@@ -3,6 +3,7 @@ package backofficejava.account;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import backofficejava.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -55,7 +56,8 @@ public final class InMemoryFillReadModel implements FillReadModel {
                 );
             }
         } catch (IOException e) {
-            throw new IllegalStateException("failed_to_load_backoffice_fills:" + statePath, e);
+            StateFileRecovery.recover(statePath, "backoffice_fills", e);
+            reset();
         }
     }
 

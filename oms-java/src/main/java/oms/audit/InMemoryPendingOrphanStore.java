@@ -3,6 +3,7 @@ package oms.audit;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import oms.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -67,7 +68,8 @@ public final class InMemoryPendingOrphanStore {
                 entries.sort(Comparator.comparingLong(PendingOrphanEntryView::eventAt));
             }
         } catch (IOException exception) {
-            throw new IllegalStateException("failed_to_load_oms_pending_orphans:" + statePath, exception);
+            StateFileRecovery.recover(statePath, "oms_pending_orphans", exception);
+            reset();
         }
     }
 

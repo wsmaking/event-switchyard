@@ -3,6 +3,7 @@ package oms.order;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import oms.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -99,7 +100,8 @@ public final class InMemoryOrderReadModel implements OrderReadModel {
                 );
             }
         } catch (IOException e) {
-            throw new IllegalStateException("failed_to_load_oms_state:" + statePath, e);
+            StateFileRecovery.recover(statePath, "oms_state", e);
+            reset();
         }
     }
 

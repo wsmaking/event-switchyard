@@ -3,6 +3,7 @@ package backofficejava.account;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import backofficejava.support.StateFileRecovery;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -68,7 +69,8 @@ public final class InMemoryAccountOverviewReadModel implements AccountOverviewRe
                 snapshot.accounts().forEach(view -> accounts.put(view.accountId(), view));
             }
         } catch (IOException e) {
-            throw new IllegalStateException("failed_to_load_backoffice_accounts:" + statePath, e);
+            StateFileRecovery.recover(statePath, "backoffice_accounts", e);
+            reset();
         }
     }
 

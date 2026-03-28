@@ -12,6 +12,7 @@ JWT_HS256_SECRET="${JWT_HS256_SECRET:-secret123}"
 FASTPATH_DRAIN_ENABLE="${FASTPATH_DRAIN_ENABLE:-1}"
 FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS:-4}"
 KAFKA_ENABLE="${KAFKA_ENABLE:-0}"
+V3_CONFIRM_REBUILD_ON_START="${V3_CONFIRM_REBUILD_ON_START:-0}"
 
 mkdir -p "${RUN_DIR}"
 
@@ -42,7 +43,8 @@ if [[ ! -f "${PID_FILE}" ]]; then
     KAFKA_ENABLE="${KAFKA_ENABLE}" \
     FASTPATH_DRAIN_ENABLE="${FASTPATH_DRAIN_ENABLE}" \
     FASTPATH_DRAIN_WORKERS="${FASTPATH_DRAIN_WORKERS}" \
-    ./gateway-rust/target/release/gateway-rust >"${LOG_FILE}" 2>&1 &
+    V3_CONFIRM_REBUILD_ON_START="${V3_CONFIRM_REBUILD_ON_START}" \
+    nohup ./gateway-rust/target/release/gateway-rust >"${LOG_FILE}" 2>&1 </dev/null &
     echo $! >"${PID_FILE}"
   )
   echo "[start] gateway-rust log=${LOG_FILE}"
