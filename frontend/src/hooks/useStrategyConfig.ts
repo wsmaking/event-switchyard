@@ -13,13 +13,15 @@ async function fetchStrategyConfig(): Promise<StrategyConfig> {
 }
 
 async function updateStrategyConfig(config: StrategyConfigUpdate): Promise<StrategyConfig> {
-  const authHeaders = ADMIN_TOKEN ? { Authorization: `Bearer ${ADMIN_TOKEN}` } : {};
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (ADMIN_TOKEN) {
+    headers.Authorization = `Bearer ${ADMIN_TOKEN}`;
+  }
   const response = await fetch(`${API_BASE_URL}/api/strategy`, {
     method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
+    headers,
     body: JSON.stringify(config),
   });
   if (!response.ok) {

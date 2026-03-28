@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { useOrders, useSubmitOrder } from '../hooks/useOrders';
+import {
+  useOrderFinalOut,
+  useOrders,
+  useResetDemo,
+  useRunReplayScenario,
+  useSubmitOrder,
+} from '../hooks/useOrders';
 import { useStockInfo, usePositions, usePriceHistory } from '../hooks/useMarketData';
 import { OrderSide, OrderType, OrderStatus, TimeInForce } from '../types/trading';
 import type { OrderRequest, PricePoint } from '../types/trading';
@@ -18,6 +24,9 @@ export function TradingView() {
     error: positionsErrorObj,
   } = usePositions();
   const submitOrder = useSubmitOrder();
+  const resetDemo = useResetDemo();
+  const runReplayScenario = useRunReplayScenario();
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // フォーム状態
   const [symbol, setSymbol] = useState('7203'); // トヨタ自動車
@@ -36,13 +45,12 @@ export function TradingView() {
     isError: historyError,
   } = usePriceHistory(symbol);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const buildOrderRequest = (): OrderRequest => {
     const parsedExpireAt = expireAtInput ? Date.parse(expireAtInput) : Number.NaN;
     const expireAtMs =
       timeInForce === TimeInForce.GTD && !Number.isNaN(parsedExpireAt) ? parsedExpireAt : null;
 
-    const request: OrderRequest = {
+    return {
       symbol,
       side,
       type: orderType,
@@ -51,6 +59,11 @@ export function TradingView() {
       timeInForce,
       expireAt: expireAtMs,
     };
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const request = buildOrderRequest();
 
     submitOrder.mutate(request);
 
@@ -74,6 +87,20 @@ export function TradingView() {
     submitOrder.mutate(demoRequest);
   };
 
+  const handleReplayScenario = (scenario: string) => {
+    runReplayScenario.mutate(
+      {
+        scenario,
+        request: buildOrderRequest(),
+      },
+      {
+        onSuccess: (order) => {
+          setSelectedOrderId(order.id);
+        },
+      }
+    );
+  };
+
   const apiErrors = [ordersErrorObj, positionsErrorObj]
     .filter(Boolean)
     .map((err) => (err instanceof Error ? err.message : String(err)))
@@ -82,6 +109,14 @@ export function TradingView() {
   const showEmptyOrders = !ordersLoading && !ordersError && (!orders || orders.length === 0);
   const showEmptyPositions = !positionsLoading && !positionsError && (!positions || positions.length === 0);
   const historyPoints = priceHistory ?? [];
+  const replayScenarios = [
+    { id: 'accepted', label: '受付済', tone: 'border-amber-500/30 text-amber-200' },
+    { id: 'partial-fill', label: '一部約定', tone: 'border-blue-500/30 text-blue-200' },
+    { id: 'filled', label: '全量約定', tone: 'border-emerald-500/30 text-emerald-200' },
+    { id: 'canceled', label: '取消完了', tone: 'border-sky-500/30 text-sky-200' },
+    { id: 'expired', label: '失効', tone: 'border-rose-500/30 text-rose-200' },
+    { id: 'rejected', label: '拒否', tone: 'border-rose-500/30 text-rose-200' },
+  ] as const;
 
   const buildSparklinePoints = (points: PricePoint[]) => {
     if (points.length < 2) return '';
@@ -113,6 +148,51 @@ export function TradingView() {
 
   const sparkline = buildSparklinePoints(historyPoints);
   const historyStats = summarizeHistory(historyPoints);
+  const effectiveSelectedOrderId = selectedOrderId ?? orders?.[0]?.id ?? null;
+  const { data: finalOut, isLoading: finalOutLoading } = useOrderFinalOut(effectiveSelectedOrderId);
+
+  const statusTone = (status: OrderStatus) => {
+    switch (status) {
+      case OrderStatus.FILLED:
+        return 'bg-emerald-500/20 text-emerald-200';
+      case OrderStatus.REJECTED:
+      case OrderStatus.CANCELED:
+      case OrderStatus.EXPIRED:
+        return 'bg-rose-500/20 text-rose-200';
+      case OrderStatus.PARTIALLY_FILLED:
+        return 'bg-blue-500/20 text-blue-200';
+      case OrderStatus.CANCEL_PENDING:
+      case OrderStatus.AMEND_PENDING:
+        return 'bg-sky-500/20 text-sky-200';
+      default:
+        return 'bg-amber-500/20 text-amber-200';
+    }
+  };
+
+  const statusLabel = (status: OrderStatus) => {
+    switch (status) {
+      case OrderStatus.PENDING_ACCEPT:
+        return '受付中';
+      case OrderStatus.ACCEPTED:
+        return '受付済';
+      case OrderStatus.PARTIALLY_FILLED:
+        return '一部約定';
+      case OrderStatus.FILLED:
+        return '約定済';
+      case OrderStatus.CANCEL_PENDING:
+        return '取消中';
+      case OrderStatus.CANCELED:
+        return '取消済';
+      case OrderStatus.EXPIRED:
+        return '失効';
+      case OrderStatus.REJECTED:
+        return '失敗';
+      case OrderStatus.AMEND_PENDING:
+        return '訂正中';
+      default:
+        return status;
+    }
+  };
 
   const marketSymbols = [
     { symbol: '7203', label: 'トヨタ自動車' },
@@ -424,7 +504,7 @@ export function TradingView() {
                 {/* 送信ボタン */}
                 <button
                   type="submit"
-                  disabled={submitOrder.isPending}
+                  disabled={submitOrder.isPending || runReplayScenario.isPending}
                   className="w-full rounded-md bg-blue-500/80 py-3 font-semibold text-slate-100 transition hover:bg-blue-400/90 disabled:cursor-not-allowed disabled:bg-slate-700"
                 >
                   {submitOrder.isPending ? '送信中...' : '注文を送信'}
@@ -433,15 +513,62 @@ export function TradingView() {
                 <button
                   type="button"
                   onClick={handleDemoOrder}
-                  disabled={submitOrder.isPending}
+                  disabled={submitOrder.isPending || runReplayScenario.isPending}
                   className="w-full rounded-md border border-slate-700/70 py-2 font-semibold text-slate-300 transition hover:bg-slate-900/60 disabled:bg-slate-900 disabled:text-slate-500"
                 >
                   デモ注文を1件作成
                 </button>
 
+                <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">業務再現シナリオ</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        1クリックで OMS / BackOffice を再構成し、最終Outを即確認します
+                      </div>
+                    </div>
+                    <span className="text-[11px] text-slate-500">状態は上書きされます</span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {replayScenarios.map((scenario) => (
+                      <button
+                        key={scenario.id}
+                        type="button"
+                        onClick={() => handleReplayScenario(scenario.id)}
+                        disabled={runReplayScenario.isPending || submitOrder.isPending}
+                        className={`rounded-md border bg-slate-900/70 px-3 py-2 text-sm font-semibold transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500 ${scenario.tone}`}
+                      >
+                        {scenario.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetDemo.mutate();
+                    setSelectedOrderId(null);
+                  }}
+                  disabled={resetDemo.isPending || runReplayScenario.isPending}
+                  className="w-full rounded-md border border-slate-700/70 py-2 font-semibold text-slate-300 transition hover:bg-slate-900/60 disabled:bg-slate-900 disabled:text-slate-500"
+                >
+                  {resetDemo.isPending ? 'リセット中...' : 'デモをリセット'}
+                </button>
+
                 {submitOrder.isError && (
                   <div className="text-sm text-rose-300">
                     注文に失敗しました: {submitOrder.error.message}
+                  </div>
+                )}
+                {resetDemo.isError && (
+                  <div className="text-sm text-rose-300">
+                    リセットに失敗しました: {resetDemo.error.message}
+                  </div>
+                )}
+                {runReplayScenario.isError && (
+                  <div className="text-sm text-rose-300">
+                    シナリオ再生に失敗しました: {runReplayScenario.error.message}
                   </div>
                 )}
               </form>
@@ -575,7 +702,13 @@ export function TradingView() {
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 bg-slate-950/40">
                       {orders.map((order) => (
-                        <tr key={order.id} className="hover:bg-slate-900/40">
+                        <tr
+                          key={order.id}
+                          className={`cursor-pointer hover:bg-slate-900/40 ${
+                            effectiveSelectedOrderId === order.id ? 'bg-slate-900/50' : ''
+                          }`}
+                          onClick={() => setSelectedOrderId(order.id)}
+                        >
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-100">
                             {new Date(order.submittedAt).toLocaleTimeString('ja-JP')}
                           </td>
@@ -610,19 +743,9 @@ export function TradingView() {
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm">
                             <span
-                              className={`px-2 py-1 rounded-md font-medium ${
-                                order.status === OrderStatus.FILLED
-                                  ? 'bg-emerald-500/20 text-emerald-200'
-                                  : order.status === OrderStatus.REJECTED
-                                  ? 'bg-rose-500/20 text-rose-200'
-                                  : 'bg-amber-500/20 text-amber-200'
-                              }`}
+                              className={`px-2 py-1 rounded-md font-medium ${statusTone(order.status)}`}
                             >
-                              {order.status === OrderStatus.FILLED
-                                ? '約定済'
-                                : order.status === OrderStatus.REJECTED
-                                ? '失敗'
-                                : '待機中'}
+                              {statusLabel(order.status)}
                             </span>
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">
@@ -641,6 +764,101 @@ export function TradingView() {
                 <div className="text-slate-500">注文履歴を取得できませんでした</div>
               )}
           </div>
+        </div>
+
+        <div className={`mt-6 ${panelClass} p-6 reveal reveal-delay-3`}>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-slate-100">最終Out</h2>
+            <span className="text-xs text-slate-500">
+              {effectiveSelectedOrderId ? `Order: ${effectiveSelectedOrderId}` : '注文未選択'}
+            </span>
+          </div>
+
+          {finalOutLoading ? (
+            <div className="mt-4 text-sm text-slate-500">読み込み中...</div>
+          ) : finalOut ? (
+            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-4">
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Order</div>
+                <div className="mt-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">{finalOut.order.symbol}</div>
+                    <div className="text-xs text-slate-400">
+                      {finalOut.order.side} / {finalOut.order.type} / {finalOut.order.quantity.toLocaleString()}株
+                    </div>
+                  </div>
+                  <span className={`rounded-md px-2 py-1 text-xs font-medium ${statusTone(finalOut.order.status)}`}>
+                    {statusLabel(finalOut.order.status)}
+                  </span>
+                </div>
+                <div className="mt-4 space-y-2 text-sm text-slate-300">
+                  <div>受付時刻: {new Date(finalOut.order.submittedAt).toLocaleString('ja-JP')}</div>
+                  <div>価格: {finalOut.order.price ? `¥${finalOut.order.price.toLocaleString()}` : '成行'}</div>
+                  <div>約定数量: {(finalOut.order.filledQuantity ?? 0).toLocaleString()}株</div>
+                  <div>残数量: {(finalOut.order.remainingQuantity ?? finalOut.order.quantity).toLocaleString()}株</div>
+                  <div>理由: {finalOut.order.statusReason ?? '-'}</div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Account</div>
+                <div className="mt-3 space-y-3 text-sm text-slate-300">
+                  <div>口座: {finalOut.accountOverview.accountId}</div>
+                  <div>現金残高: ¥{finalOut.accountOverview.cashBalance.toLocaleString()}</div>
+                  <div>利用可能余力: ¥{finalOut.accountOverview.availableBuyingPower.toLocaleString()}</div>
+                  <div>拘束余力: ¥{finalOut.accountOverview.reservedBuyingPower.toLocaleString()}</div>
+                  <div>建玉数: {finalOut.accountOverview.positionCount.toLocaleString()}</div>
+                  <div>実現損益: ¥{finalOut.accountOverview.realizedPnl.toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Positions</div>
+                {finalOut.positions.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.positions.map((position) => (
+                      <div key={position.symbol} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-100">{position.symbol}</div>
+                          <div className="text-xs text-slate-400">{position.quantity.toLocaleString()}株</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-400">
+                          平均 ¥{position.avgPrice.toLocaleString()} / 現在 ¥{position.currentPrice.toLocaleString()}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">ポジションはありません。</div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4">
+                <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Timeline</div>
+                {finalOut.timeline.length > 0 ? (
+                  <div className="mt-3 space-y-3">
+                    {finalOut.timeline.map((entry) => (
+                      <div key={`${entry.eventType}-${entry.eventAt}`} className="rounded-lg border border-slate-800/60 bg-slate-900/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-100">{entry.label}</div>
+                          <div className="text-[11px] text-slate-500">
+                            {new Date(entry.eventAt).toLocaleTimeString('ja-JP')}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-400">{entry.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-slate-500">イベントはまだありません。</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 text-sm text-slate-500">
+              注文を作成すると、その注文の最終Outをここで確認できます。
+            </div>
+          )}
         </div>
       </div>
     </div>

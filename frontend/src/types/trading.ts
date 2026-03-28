@@ -13,9 +13,15 @@ export const OrderType = {
 export type OrderType = (typeof OrderType)[keyof typeof OrderType];
 
 export const OrderStatus = {
-  PENDING: 'PENDING',
+  PENDING_ACCEPT: 'PENDING_ACCEPT',
+  ACCEPTED: 'ACCEPTED',
+  PARTIALLY_FILLED: 'PARTIALLY_FILLED',
   FILLED: 'FILLED',
+  CANCEL_PENDING: 'CANCEL_PENDING',
+  CANCELED: 'CANCELED',
+  EXPIRED: 'EXPIRED',
   REJECTED: 'REJECTED',
+  AMEND_PENDING: 'AMEND_PENDING',
 } as const;
 
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
@@ -29,6 +35,7 @@ export type TimeInForce = (typeof TimeInForce)[keyof typeof TimeInForce];
 
 export interface Order {
   id: string;
+  accountId?: string;
   symbol: string;
   side: OrderSide;
   type: OrderType;
@@ -40,6 +47,9 @@ export interface Order {
   submittedAt: number;
   filledAt: number | null;
   executionTimeMs: number | null;
+  statusReason?: string | null;
+  filledQuantity?: number;
+  remainingQuantity?: number;
 }
 
 export interface OrderRequest {
@@ -75,6 +85,30 @@ export interface Position {
   currentPrice: number;
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
+}
+
+export interface AccountOverview {
+  accountId: string;
+  cashBalance: number;
+  availableBuyingPower: number;
+  reservedBuyingPower: number;
+  positionCount: number;
+  realizedPnl: number;
+  updatedAt: string | null;
+}
+
+export interface OrderFinalOut {
+  order: Order;
+  accountOverview: AccountOverview;
+  positions: Position[];
+  timeline: OrderTimelineEntry[];
+}
+
+export interface OrderTimelineEntry {
+  eventType: string;
+  eventAt: number;
+  label: string;
+  detail: string;
 }
 
 export interface StrategyConfig {

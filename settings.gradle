@@ -14,3 +14,6 @@ rootProject.name = 'event-switchyard'
 include('app')
 include('gateway')
 include('backoffice')
+include('oms-java')
+include('backoffice-java')
+include('app-java')

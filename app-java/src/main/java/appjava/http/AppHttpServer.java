@@ -1,0 +1,54 @@
+package appjava.http;
+
+import appjava.clients.BackOfficeClient;
+import appjava.demo.ReplayScenarioService;
+import appjava.market.MarketDataService;
+import appjava.order.OrderService;
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.util.concurrent.Executors;
+
+public final class AppHttpServer {
+    private final int port;
+    private final String accountId;
+    private final MarketDataService marketDataService;
+    private final BackOfficeClient backOfficeClient;
+    private final OrderService orderService;
+    private final ReplayScenarioService replayScenarioService;
+
+    public AppHttpServer(
+        int port,
+        String accountId,
+        MarketDataService marketDataService,
+        BackOfficeClient backOfficeClient,
+        OrderService orderService,
+        ReplayScenarioService replayScenarioService
+    ) {
+        this.port = port;
+        this.accountId = accountId;
+        this.marketDataService = marketDataService;
+        this.backOfficeClient = backOfficeClient;
+        this.orderService = orderService;
+        this.replayScenarioService = replayScenarioService;
+    }
+
+    public void start() throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/health", new JsonHttpHandler(exchange ->
+            JsonHttpHandler.JsonResponse.ok(new HealthResponse("UP", "app-java"))
+        ));
+        server.createContext("/api/orders", new OrderApiHandler(accountId, marketDataService, backOfficeClient, orderService));
+        server.createContext("/api/positions", new PositionApiHandler(accountId, marketDataService, backOfficeClient));
+        server.createContext("/api/market", new MarketApiHandler(marketDataService));
+        server.createContext("/api/accounts", new AccountApiHandler(backOfficeClient));
+        server.createContext("/api/demo", new DemoApiHandler(marketDataService, backOfficeClient, orderService, replayScenarioService));
+        server.setExecutor(Executors.newCachedThreadPool());
+        server.start();
+        System.out.println("app-java listening on http://localhost:" + port);
+    }
+
+    public record HealthResponse(String status, String service) {
+    }
+}
