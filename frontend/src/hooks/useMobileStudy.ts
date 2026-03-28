@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { isMobileAppPath } from '../appBase';
+import { isLocalBundleRuntime, isMobileRuntime } from '../appBase';
 import { getOfflineOpsOverview, getOfflineOrderFinalOut, getOfflineOrders, runOfflineReplayScenario } from '../offline/mobileOfflineStore';
 import type { OpsOverview, Order, OrderFinalOut, OrderRequest } from '../types/trading';
 
@@ -28,7 +28,7 @@ async function fetchJsonWithOfflineFallback<T>(path: string, fallback: () => T |
 }
 
 function isMobileLearningRoute() {
-  return typeof window !== 'undefined' && isMobileAppPath(window.location.pathname || '/');
+  return isMobileRuntime();
 }
 
 export function useMobileOrders() {
@@ -97,6 +97,10 @@ export function useMobileOrderStream(orderId: string | null) {
   useEffect(() => {
     if (!orderId) {
       setConnectionState('idle');
+      return;
+    }
+    if (isLocalBundleRuntime()) {
+      setConnectionState('offline');
       return;
     }
     if (isMobileLearningRoute() && typeof navigator !== 'undefined' && navigator.onLine === false) {
