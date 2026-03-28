@@ -4,6 +4,7 @@ import appjava.clients.BackOfficeClient;
 import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.market.MarketDataService;
+import appjava.mobile.MobileLearningService;
 import appjava.order.OrderService;
 import com.sun.net.httpserver.HttpServer;
 
@@ -19,6 +20,7 @@ public final class AppHttpServer {
     private final OmsClient omsClient;
     private final OrderService orderService;
     private final ReplayScenarioService replayScenarioService;
+    private final MobileLearningService mobileLearningService;
 
     public AppHttpServer(
         int port,
@@ -27,7 +29,8 @@ public final class AppHttpServer {
         BackOfficeClient backOfficeClient,
         OmsClient omsClient,
         OrderService orderService,
-        ReplayScenarioService replayScenarioService
+        ReplayScenarioService replayScenarioService,
+        MobileLearningService mobileLearningService
     ) {
         this.port = port;
         this.accountId = accountId;
@@ -36,6 +39,7 @@ public final class AppHttpServer {
         this.omsClient = omsClient;
         this.orderService = orderService;
         this.replayScenarioService = replayScenarioService;
+        this.mobileLearningService = mobileLearningService;
     }
 
     public void start() throws IOException {
@@ -50,6 +54,7 @@ public final class AppHttpServer {
         server.createContext("/api/demo", new DemoApiHandler(marketDataService, backOfficeClient, orderService, replayScenarioService));
         server.createContext("/api/ops", new OpsApiHandler(accountId, omsClient, backOfficeClient));
         server.createContext("/api/order-stream", new OrderStreamHandler(omsClient, backOfficeClient));
+        server.createContext("/api/mobile", new MobileApiHandler(mobileLearningService));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("app-java listening on http://localhost:" + port);

@@ -7,6 +7,8 @@ import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.http.AppHttpServer;
 import appjava.market.MarketDataService;
+import appjava.mobile.MobileLearningService;
+import appjava.mobile.MobileProgressStore;
 import appjava.order.OrderService;
 
 public final class Main {
@@ -28,6 +30,14 @@ public final class Main {
             backOfficeClient,
             omsClient
         );
+        MobileProgressStore mobileProgressStore = new MobileProgressStore(accountId);
+        MobileLearningService mobileLearningService = new MobileLearningService(
+            accountId,
+            marketDataService,
+            backOfficeClient,
+            omsClient,
+            mobileProgressStore
+        );
 
         AppHttpServer server = new AppHttpServer(
             port,
@@ -36,7 +46,8 @@ public final class Main {
             backOfficeClient,
             omsClient,
             orderService,
-            replayScenarioService
+            replayScenarioService,
+            mobileLearningService
         );
         server.start();
     }
