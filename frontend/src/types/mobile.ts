@@ -8,6 +8,7 @@ export interface MobileProgressCard {
   correctCount: number;
   incorrectCount: number;
   lastReviewedAt: number;
+  nextReviewAt: number;
 }
 
 export interface MobileCardSummary {
@@ -140,6 +141,22 @@ export interface MobileRiskEvaluation {
     pnlDelta: number;
     shockPercent: number;
   }>;
+  historicalVar: {
+    confidenceLevel: number;
+    observationCount: number;
+    varLoss: number;
+    expectedShortfall: number;
+    holdingPeriod: string;
+    methodology: string;
+  };
+  hedgeComparison: {
+    hedgeSymbol: string | null;
+    hedgeRatio: number;
+    unhedgedPnlDelta: number;
+    hedgedPnlDelta: number;
+    protectionAmount: number;
+    note: string;
+  };
   assumptions: string[];
 }
 

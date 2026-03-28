@@ -1,4 +1,6 @@
+import { useState, type ReactNode, type TouchEvent } from 'react';
 import { useMobileCard, useMobileCards, useMobileProgress, useUpdateMobileProgress } from '../../hooks/useMobileLearning';
+import type { MobileCardSummary } from '../../types/mobile';
 import { difficultyTone, formatDateTime, masteryTone } from './mobileUtils';
 
 interface MobileCardsViewProps {
@@ -11,6 +13,7 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
   const { data: cards, isLoading, isError, error } = useMobileCards();
   const { data: detail, isLoading: detailLoading } = useMobileCard(cardId);
   const updateProgress = useUpdateMobileProgress();
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
 
   if (!cardId) {
     if (isLoading) {
@@ -27,6 +30,7 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
 
     const dueCards = cards.filter((card) => card.due);
     const bookmarkedCards = cards.filter((card) => card.bookmarked);
+    const reviewQueue = dueCards.slice(0, 5);
 
     return (
       <div className="space-y-4 px-4 py-5 pb-24">
@@ -43,10 +47,37 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
           </div>
         </section>
 
-        {dueCards.length > 0 && (
-          <Section title="要復習">
-            {dueCards.map((card) => (
-              <CardListItem key={card.id} card={card} onNavigate={onNavigate} />
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">5 Minute Queue</div>
+              <div className="mt-2 text-lg font-semibold text-white">今日の review deck</div>
+              <div className="mt-2 text-sm leading-6 text-slate-300">
+                due card を 5 枚までまとめて回す。間違えたカードは queue に残り続ける。
+              </div>
+            </div>
+            <div className="rounded-full border border-violet-300/30 bg-violet-500/10 px-3 py-1 text-xs text-violet-100">
+              {reviewQueue.length} cards
+            </div>
+          </div>
+          {reviewQueue.length > 0 ? (
+            <button
+              onClick={() => onNavigate(`/mobile/cards/${reviewQueue[0].id}`)}
+              className="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-slate-950"
+            >
+              review を始める
+            </button>
+          ) : (
+            <div className="mt-4 rounded-[20px] border border-dashed border-white/10 px-4 py-4 text-sm text-slate-400">
+              due card はありません。bookmark や新規カードで学習を続けられます。
+            </div>
+          )}
+        </section>
+
+        {reviewQueue.length > 0 && (
+          <Section title="Review Queue">
+            {reviewQueue.map((card, index) => (
+              <CardListItem key={card.id} card={card} onNavigate={onNavigate} badge={`Q${index + 1}`} />
             ))}
           </Section>
         )}
@@ -68,11 +99,44 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
     );
   }
 
-  if (detailLoading || !detail) {
+  if (detailLoading || !detail || !cards) {
     return <div className="px-4 py-6 text-sm text-[color:var(--mobile-muted)]">カード詳細を読み込み中...</div>;
   }
 
   const bookmarked = detail.progress.bookmarked;
+  const reviewQueue = cards.filter((card) => card.due && card.id !== cardId);
+
+  const handleReview = (correct: boolean) => {
+    updateProgress.mutate(
+      { type: 'review', cardId, correct },
+      {
+        onSuccess: () => {
+          if (reviewQueue.length > 0) {
+            onNavigate(`/mobile/cards/${reviewQueue[0].id}`);
+            return;
+          }
+          onNavigate('/mobile/cards');
+        },
+      }
+    );
+  };
+
+  const handleTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    setTouchStartX(event.changedTouches[0]?.clientX ?? null);
+  };
+
+  const handleTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
+    if (touchStartX === null) {
+      return;
+    }
+    const delta = (event.changedTouches[0]?.clientX ?? 0) - touchStartX;
+    setTouchStartX(null);
+    if (delta >= 64) {
+      handleReview(true);
+    } else if (delta <= -64) {
+      handleReview(false);
+    }
+  };
 
   return (
     <div className="space-y-4 px-4 py-5 pb-24">
@@ -80,7 +144,11 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
         ← カード一覧へ
       </button>
 
-      <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(88,28,135,0.62),rgba(15,23,42,0.95))] p-5">
+      <section
+        className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(88,28,135,0.62),rgba(15,23,42,0.95))] p-5"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-[11px] uppercase tracking-[0.22em] text-violet-100/70">{detail.card.category}</div>
@@ -97,6 +165,9 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
           <CountPill label="Mastery" value={detail.progress.masteryLevel} tone={masteryTone(detail.progress.masteryLevel)} />
           <CountPill label="Correct" value={detail.progress.correctCount} />
           <CountPill label="Wrong" value={detail.progress.incorrectCount} />
+        </div>
+        <div className="mt-4 rounded-[18px] border border-white/10 bg-black/20 px-4 py-3 text-xs leading-6 text-violet-100/90">
+          右スワイプで「理解した」、左スワイプで「要復習」。次の due card へ自動で進む。
         </div>
       </section>
 
@@ -157,27 +228,29 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
             {bookmarked ? 'Bookmark解除' : 'Bookmark'}
           </button>
           <button
-            onClick={() => updateProgress.mutate({ type: 'review', cardId, correct: false })}
+            onClick={() => handleReview(false)}
             className="rounded-[20px] border border-amber-300/30 bg-amber-500/10 px-3 py-4 text-xs font-medium text-amber-100"
           >
             要復習
           </button>
           <button
-            onClick={() => updateProgress.mutate({ type: 'review', cardId, correct: true })}
+            onClick={() => handleReview(true)}
             className="rounded-[20px] border border-emerald-300/30 bg-emerald-500/10 px-3 py-4 text-xs font-medium text-emerald-100"
           >
             理解した
           </button>
         </div>
-        <div className="mt-4 text-xs text-slate-500">
-          最終レビュー {formatDateTime(detail.progress.lastReviewedAt)}
+        <div className="mt-4 grid gap-2 text-xs text-slate-500">
+          <div>最終レビュー {formatDateTime(detail.progress.lastReviewedAt)}</div>
+          <div>次回レビュー {formatDateTime(detail.progress.nextReviewAt)}</div>
+          {reviewQueue.length > 0 && <div>次の due card {reviewQueue[0].title}</div>}
         </div>
       </section>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-3">
       <div className="text-base font-semibold text-white">{title}</div>
@@ -189,19 +262,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function CardListItem({
   card,
   onNavigate,
+  badge,
 }: {
-  card: MobileCardsViewProps['cardId'] extends never ? never : {
-    id: string;
-    title: string;
-    category: string;
-    difficulty: string;
-    bookmarked: boolean;
-    due: boolean;
-    progress: {
-      masteryLevel: number;
-    };
-  };
+  card: MobileCardSummary;
   onNavigate: (path: string) => void;
+  badge?: string;
 }) {
   return (
     <button
@@ -210,7 +275,10 @@ function CardListItem({
     >
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-white">{card.title}</div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-white">{card.title}</div>
+            {badge && <span className="rounded-full bg-violet-500/15 px-2 py-1 text-[10px] text-violet-100">{badge}</span>}
+          </div>
           <div className="mt-1 text-xs text-slate-400">{card.category}</div>
         </div>
         <div className="flex flex-col items-end gap-2">
@@ -222,9 +290,10 @@ function CardListItem({
           </div>
         </div>
       </div>
-      <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
         {card.bookmarked && <span className="rounded-full bg-white/10 px-2 py-1 text-white">bookmark</span>}
         {card.due && <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-100">due</span>}
+        {card.progress.nextReviewAt > 0 && <span>next {formatDateTime(card.progress.nextReviewAt)}</span>}
       </div>
     </button>
   );

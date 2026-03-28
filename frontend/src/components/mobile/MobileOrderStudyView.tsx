@@ -83,6 +83,12 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
         </div>
       ) : (
         <>
+          {(() => {
+            const unrealizedPnl = finalOut.positions.reduce((total, position) => total + position.unrealizedPnL, 0);
+            const ledgerEntries = opsOverview?.ledgerEntries ?? [];
+            const rawEventIndex = new Map(finalOut.rawEvents.map((event) => [event.eventRef, event]));
+            return (
+              <>
           <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,118,110,0.28),rgba(15,23,42,0.95))] p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -135,6 +141,7 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
           {focus === 'ledger' ? (
             <section className="space-y-4">
               <LedgerSummary finalOut={finalOut} />
+              <PnlSplitCard realizedPnl={finalOut.accountOverview.realizedPnl} unrealizedPnl={unrealizedPnl} />
               <ImpactList
                 title="Reservations"
                 emptyText="reservation はありません"
@@ -162,6 +169,10 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
                   body: `avg ${formatCurrency(position.avgPrice)} / uPnL ${formatSignedCurrency(position.unrealizedPnL)}`,
                 }))}
               />
+              <LedgerRail
+                entries={ledgerEntries}
+                rawEventIndex={rawEventIndex}
+              />
             </section>
           ) : (
             <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
@@ -179,6 +190,9 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
               </div>
             </section>
           )}
+              </>
+            );
+          })()}
         </>
       )}
     </div>
@@ -290,6 +304,47 @@ function LedgerSummary({ finalOut }: { finalOut: NonNullable<ReturnType<typeof u
   );
 }
 
+function PnlSplitCard({
+  realizedPnl,
+  unrealizedPnl,
+}: {
+  realizedPnl: number;
+  unrealizedPnl: number;
+}) {
+  const total = Math.max(1, Math.abs(realizedPnl) + Math.abs(unrealizedPnl));
+  const realizedWidth = `${(Math.abs(realizedPnl) / total) * 100}%`;
+  const unrealizedWidth = `${(Math.abs(unrealizedPnl) / total) * 100}%`;
+
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+      <div className="text-base font-semibold text-white">Realized / Unrealized</div>
+      <div className="mt-4 space-y-3">
+        <div>
+          <div className="flex items-center justify-between text-xs text-slate-300">
+            <span>Realized</span>
+            <span>{formatSignedCurrency(realizedPnl)}</span>
+          </div>
+          <div className="mt-2 h-3 rounded-full bg-slate-900/70">
+            <div className="h-3 rounded-full bg-emerald-400/80" style={{ width: realizedWidth }} />
+          </div>
+        </div>
+        <div>
+          <div className="flex items-center justify-between text-xs text-slate-300">
+            <span>Unrealized</span>
+            <span>{formatSignedCurrency(unrealizedPnl)}</span>
+          </div>
+          <div className="mt-2 h-3 rounded-full bg-slate-900/70">
+            <div className="h-3 rounded-full bg-sky-400/80" style={{ width: unrealizedWidth }} />
+          </div>
+        </div>
+        <div className="rounded-[18px] border border-white/8 bg-slate-950/55 px-4 py-3 text-xs leading-6 text-slate-300">
+          realized は fills で確定した損益、unrealized は現在価格に依存する評価差。
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ImpactMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
@@ -321,6 +376,69 @@ function ImpactList({
               <div className="mt-2 text-sm text-slate-300">{item.body}</div>
             </div>
           ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LedgerRail({
+  entries,
+  rawEventIndex,
+}: {
+  entries: NonNullable<ReturnType<typeof useOpsOverview>['data']>['ledgerEntries'];
+  rawEventIndex: Map<string, NonNullable<ReturnType<typeof useOrderFinalOut>['data']>['rawEvents'][number]>;
+}) {
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+      <div className="text-base font-semibold text-white">Ledger Entry Rail</div>
+      <div className="mt-4 space-y-4">
+        {entries.length === 0 ? (
+          <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-4 text-sm text-slate-400">
+            ledger entry はまだありません
+          </div>
+        ) : (
+          entries.map((entry, index) => {
+            const rawEvent = rawEventIndex.get(entry.eventRef);
+            return (
+              <div key={entry.entryId} className="flex gap-3">
+                <div className="flex flex-col items-center">
+                  <div className={`mt-1 h-3 w-3 rounded-full ${index === entries.length - 1 ? 'bg-amber-300' : 'bg-amber-500/70'}`} />
+                  {index < entries.length - 1 && <div className="mt-2 h-full w-px bg-white/10" />}
+                </div>
+                <div className="flex-1 rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-white">{entry.eventType}</div>
+                      <div className="mt-1 text-xs text-slate-500">{formatDateTime(entry.eventAt)}</div>
+                    </div>
+                    <div className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-slate-300">
+                      {entry.source}
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300">
+                    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
+                      Cash {formatSignedCurrency(entry.cashDelta)}
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
+                      Reserve {formatSignedCurrency(entry.reservedBuyingPowerDelta)}
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
+                      Qty {entry.quantityDelta > 0 ? '+' : ''}{formatNumber(entry.quantityDelta)}
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3">
+                      PnL {formatSignedCurrency(entry.realizedPnlDelta)}
+                    </div>
+                  </div>
+                  <div className="mt-3 text-sm leading-6 text-slate-300">{entry.detail}</div>
+                  <div className="mt-3 grid gap-2 text-[11px] text-slate-500">
+                    <div>eventRef {entry.eventRef}</div>
+                    {rawEvent && <div>root {rawEvent.label} / {rawEvent.detail}</div>}
+                  </div>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </section>

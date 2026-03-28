@@ -1,4 +1,4 @@
-import { useOpsOverview } from '../../hooks/useOrders';
+import { useOpsOverview, useOrderStream } from '../../hooks/useOrders';
 import type { MobileHome } from '../../types/mobile';
 
 interface MobileArchitectureViewProps {
@@ -8,6 +8,7 @@ interface MobileArchitectureViewProps {
 
 export function MobileArchitectureView({ home, orderId }: MobileArchitectureViewProps) {
   const { data: opsOverview, isLoading, isError, error } = useOpsOverview(orderId);
+  const streamState = useOrderStream(orderId);
 
   if (isLoading) {
     return <div className="px-4 py-6 text-sm text-[color:var(--mobile-muted)]">ops overview を読み込み中...</div>;
@@ -25,6 +26,7 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
   const sequenceGaps = (opsOverview.omsStats?.sequenceGaps ?? 0) + (opsOverview.backOfficeStats?.sequenceGaps ?? 0);
   const pending = (opsOverview.omsStats?.pendingOrphanCount ?? 0) + (opsOverview.backOfficeStats?.pendingOrphanCount ?? 0);
   const dlq = (opsOverview.omsStats?.deadLetterCount ?? 0) + (opsOverview.backOfficeStats?.deadLetterCount ?? 0);
+  const pulseActive = streamState === 'open' || pending > 0 || dlq > 0;
 
   return (
     <div className="space-y-4 px-4 py-5 pb-24">
@@ -34,25 +36,29 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
         <p className="mt-2 text-sm leading-6 text-slate-300">
           hot path を壊さず、projection と ops を Java 側へ寄せる現在の構成を一枚で確認する。
         </p>
+        <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+          <span className={`h-2 w-2 rounded-full ${pulseActive ? 'animate-pulse bg-cyan-300' : 'bg-slate-500'}`} />
+          event flow {streamState}
+        </div>
       </section>
 
       <div className="space-y-2">
         <NodeCard title="Frontend / Mobile UI" subtitle="学習導線 / final-out / cards / risk sandbox" status="READ MODEL" />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard title="app-java" subtitle="BFF / aggregation / mobile progress / educational risk" status="RUNNING" />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard title="gateway-rust" subtitle="accept hot path / venue control / outbox" status="HOT PATH" />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard
           title="Kafka Bus"
           subtitle={`oms ${opsOverview.omsBusStats?.topic ?? '-'} / bo ${opsOverview.backOfficeBusStats?.topic ?? '-'} / pending ${(opsOverview.omsBusStats?.pending ?? 0) + (opsOverview.backOfficeBusStats?.pending ?? 0)}`}
           status={opsOverview.omsBusStats?.state ?? 'UNKNOWN'}
         />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard title="oms-java" subtitle={`orders / reservations / aggregateSeq / pending ${opsOverview.omsStats?.pendingOrphanCount ?? 0}`} status={opsOverview.omsStats?.state ?? 'UNKNOWN'} />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard title="backoffice-java" subtitle={`ledger / positions / cash / dlq ${opsOverview.backOfficeStats?.deadLetterCount ?? 0}`} status={opsOverview.backOfficeStats?.state ?? 'UNKNOWN'} />
-        <Connector />
+        <Connector active={pulseActive} />
         <NodeCard title="Postgres" subtitle="projection store / aggregate progress / replay recovery" status="PERSISTENCE" />
       </div>
 
@@ -105,8 +111,12 @@ function NodeCard({ title, subtitle, status }: { title: string; subtitle: string
   );
 }
 
-function Connector() {
-  return <div className="mx-auto h-6 w-px bg-gradient-to-b from-white/20 to-transparent" />;
+function Connector({ active }: { active: boolean }) {
+  return (
+    <div className="flex justify-center">
+      <div className={`h-6 w-px bg-gradient-to-b ${active ? 'from-cyan-300 via-cyan-500/60 to-transparent animate-pulse' : 'from-white/20 to-transparent'}`} />
+    </div>
+  );
 }
 
 function OpsMetric({ label, value }: { label: string; value: number }) {

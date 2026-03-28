@@ -1,9 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
-import { Dashboard } from './components/Dashboard';
-import { MobileLearningConsole } from './components/mobile/MobileLearningConsole';
-import { TradingView } from './components/TradingView';
-import { StrategySettings } from './components/StrategySettings';
+import { lazy, Suspense, useEffect, useState } from 'react';
+
+const Dashboard = lazy(() => import('./components/Dashboard').then((module) => ({ default: module.Dashboard })));
+const TradingView = lazy(() => import('./components/TradingView').then((module) => ({ default: module.TradingView })));
+const StrategySettings = lazy(() => import('./components/StrategySettings').then((module) => ({ default: module.StrategySettings })));
+const MobileLearningConsole = lazy(() =>
+  import('./components/mobile/MobileLearningConsole').then((module) => ({ default: module.MobileLearningConsole }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,7 +38,9 @@ function App() {
   if (path.startsWith('/mobile')) {
     return (
       <QueryClientProvider client={queryClient}>
-        <MobileLearningConsole path={path} onNavigate={navigate} onExit={() => navigate('/')} />
+        <Suspense fallback={<LoadingScreen message="Mobile Learning を読み込み中..." />}>
+          <MobileLearningConsole path={path} onNavigate={navigate} onExit={() => navigate('/')} />
+        </Suspense>
       </QueryClientProvider>
     );
   }
@@ -97,11 +102,21 @@ function App() {
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'dashboard' && <Dashboard />}
-        {activeTab === 'trading' && <TradingView />}
-        {activeTab === 'strategy' && <StrategySettings />}
+        <Suspense fallback={<LoadingScreen message="画面を読み込み中..." />}>
+          {activeTab === 'dashboard' && <Dashboard />}
+          {activeTab === 'trading' && <TradingView />}
+          {activeTab === 'strategy' && <StrategySettings />}
+        </Suspense>
       </div>
     </QueryClientProvider>
+  );
+}
+
+function LoadingScreen({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center text-sm text-slate-300">
+      {message}
+    </div>
   );
 }
 

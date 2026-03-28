@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useEvaluateMobileRisk, useMobileRiskScenarios } from '../../hooks/useMobileLearning';
-import { formatCurrency, formatSignedCurrency } from './mobileUtils';
+import { formatCurrency, formatPercent, formatSignedCurrency } from './mobileUtils';
 
 export function MobileRiskView() {
   const { data: scenarios, isLoading, isError, error } = useMobileRiskScenarios();
@@ -92,6 +92,32 @@ export function MobileRiskView() {
               <RiskMetric label="Shocked MV" value={formatCurrency(evaluation.portfolio.shockedMarketValue)} />
               <RiskMetric label="PnL Δ" value={formatSignedCurrency(evaluation.portfolio.pnlDelta)} />
               <RiskMetric label="Cash" value={formatCurrency(evaluation.portfolio.cashBalance)} />
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+            <div className="text-sm font-semibold text-white">Educational Historical VaR</div>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <RiskMetric label="Confidence" value={`${evaluation.historicalVar.confidenceLevel}%`} />
+              <RiskMetric label="Observations" value={`${evaluation.historicalVar.observationCount}`} />
+              <RiskMetric label="VaR Loss" value={formatCurrency(evaluation.historicalVar.varLoss)} />
+              <RiskMetric label="Expected SF" value={formatCurrency(evaluation.historicalVar.expectedShortfall)} />
+            </div>
+            <div className="mt-4 rounded-[18px] border border-white/8 bg-slate-950/55 px-4 py-4 text-sm leading-6 text-slate-300">
+              {evaluation.historicalVar.methodology} / holding period {evaluation.historicalVar.holdingPeriod}
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+            <div className="text-sm font-semibold text-white">Simple Hedge Comparison</div>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <RiskMetric label="Hedge Symbol" value={evaluation.hedgeComparison.hedgeSymbol ?? 'none'} />
+              <RiskMetric label="Hedge Ratio" value={formatPercent(evaluation.hedgeComparison.hedgeRatio * 100, 0)} />
+              <RiskMetric label="Unhedged Δ" value={formatSignedCurrency(evaluation.hedgeComparison.unhedgedPnlDelta)} />
+              <RiskMetric label="Hedged Δ" value={formatSignedCurrency(evaluation.hedgeComparison.hedgedPnlDelta)} />
+            </div>
+            <div className="mt-4 rounded-[18px] border border-emerald-300/20 bg-emerald-500/10 px-4 py-4 text-sm leading-6 text-emerald-100">
+              Protection {formatCurrency(evaluation.hedgeComparison.protectionAmount)} / {evaluation.hedgeComparison.note}
             </div>
           </section>
 

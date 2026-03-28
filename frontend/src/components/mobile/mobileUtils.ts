@@ -19,6 +19,12 @@ export function formatNumber(value: number | null | undefined) {
   return new Intl.NumberFormat('ja-JP').format(value ?? 0);
 }
 
+export function formatPercent(value: number | null | undefined, digits = 1) {
+  const safeValue = value ?? 0;
+  const prefix = safeValue > 0 ? '+' : '';
+  return `${prefix}${safeValue.toFixed(digits)}%`;
+}
+
 export function formatDateTime(value: number | null | undefined) {
   if (!value) return '未記録';
   return new Date(value).toLocaleString('ja-JP', {
