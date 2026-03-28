@@ -18,6 +18,7 @@ public final class Main {
     }
 
     public static void main(String[] args) throws Exception {
+        String host = System.getProperty("app.http.host", System.getenv().getOrDefault("APP_HTTP_HOST", "127.0.0.1"));
         int port = Integer.parseInt(System.getProperty("app.http.port", "8080"));
         String accountId = System.getProperty("app.account.id", System.getenv().getOrDefault("ACCOUNT_ID", "acct_demo"));
         Path frontendDistDir = Path.of(
@@ -48,6 +49,7 @@ public final class Main {
         );
 
         AppHttpServer server = new AppHttpServer(
+            host,
             port,
             accountId,
             marketDataService,

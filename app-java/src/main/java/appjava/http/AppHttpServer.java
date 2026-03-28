@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.concurrent.Executors;
 
 public final class AppHttpServer {
+    private final String host;
     private final int port;
     private final String accountId;
     private final MarketDataService marketDataService;
@@ -25,6 +26,7 @@ public final class AppHttpServer {
     private final Path frontendDistDir;
 
     public AppHttpServer(
+        String host,
         int port,
         String accountId,
         MarketDataService marketDataService,
@@ -35,6 +37,7 @@ public final class AppHttpServer {
         MobileLearningService mobileLearningService,
         Path frontendDistDir
     ) {
+        this.host = host;
         this.port = port;
         this.accountId = accountId;
         this.marketDataService = marketDataService;
@@ -47,7 +50,7 @@ public final class AppHttpServer {
     }
 
     public void start() throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        HttpServer server = HttpServer.create(new InetSocketAddress(host, port), 0);
         server.createContext("/health", new JsonHttpHandler(exchange ->
             JsonHttpHandler.JsonResponse.ok(new HealthResponse("UP", "app-java"))
         ));
@@ -62,7 +65,7 @@ public final class AppHttpServer {
         server.createContext("/", new StaticFrontendHandler(frontendDistDir));
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
-        System.out.println("app-java listening on http://localhost:" + port);
+        System.out.println("app-java listening on http://" + host + ":" + port);
     }
 
     public record HealthResponse(String status, String service) {

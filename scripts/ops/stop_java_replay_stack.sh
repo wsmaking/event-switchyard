@@ -36,6 +36,34 @@ stop_service() {
   rm -f "${pid_file}"
 }
 
+stop_matching_processes() {
+  local name="$1"
+  local pattern="$2"
+  local pids
+
+  pids="$(ps -ax -o pid= -o command= | rg "${pattern}" | awk '{print $1}')"
+  if [[ -z "${pids}" ]]; then
+    return
+  fi
+
+  while IFS= read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+          break
+        fi
+        sleep 1
+      done
+      echo "[stop] ${name} process pid=${pid}"
+    fi
+  done <<<"${pids}"
+}
+
 stop_service "app-java"
 stop_service "backoffice-java"
 stop_service "oms-java"
+stop_matching_processes "app-java" "appjava.Main"
+stop_matching_processes "backoffice-java" "backofficejava.Main"
+stop_matching_processes "oms-java" "oms.Main"

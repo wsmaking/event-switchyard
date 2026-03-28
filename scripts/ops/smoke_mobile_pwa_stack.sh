@@ -29,5 +29,5 @@ curl -fsS "http://localhost:8080/manifest.webmanifest" | rg -q "\"display\": \"s
 echo "[ok] manifest served"
 
 echo "[check] service worker"
-curl -fsS "http://localhost:8080/sw.js" | rg -q "switchyard-pwa-v1"
+curl -fsS "http://localhost:8080/sw.js" | rg -q "switchyard-pwa-v2"
 echo "[ok] service worker served"
