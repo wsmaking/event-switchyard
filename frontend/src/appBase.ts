@@ -23,11 +23,44 @@ export function toAppPath(browserPath: string) {
 
 export function toBrowserPath(appPath: string) {
   const normalized = normalizePath(appPath);
+  if (isLocalBundleRuntime()) {
+    return `#${normalized}`;
+  }
   const basePath = appBasePath();
   if (!basePath) {
     return normalized;
   }
   return normalized === '/' ? basePath : `${basePath}${normalized}`;
+}
+
+export function isMobileAppPath(browserPath: string) {
+  return toAppPath(browserPath).startsWith('/mobile');
+}
+
+export function isLocalBundleRuntime() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  const protocol = window.location.protocol;
+  return protocol === 'file:' || protocol === 'appbundle:';
+}
+
+export function isMobileRuntime() {
+  if (isLocalBundleRuntime()) {
+    return true;
+  }
+  return typeof window !== 'undefined' && isMobileAppPath(window.location.pathname || '/');
+}
+
+export function readCurrentAppPath() {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+  if (isLocalBundleRuntime()) {
+    const hashPath = window.location.hash.replace(/^#/, '');
+    return normalizePath(hashPath || '/mobile');
+  }
+  return toAppPath(window.location.pathname || '/');
 }
 
 function normalizePath(path: string) {

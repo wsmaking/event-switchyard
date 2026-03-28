@@ -37,27 +37,27 @@ export function MobileHomeView({
       <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(20,83,45,0.85),rgba(15,23,42,0.92))] p-5 shadow-[0_22px_60px_rgba(0,0,0,0.38)]">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-100/70">Mobile Learning</div>
+            <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-100/70">学習モード</div>
             <h1 className="mt-2 text-2xl font-semibold text-white">業務理解の 5 分導線</h1>
             <p className="mt-2 text-sm leading-6 text-emerald-50/80">
               注文、台帳、運用、設計判断をスマホで短く反復するための入口。
             </p>
           </div>
           <div className={`rounded-full px-3 py-1 text-[11px] font-medium ${home.mainlineStatus.healthy ? 'bg-emerald-400/15 text-emerald-100' : 'bg-amber-400/15 text-amber-100'}`}>
-            {home.deliveryMode === 'ON_DEVICE' ? 'on-device' : home.mainlineStatus.healthy ? 'mainline stable' : '要確認'}
+            {home.deliveryMode === 'ON_DEVICE' ? '端末内' : home.mainlineStatus.healthy ? '安定' : '要確認'}
           </div>
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3">
           <MetricCard label="要復習" value={String(home.progress.dueCount)} />
           <MetricCard label="反復" value={String(home.progress.dueDrillCount)} />
-          <MetricCard label="Bookmark" value={String(home.progress.bookmarkedCount)} />
+          <MetricCard label="保存" value={String(home.progress.bookmarkedCount)} />
           <MetricCard label="完了" value={String(home.progress.completedCount)} />
         </div>
       </section>
 
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4 backdrop-blur">
-        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">Continue</div>
+        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">続きから</div>
         <div className="mt-2 text-lg font-semibold text-white">{home.continueLearning.title}</div>
         <div className="mt-2 text-sm leading-6 text-slate-300">{home.continueLearning.detail}</div>
         <button
@@ -70,7 +70,7 @@ export function MobileHomeView({
 
       {!standalone && (
         <section className="rounded-[24px] border border-emerald-300/20 bg-emerald-500/10 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-emerald-100/70">Install</div>
+          <div className="text-xs uppercase tracking-[0.2em] text-emerald-100/70">追加</div>
           <div className="mt-2 text-lg font-semibold text-white">iPhone に追加</div>
           <div className="mt-2 text-sm leading-6 text-emerald-50/80">
             Safari の共有メニューから「ホーム画面に追加」を選ぶと、アプリ形態で開けます。
@@ -80,7 +80,7 @@ export function MobileHomeView({
 
       {home.deliveryMode === 'ON_DEVICE' && (
         <section className="rounded-[24px] border border-sky-300/20 bg-sky-500/10 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-sky-100/70">On Device</div>
+          <div className="text-xs uppercase tracking-[0.2em] text-sky-100/70">端末内</div>
           <div className="mt-2 text-lg font-semibold text-white">端末内データで継続中</div>
           <div className="mt-2 text-sm leading-6 text-sky-50/80">
             server が無くても cards、drills、risk、replay scenario を継続できます。進捗はこの端末の local storage に保存されます。
@@ -103,7 +103,7 @@ export function MobileHomeView({
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">Mainline</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--mobile-muted)]">運用状態</div>
             <div className="mt-1 text-base font-semibold text-white">{home.mainlineStatus.summary}</div>
           </div>
           <div className="rounded-full bg-slate-900/80 px-3 py-1 text-[11px] text-slate-300">
@@ -111,8 +111,8 @@ export function MobileHomeView({
           </div>
         </div>
         <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-          <StatPill label="Gap" value={home.mainlineStatus.sequenceGapCount} />
-          <StatPill label="Pending" value={home.mainlineStatus.pendingOrphanCount} />
+          <StatPill label="欠番" value={home.mainlineStatus.sequenceGapCount} />
+          <StatPill label="保留" value={home.mainlineStatus.pendingOrphanCount} />
           <StatPill label="DLQ" value={home.mainlineStatus.deadLetterCount} />
         </div>
         <div className="mt-4 space-y-2">
@@ -189,7 +189,7 @@ export function MobileHomeView({
 
       {home.bookmarks.length > 0 && (
         <section className="space-y-3 pb-20">
-          <SectionTitle title="Bookmark" actionLabel="カード" onAction={() => onNavigate('/mobile/cards')} />
+          <SectionTitle title="保存済み" actionLabel="カード" onAction={() => onNavigate('/mobile/cards')} />
           {home.bookmarks.map((card) => (
             <button
               key={card.id}

@@ -77,8 +77,8 @@ export function MobileRiskView() {
   return (
     <div className="space-y-4 px-4 py-5 pb-24">
       <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(127,29,29,0.55),rgba(15,23,42,0.96))] p-5">
-        <div className="text-[11px] uppercase tracking-[0.22em] text-rose-100/70">Risk Sandbox</div>
-        <h1 className="mt-2 text-2xl font-semibold text-white">教育用 shock と option lab</h1>
+        <div className="text-[11px] uppercase tracking-[0.22em] text-rose-100/70">リスク演習</div>
+        <h1 className="mt-2 text-2xl font-semibold text-white">教育用ショックとオプション演習</h1>
         <p className="mt-2 text-sm leading-6 text-slate-300">
           現物の shock、historical VaR、simple hedge comparison、option payoff と Greeks を同じ画面でつなげて見る。
         </p>
@@ -98,7 +98,7 @@ export function MobileRiskView() {
       </section>
 
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-        <div className="text-sm font-semibold text-white">Custom Shock</div>
+        <div className="text-sm font-semibold text-white">任意ショック</div>
         <input
           type="range"
           min={-15}
@@ -117,7 +117,7 @@ export function MobileRiskView() {
           onClick={() => evaluateRisk.mutate({ customShockPercent: customShock })}
           className="mt-4 w-full rounded-2xl border border-rose-300/30 bg-rose-500/10 px-4 py-3 text-sm font-medium text-rose-100"
         >
-          Custom shock を評価
+          任意ショックを評価
         </button>
       </section>
 
@@ -135,7 +135,7 @@ export function MobileRiskView() {
           </section>
 
           <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">Educational Historical VaR</div>
+            <div className="text-sm font-semibold text-white">教育用ヒストリカル VaR</div>
             <div className="mt-4 grid grid-cols-2 gap-3">
               <RiskMetric label="Confidence" value={`${evaluation.historicalVar.confidenceLevel}%`} />
               <RiskMetric label="Observations" value={`${evaluation.historicalVar.observationCount}`} />
@@ -148,7 +148,7 @@ export function MobileRiskView() {
           </section>
 
           <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">Simple Hedge Comparison</div>
+            <div className="text-sm font-semibold text-white">簡易ヘッジ比較</div>
             <div className="mt-4 grid grid-cols-2 gap-3">
               <RiskMetric label="Hedge Symbol" value={evaluation.hedgeComparison.hedgeSymbol ?? 'none'} />
               <RiskMetric label="Hedge Ratio" value={formatPercent(evaluation.hedgeComparison.hedgeRatio * 100, 0)} />
@@ -161,7 +161,7 @@ export function MobileRiskView() {
           </section>
 
           <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">Position Impact</div>
+            <div className="text-sm font-semibold text-white">建玉への影響</div>
             <div className="mt-4 space-y-3">
               {evaluation.positions.length === 0 ? (
                 <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-4 text-sm text-slate-400">
@@ -207,8 +207,8 @@ export function MobileRiskView() {
       <section className="rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(30,64,175,0.22),rgba(15,23,42,0.96))] p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.2em] text-sky-100/70">Option Lab</div>
-            <div className="mt-2 text-lg font-semibold text-white">Payoff と Greeks の直感</div>
+            <div className="text-[11px] uppercase tracking-[0.2em] text-sky-100/70">オプション演習</div>
+            <div className="mt-2 text-lg font-semibold text-white">ペイオフと Greeks の直感</div>
           </div>
           <div className="rounded-full border border-sky-300/30 bg-sky-500/10 px-3 py-1 text-[11px] text-sky-100">
             Black-Scholes

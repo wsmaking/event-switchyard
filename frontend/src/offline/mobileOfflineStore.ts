@@ -14,6 +14,7 @@ import type {
   MobileProgressUpdateRequest,
   MobileRiskEvaluateRequest,
   MobileRiskEvaluation,
+  MobileImplementationAnchor,
   MobileRiskScenario,
 } from '../types/mobile';
 import { OrderSide, OrderStatus, OrderType, TimeInForce, type AccountOverview, type BalanceEffect, type BusStats, type Fill, type LedgerEntry, type OpsOverview, type Order, type OrderFinalOut, type OrderRequest, type OrderTimelineEntry, type OmsStats, type OmsReconcile, type BackOfficeStats, type BackOfficeReconcile, type PendingOrphanEntry, type DeadLetterEntry, type Position, type RawEvent, type Reservation } from '../types/trading';
@@ -34,9 +35,15 @@ interface OfflineCard {
   question: string;
   shortAnswer: string;
   longAnswer: string;
+  businessContext?: string;
+  decisionRule?: string;
+  eventFlow?: string[];
+  tradeoffs?: string[];
+  operatorChecks?: string[];
   routes: string[];
   codeReferences: string[];
   keywords: string[];
+  implementationAnchors?: MobileImplementationAnchor[];
 }
 
 interface OfflineDrill {
@@ -76,6 +83,20 @@ const SYMBOLS = {
   '6861': { name: 'キーエンス', price: 52350, phase: 0.7 },
 } as const;
 
+function implementationAnchor(
+  title: string,
+  path: string,
+  focus: string,
+  excerpt?: string
+): MobileImplementationAnchor {
+  return {
+    title,
+    path,
+    focus,
+    excerpt: excerpt ?? null,
+  };
+}
+
 const CARD_DEFINITIONS: OfflineCard[] = [
   {
     id: 'oms-vs-backoffice',
@@ -86,12 +107,41 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'OMS は注文状態の収束、BackOffice は cash / position / P&L / ledger の正本責務。',
     longAnswer:
       'OMS は accepted、partial、filled、canceled、expired の注文ライフサイクルを管理する。BackOffice は fills 起点で cash、reservation release、position、realized P&L、ledger を確定させる。両者を分けることで、注文状態の競合と会計整合の論点を独立に扱える。',
+    businessContext:
+      '業務では「注文は通っているのに残高が合わない」「会計は合っているのに注文画面が古い」といった問い合わせが別々に発生する。注文状態と台帳正本を同じ箱に入れると、障害の責務切り分けが難しくなる。',
+    decisionRule:
+      '注文の状態遷移、取消、訂正、残数量の収束は OMS。cash、position、realized PnL、ledger entry の確定は BackOffice。fill を境に責務を切り替える。',
+    eventFlow: [
+      '受注後は OMS が accepted / working / terminal を管理する',
+      '約定が来たら BackOffice が fill を起点に ledger を起こす',
+      '照会 UI では final-out で両者を束ねるが、正本は分けて持つ',
+    ],
+    tradeoffs: [
+      '一体化すると実装は短く見えるが、障害時の説明責務が壊れる',
+      '分離すると projection と reconcile が増えるが、運用時の切り分けが明瞭になる',
+    ],
+    operatorChecks: [
+      'OMS の status と BackOffice の cash / position が同じ fill に基づいているか',
+      'reconcile の issue が OMS 側か BackOffice 側かを先に切り分ける',
+    ],
     routes: ['/mobile/orders', '/mobile/ledger'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
       '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/http/LedgerHttpHandler.java',
     ],
     keywords: ['注文状態管理', '台帳正本', '責務分離'],
+    implementationAnchors: [
+      implementationAnchor(
+        '注文照会の集約',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
+        'final-out で OMS / BackOffice の見え方を束ねている入口'
+      ),
+      implementationAnchor(
+        '台帳の確定',
+        '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/http/LedgerHttpHandler.java',
+        'ledger entry と account overview を返す BackOffice 側の責務'
+      ),
+    ],
   },
   {
     id: 'reservation-vs-margin',
@@ -102,12 +152,41 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'reservation は注文拘束。margin はポートフォリオ全体のリスク前提を使う別物。',
     longAnswer:
       'reservation は OMS が注文受理時に余力を拘束する operational control。margin はボラ、相関、保有期間などの前提を使う risk model。両者を混同すると、業務制御とリスク計算の境界が崩れる。',
+    businessContext:
+      '実務では「この注文は受けてよいか」と「この口座のリスクはどれくらいか」は別の問いになる。受注時の拘束と、証拠金や VaR のような portfolio risk を同じ言葉で説明すると会話が崩れる。',
+    decisionRule:
+      '注文の可否を即時に制御する数値は reservation。相関やボラを使って portfolio 全体を説明する数値は margin / risk。名前を分ける。',
+    eventFlow: [
+      '注文受理時に reserved buying power を拘束する',
+      '約定や取消で reservation を release する',
+      'risk 画面では別の仮定で shock や VaR を見る',
+    ],
+    tradeoffs: [
+      'reservation を margin と呼ぶと UI は分かりやすく見えるが、モデル前提を誤魔化す',
+      '言葉を分けると説明は長くなるが、業務制御と risk model を切り分けられる',
+    ],
+    operatorChecks: [
+      'reserved と available の増減が注文イベントに対応しているか',
+      'risk sandbox の数字を reservation の代用として扱っていないか',
+    ],
     routes: ['/mobile/ledger', '/mobile/risk'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java',
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
     ],
     keywords: ['reservation', 'margin', 'risk model'],
+    implementationAnchors: [
+      implementationAnchor(
+        'reservation を含む replay',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java',
+        'accepted / filled / canceled のたびに reservation と balance delta を作っている'
+      ),
+      implementationAnchor(
+        '教育用 risk 表示',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
+        'reservation とは別に shock / VaR / option を見せる画面'
+      ),
+    ],
   },
   {
     id: 'outbox-audit-bus',
@@ -118,12 +197,41 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: '再送、観測、下流連携の責務が違うから。',
     longAnswer:
       'outbox は gateway 内の durable emission 境界、audit は復元と説明責務、bus は下流 consumer への配信責務を持つ。1 本にまとめると fast path の責務と downstream reliability の責務が絡み、再送戦略や運用説明が曖昧になる。',
+    businessContext:
+      '障害調査では「gateway から何が出たか」「運用説明で何を辿れるか」「下流へ何が配られたか」を別々に聞かれる。1 本の stream では、この3つの問いに同時に答えにくい。',
+    decisionRule:
+      'fast path の durable emission は outbox、復元と説明は audit、consumer 配信は bus。責務ごとに故障モードを分ける。',
+    eventFlow: [
+      'gateway-rust が outbox / audit を残す',
+      'Java 側が audit / bus を ingest して projection を進める',
+      'ops 画面では gap、pending、DLQ を別々に見る',
+    ],
+    tradeoffs: [
+      '一本化すると構成は短いが、再送や運用説明の境界が曖昧になる',
+      '分けると component は増えるが、耐障害性の説明がしやすい',
+    ],
+    operatorChecks: [
+      'outbox と bus の遅延を混同していないか',
+      'audit だけ残っていて bus 配信が止まっていないか',
+    ],
     routes: ['/mobile/architecture'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/outbox',
       '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OpsApiHandler.java',
     ],
     keywords: ['outbox', 'audit', 'bus'],
+    implementationAnchors: [
+      implementationAnchor(
+        'gateway の durable emission',
+        '/Users/fujii/Desktop/dev/event-switchyard/gateway-rust/src/outbox',
+        'fast path を壊さずに event を後段へ出す境界'
+      ),
+      implementationAnchor(
+        'ops overview の集約',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OpsApiHandler.java',
+        'OMS / BackOffice / bus の状態を一枚で返す入口'
+      ),
+    ],
   },
   {
     id: 'aggregate-seq-gap',
@@ -134,12 +242,41 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'cancel / fill / reservation release の順序が崩れ、projection が壊れる。',
     longAnswer:
       'Java 側 projection は aggregateSeq を使って gap を pending orphan として保留する。これが無いと accepted 前に fill を会計反映する、partial fill より前に cancel complete を適用する、といった順序破綻が起きる。',
+    businessContext:
+      '注文系では out-of-order は必ず起きる前提で設計する。特に fill が先に見えて accepted が遅れる、cancel complete が先に来る、といったケースを無視すると、運用画面だけ正しそうに見えて台帳が壊れる。',
+    decisionRule:
+      'aggregateSeq が飛んでいたら apply しない。pending orphan に保留し、前提イベントが来てから再投入する。',
+    eventFlow: [
+      'consumer が event を読む',
+      'aggregateSeq に gap があれば pending orphan に積む',
+      '前提 sequence 到着後に pending を replay して projection を進める',
+    ],
+    tradeoffs: [
+      '届いた順に apply すると処理は簡単だが projection が壊れる',
+      'gap 保留にすると実装は重くなるが、復元可能性が上がる',
+    ],
+    operatorChecks: [
+      'pending orphan が増え続けていないか',
+      'aggregate progress が offset だけ先に進んでいないか',
+    ],
     routes: ['/mobile/architecture'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java',
       '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java',
     ],
     keywords: ['aggregateSeq', 'pending orphan', 'projection'],
+    implementationAnchors: [
+      implementationAnchor(
+        'OMS 側の順序制御',
+        '/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java',
+        'aggregateSeq gap を pending orphan として保留する実装'
+      ),
+      implementationAnchor(
+        'BackOffice 側の順序制御',
+        '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java',
+        'fill / ledger 側でも同じく gap を見て projection を守る'
+      ),
+    ],
   },
   {
     id: 'final-out-reading',
@@ -150,11 +287,35 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'status と timeline、その次に reservation / fills / balance effect。',
     longAnswer:
       'まず order status と timeline で注文の物語を掴む。その後 reservation と fills を見て、最後に balance delta と positions で業務結果を確認する。raw events は説明の裏取りに使う。',
+    businessContext:
+      '業務説明では、いきなり cash や position を見ても筋が追えない。まず注文がどう終わったかを status と timeline で掴み、その結果として台帳がどう動いたかを後ろから確認する。',
+    decisionRule:
+      '読む順番を固定する。status -> timeline -> reservation / fills -> balance delta -> positions -> raw event。',
+    eventFlow: [
+      '注文状態を terminal まで追う',
+      '約定と拘束解放を確認する',
+      '最後に残高とポジションで業務結果を確定する',
+    ],
+    tradeoffs: [
+      '全部を一度に読むと情報量が多すぎて説明が崩れる',
+      '順番を固定すると画面の読み方が安定し、口頭説明も崩れにくい',
+    ],
+    operatorChecks: [
+      'timeline の terminal と balance delta の符号が合っているか',
+      'raw event が UI 表示の裏付けとして揃っているか',
+    ],
     routes: ['/mobile/orders', '/mobile/ledger'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
     ],
     keywords: ['final-out', 'timeline', 'balance effect'],
+    implementationAnchors: [
+      implementationAnchor(
+        'final-out API',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
+        'timeline / reservation / fills / raw events をまとめて返す'
+      ),
+    ],
   },
   {
     id: 'pending-vs-dlq',
@@ -165,11 +326,35 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'pending orphan は待てば解ける順序問題、DLQ は手当が必要な失敗イベント。',
     longAnswer:
       'aggregateSeq gap や accepted 未着の fill は pending orphan で保留し、前提イベント到着後に replay する。一方、解釈不能 payload や不整合は DLQ に落として operator が再投入や調査を行う。',
+    businessContext:
+      '運用で怖いのは「まだ待てば解けるもの」と「もう人が見ないと解けないもの」を混同すること。全部 DLQ に落とすとノイズが増え、全部 pending にすると壊れた event が埋もれる。',
+    decisionRule:
+      '順序前提が足りないだけなら pending。payload が壊れている、解釈できない、再適用しても通らないなら DLQ。',
+    eventFlow: [
+      'event を受けたら decode と sequence を確認する',
+      '前提不足なら pending orphan に積む',
+      '異常 payload や適用失敗は DLQ に落として operator が requeue する',
+    ],
+    tradeoffs: [
+      'pending を広げすぎると本当の異常が埋もれる',
+      'DLQ を広げすぎると operator 作業が増えすぎる',
+    ],
+    operatorChecks: [
+      'pending が時間経過で解消しているか',
+      'DLQ 再投入後に同じ payload が再び落ちていないか',
+    ],
     routes: ['/mobile/architecture'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OpsApiHandler.java',
     ],
     keywords: ['pending orphan', 'DLQ', 'requeue'],
+    implementationAnchors: [
+      implementationAnchor(
+        'ops 再投入 API',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OpsApiHandler.java',
+        'pending requeue と DLQ requeue を operator 向けに束ねている'
+      ),
+    ],
   },
   {
     id: 'offset-vs-progress',
@@ -180,12 +365,41 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'offset は読み取り位置、aggregate progress は適用済み sequence の位置。',
     longAnswer:
       'offset だけでは out-of-order や pending orphan が解けたかは分からない。aggregate progress とセットで見て初めて projection recovery を説明できる。',
+    businessContext:
+      'consumer lag が 0 でも projection が正しいとは限らない。運用説明では「どこまで読んだか」と「どこまで正しく適用したか」を分けて話す必要がある。',
+    decisionRule:
+      'offset は入力側の進み具合、aggregate progress は projection 側の進み具合。両方を見る。',
+    eventFlow: [
+      'consumer は offset を進める',
+      'projection は aggregate progress を進める',
+      'gap や pending があると offset と progress がずれる',
+    ],
+    tradeoffs: [
+      'offset だけ追うと運用は簡単だが、projection の壊れ方が見えない',
+      'progress を持つと実装は増えるが、recovery drill が可能になる',
+    ],
+    operatorChecks: [
+      'offset 正常なのに pending が残っていないか',
+      'aggregate progress が止まった aggregate が無いか',
+    ],
     routes: ['/mobile/architecture'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/resources/db/migration/V3__oms_aggregate_progress.sql',
       '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/resources/db/migration/V3__backoffice_aggregate_progress.sql',
     ],
     keywords: ['offset', 'checkpoint', 'aggregate progress'],
+    implementationAnchors: [
+      implementationAnchor(
+        'OMS aggregate progress schema',
+        '/Users/fujii/Desktop/dev/event-switchyard/oms-java/src/main/resources/db/migration/V3__oms_aggregate_progress.sql',
+        'aggregate ごとの適用済み sequence を永続化する'
+      ),
+      implementationAnchor(
+        'BackOffice aggregate progress schema',
+        '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/resources/db/migration/V3__backoffice_aggregate_progress.sql',
+        '台帳 projection 側でも sequence の進捗を持つ'
+      ),
+    ],
   },
   {
     id: 'ledger-truth',
@@ -196,11 +410,35 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: '注文 status ではなく fill 起点で ledger を起こす。',
     longAnswer:
       'accepted だけでは会計を確定できない。fill を受けて ledger entry を起こし、reservation release と合わせて cash / position / realized P&L を確定する。',
+    businessContext:
+      'フロント業務では「注文は受かっている」ことと「残高が変わる」ことは別。accepted を見て会計を更新すると、未約定注文で cash を動かしてしまう。',
+    decisionRule:
+      '会計の truth は fill。accepted や working では ledger を確定しない。',
+    eventFlow: [
+      'accepted では reservation のみ動く',
+      'fill 到着で ledger entry を起こす',
+      'release と position 更新で account overview を確定する',
+    ],
+    tradeoffs: [
+      'accepted で早く見せると即時性は上がるが、台帳は壊れやすい',
+      'fill 起点に寄せると表示は一段遅いが、会計整合が守られる',
+    ],
+    operatorChecks: [
+      'ledger entry が fill 数と一致しているか',
+      'reservation release が fill 後に取り残されていないか',
+    ],
     routes: ['/mobile/ledger'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger',
     ],
     keywords: ['ledger', 'fill', 'cash delta'],
+    implementationAnchors: [
+      implementationAnchor(
+        'BackOffice ledger 実装',
+        '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger',
+        'fill から cash / position / realized PnL を組み立てる場所'
+      ),
+    ],
   },
   {
     id: 'realized-vs-unrealized',
@@ -211,11 +449,27 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: 'realized は約定で確定、unrealized は保有ポジションの評価差。',
     longAnswer:
       'BackOffice の realized PnL は fills と平均取得価格から確定する。一方 unrealized は current price を使った評価差であり、mark-to-market 前提に依存する。',
+    businessContext:
+      '説明でよく崩れるのが、約定で確定した損益と、まだ評価に過ぎない損益の混同。特に日中の説明では両者を分けて話せる必要がある。',
+    decisionRule:
+      'fill で確定した分だけ realized。残っている建玉の評価差は unrealized。',
+    eventFlow: [
+      'sell fill で realized PnL が確定する',
+      '保有ポジションは current price で unrealized を計算する',
+      'account overview と position 表示で別々に見せる',
+    ],
     routes: ['/mobile/ledger', '/mobile/risk'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileOrderStudyView.tsx',
     ],
     keywords: ['realized', 'unrealized', 'mark-to-market'],
+    implementationAnchors: [
+      implementationAnchor(
+        'モバイルの PnL 表示',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileOrderStudyView.tsx',
+        'realized / unrealized の表示を分けている'
+      ),
+    ],
   },
   {
     id: 'historical-var-reading',
@@ -226,11 +480,26 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: '窓、信頼水準、保有期間、データ品質、モデルの単純化。',
     longAnswer:
       '教育用 historical VaR でも、何本の履歴を使ったか、何% tail か、価格系列がどの頻度かを先に確認する。数字の大きさだけでなく前提の薄さを話せることが重要。',
+    businessContext:
+      'risk の数字は見せられても、前提を言えないと設計判断に繋がらない。教育用でも「この VaR は何を省略しているか」を同時に話せることが大事。',
+    decisionRule:
+      '数字の前に前提を確認する。窓、tail、holding period、データ頻度、モデルの省略を口に出す。',
+    tradeoffs: [
+      '単純な historical VaR は直感的だが、相関や regime shift を十分に扱えない',
+      '重いモデルは現実的だが、学習用には前提が見えにくい',
+    ],
     routes: ['/mobile/risk'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
     ],
     keywords: ['historical VaR', 'confidence level', 'assumptions'],
+    implementationAnchors: [
+      implementationAnchor(
+        'risk sandbox',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
+        'historical VaR と assumption を同時に見せる画面'
+      ),
+    ],
   },
   {
     id: 'option-payoff-shape',
@@ -241,11 +510,27 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: '損益の非線形性、premium、break-even、水準ごとの傾き。',
     longAnswer:
       'option payoff は現物と違って損益が非線形に変わる。strike と premium の位置関係、break-even、spot が動いたときの傾きがどこで変わるかを押さえると、hedge intuition を作りやすい。',
+    businessContext:
+      'デリバティブに入ると、現物の線形な損益感覚だけでは説明が足りない。まず payoff の形と premium の意味を掴むことで、Greeks の直感につながる。',
+    decisionRule:
+      'call / put は payoff の折れ曲がり位置、premium、break-even を先に見る。Greeks はその後。',
+    eventFlow: [
+      'spot を動かしながら payoff curve を見る',
+      'premium を差し引いた損益の非線形性を確認する',
+      'delta / gamma / theta をその形の変化として読む',
+    ],
     routes: ['/mobile/risk'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
     ],
     keywords: ['option payoff', 'break-even', 'non-linearity'],
+    implementationAnchors: [
+      implementationAnchor(
+        'option lab',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileRiskView.tsx',
+        'payoff curve と Greeks を同じ画面で返している'
+      ),
+    ],
   },
   {
     id: 'cross-asset-boundary',
@@ -256,12 +541,32 @@ const CARD_DEFINITIONS: OfflineCard[] = [
     shortAnswer: '価格モデル、約定単位、会計単位、運用イベントが違うから。',
     longAnswer:
       'asset class が変わると order lifecycle 自体は似ていても、risk driver、valuation、settlement、operator が見る障害が変わる。共通化する部分と専用化する部分を分けることが設計の本質になる。',
+    businessContext:
+      '株式だけの感覚で FX、rates、credit に広げると、約定の意味も valuation の前提もズレる。共通化しすぎると設計が薄くなり、専用化しすぎると再利用性が無くなる。',
+    decisionRule:
+      '受注、状態遷移、監査の骨格は共通化し、valuation、risk driver、settlement は asset class ごとに分ける。',
+    tradeoffs: [
+      '全部共通化すると asset-specific な前提が消える',
+      '全部専用化すると学習も実装も再利用しにくい',
+    ],
     routes: ['/mobile/cards', '/mobile/architecture'],
     codeReferences: [
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileArchitectureView.tsx',
       '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx',
     ],
     keywords: ['cross-asset', 'boundary', 'valuation'],
+    implementationAnchors: [
+      implementationAnchor(
+        '境界の見せ方',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileArchitectureView.tsx',
+        '共通の event flow と責務境界を可視化している'
+      ),
+      implementationAnchor(
+        '設計カード表示',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx',
+        '比較軸をカードとして反復できるようにしている'
+      ),
+    ],
   },
 ];
 
@@ -708,10 +1013,11 @@ function loadState(): OfflineState {
 }
 
 function readStorage(): OfflineState | null {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getBrowserStorage();
+  if (!storage) {
     return null;
   }
-  const raw = window.localStorage.getItem(STORAGE_KEY);
+  const raw = storage.getItem(STORAGE_KEY);
   if (!raw) {
     return null;
   }
@@ -727,10 +1033,22 @@ function readStorage(): OfflineState | null {
 }
 
 function saveState(state: OfflineState) {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getBrowserStorage();
+  if (!storage) {
     return;
   }
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  storage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function getBrowserStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function createSeedState(): OfflineState {

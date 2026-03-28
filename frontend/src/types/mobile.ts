@@ -91,11 +91,24 @@ export interface MobileCardDetail {
     question: string;
     shortAnswer: string;
     longAnswer: string;
+    businessContext?: string;
+    decisionRule?: string;
+    eventFlow?: string[];
+    tradeoffs?: string[];
+    operatorChecks?: string[];
     routes: string[];
     codeReferences: string[];
     keywords: string[];
+    implementationAnchors?: MobileImplementationAnchor[];
   };
   progress: MobileProgressCard;
+}
+
+export interface MobileImplementationAnchor {
+  title: string;
+  path: string;
+  focus: string;
+  excerpt?: string | null;
 }
 
 export interface MobileProgressResponse {

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { toAppPath, toBrowserPath } from './appBase';
+import { isLocalBundleRuntime, readCurrentAppPath, toBrowserPath } from './appBase';
 
 const Dashboard = lazy(() => import('./components/Dashboard').then((module) => ({ default: module.Dashboard })));
 const TradingView = lazy(() => import('./components/TradingView').then((module) => ({ default: module.TradingView })));
@@ -19,17 +19,29 @@ const queryClient = new QueryClient({
 
 function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'trading' | 'strategy'>('dashboard');
-  const [path, setPath] = useState(() => toAppPath(window.location.pathname || '/'));
+  const [path, setPath] = useState(() => readCurrentAppPath());
 
   useEffect(() => {
-    const handlePopState = () => {
-      setPath(toAppPath(window.location.pathname || '/'));
+    const syncPath = () => {
+      setPath(readCurrentAppPath());
     };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    window.addEventListener('popstate', syncPath);
+    window.addEventListener('hashchange', syncPath);
+    return () => {
+      window.removeEventListener('popstate', syncPath);
+      window.removeEventListener('hashchange', syncPath);
+    };
   }, []);
 
   const navigate = (nextPath: string) => {
+    if (isLocalBundleRuntime()) {
+      const nextHash = toBrowserPath(nextPath);
+      if ((window.location.hash || '') !== nextHash) {
+        window.location.hash = nextHash;
+      }
+      setPath(nextPath);
+      return;
+    }
     const browserPath = toBrowserPath(nextPath);
     if ((window.location.pathname || '/') !== browserPath) {
       window.history.pushState({}, '', browserPath);

@@ -56,14 +56,14 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
     >
       <header className="sticky top-0 z-30 border-b border-white/10 bg-slate-950/75 backdrop-blur">
         <div className="mx-auto flex max-w-md items-center justify-between px-4 py-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-200/70">Event Switchyard</div>
-            <div className="mt-1 text-base font-semibold text-white">Mobile Learning Console</div>
-          </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.24em] text-emerald-200/70">Event Switchyard</div>
+            <div className="mt-1 text-base font-semibold text-white">学習コンソール</div>
+            </div>
           <div className="flex items-center gap-2">
             {home?.deliveryMode === 'ON_DEVICE' && (
               <div className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-2 text-[11px] font-medium text-emerald-100">
-                on-device
+                端末内
               </div>
             )}
             <button
@@ -100,13 +100,13 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-slate-950/92 backdrop-blur">
         <div className="mx-auto grid max-w-md grid-cols-7 gap-1 px-2 py-2">
-          <NavButton label="Home" active={route.section === 'home'} onClick={() => onNavigate('/mobile')} />
-          <NavButton label="Order" active={route.section === 'orders'} onClick={() => onNavigate(activeOrderId ? `/mobile/orders/${activeOrderId}` : '/mobile/orders')} />
-          <NavButton label="Ledger" active={route.section === 'ledger'} onClick={() => onNavigate('/mobile/ledger')} />
-          <NavButton label="Ops" active={route.section === 'architecture'} onClick={() => onNavigate('/mobile/architecture')} />
-          <NavButton label="Cards" active={route.section === 'cards'} onClick={() => onNavigate('/mobile/cards')} />
-          <NavButton label="Drill" active={route.section === 'drills'} onClick={() => onNavigate('/mobile/drills')} />
-          <NavButton label="Risk" active={route.section === 'risk'} onClick={() => onNavigate('/mobile/risk')} />
+          <NavButton label="ホーム" active={route.section === 'home'} onClick={() => onNavigate('/mobile')} />
+          <NavButton label="注文" active={route.section === 'orders'} onClick={() => onNavigate(activeOrderId ? `/mobile/orders/${activeOrderId}` : '/mobile/orders')} />
+          <NavButton label="台帳" active={route.section === 'ledger'} onClick={() => onNavigate('/mobile/ledger')} />
+          <NavButton label="構成" active={route.section === 'architecture'} onClick={() => onNavigate('/mobile/architecture')} />
+          <NavButton label="判断" active={route.section === 'cards'} onClick={() => onNavigate('/mobile/cards')} />
+          <NavButton label="反復" active={route.section === 'drills'} onClick={() => onNavigate('/mobile/drills')} />
+          <NavButton label="リスク" active={route.section === 'risk'} onClick={() => onNavigate('/mobile/risk')} />
         </div>
       </nav>
     </div>
