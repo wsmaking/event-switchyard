@@ -32,6 +32,7 @@ export interface MobileLearningAnchor {
 export interface MobileHome {
   accountId: string;
   generatedAt: number;
+  deliveryMode?: 'LIVE' | 'ON_DEVICE';
   continueLearning: {
     route: string;
     orderId: string | null;
