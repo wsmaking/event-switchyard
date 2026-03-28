@@ -38,7 +38,7 @@ export function MobileCardsView({ cardId, onNavigate }: MobileCardsViewProps) {
           <div className="text-[11px] uppercase tracking-[0.22em] text-violet-100/70">Design Cards</div>
           <h1 className="mt-2 text-2xl font-semibold text-white">設計判断を言語化する</h1>
           <p className="mt-2 text-sm leading-6 text-slate-300">
-            面接で問われるのは知識よりも境界と判断理由。短文で即答できる状態まで反復する。
+            覚えるだけでなく、境界と判断理由を短く言える状態まで反復する。
           </p>
           <div className="mt-4 grid grid-cols-3 gap-3">
             <CountPill label="全件" value={cards.length} />

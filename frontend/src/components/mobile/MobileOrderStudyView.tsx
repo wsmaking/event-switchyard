@@ -180,8 +180,8 @@ export function MobileOrderStudyView({ focus, orderId, onNavigate }: MobileOrder
               <div className="mt-4 grid gap-3">
                 <NarrativeCard title="何が起きたか" body={describeLifecycle(finalOut.order.status)} />
                 <NarrativeCard
-                  title="面接で言うべきこと"
-                  body={interviewPrompt(finalOut.order.status)}
+                  title="説明の要点"
+                  body={explanationPrompt(finalOut.order.status)}
                 />
                 <NarrativeCard
                   title="運用観点"
@@ -259,7 +259,7 @@ function describeLifecycle(status: string) {
   }
 }
 
-function interviewPrompt(status: string) {
+function explanationPrompt(status: string) {
   switch (status) {
     case 'FILLED':
       return 'timeline と fills と balance effect を並べて、注文状態と会計状態の収束を分けて話す。';

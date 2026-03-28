@@ -2,7 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   MobileCardDetail,
   MobileCardSummary,
+  MobileDrillAttemptRequest,
+  MobileDrillDetail,
+  MobileDrillProgressResponse,
+  MobileDrillSummary,
   MobileHome,
+  MobileOptionEvaluateRequest,
+  MobileOptionEvaluation,
   MobileProgressResponse,
   MobileProgressUpdateRequest,
   MobileRiskEvaluateRequest,
@@ -52,6 +58,22 @@ export function useMobileProgress() {
   });
 }
 
+export function useMobileDrills() {
+  return useQuery({
+    queryKey: ['mobileDrills'],
+    queryFn: () => fetchJson<MobileDrillSummary[]>('/api/mobile/drills'),
+    refetchInterval: 10000,
+  });
+}
+
+export function useMobileDrill(drillId: string | null) {
+  return useQuery({
+    queryKey: ['mobileDrill', drillId],
+    queryFn: () => fetchJson<MobileDrillDetail>(`/api/mobile/drills/${drillId}`),
+    enabled: !!drillId,
+  });
+}
+
 export function useUpdateMobileProgress() {
   const queryClient = useQueryClient();
 
@@ -73,6 +95,27 @@ export function useUpdateMobileProgress() {
   });
 }
 
+export function useSubmitMobileDrillAttempt() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (request: MobileDrillAttemptRequest) =>
+      fetchJson<MobileDrillProgressResponse>('/api/mobile/drills/attempt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(request),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['mobileHome'] });
+      queryClient.invalidateQueries({ queryKey: ['mobileProgress'] });
+      queryClient.invalidateQueries({ queryKey: ['mobileDrills'] });
+      queryClient.invalidateQueries({ queryKey: ['mobileDrill'] });
+    },
+  });
+}
+
 export function useMobileRiskScenarios() {
   return useQuery({
     queryKey: ['mobileRiskScenarios'],
@@ -84,6 +127,19 @@ export function useEvaluateMobileRisk() {
   return useMutation({
     mutationFn: (request: MobileRiskEvaluateRequest) =>
       fetchJson<MobileRiskEvaluation>('/api/mobile/risk/evaluate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(request),
+      }),
+  });
+}
+
+export function useEvaluateMobileOption() {
+  return useMutation({
+    mutationFn: (request: MobileOptionEvaluateRequest) =>
+      fetchJson<MobileOptionEvaluation>('/api/mobile/risk/options/evaluate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

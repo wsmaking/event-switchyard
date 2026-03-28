@@ -75,6 +75,7 @@ export interface MobileHome {
   progress: {
     anchor: MobileLearningAnchor | null;
     dueCount: number;
+    dueDrillCount: number;
     bookmarkedCount: number;
     completedCount: number;
   };
@@ -101,9 +102,54 @@ export interface MobileProgressResponse {
   updatedAt: number;
   anchor: MobileLearningAnchor | null;
   dueCount: number;
+  dueDrillCount: number;
   bookmarkedCount: number;
   completedCount: number;
   cards: MobileCardSummary[];
+}
+
+export interface MobileDrillProgress {
+  drillId: string;
+  attemptCount: number;
+  lastAttemptAt: number;
+  lastClarityScore: number;
+  nextReviewAt: number;
+  lastNote: string | null;
+  audioDataUrl: string | null;
+}
+
+export interface MobileDrillSummary {
+  id: string;
+  title: string;
+  category: string;
+  due: boolean;
+  progress: MobileDrillProgress;
+}
+
+export interface MobileDrillDetail {
+  drill: {
+    id: string;
+    title: string;
+    category: string;
+    prompt: string;
+    routes: string[];
+    keywords: string[];
+  };
+  progress: MobileDrillProgress;
+}
+
+export interface MobileDrillAttemptRequest {
+  drillId: string;
+  clarityScore: number;
+  note?: string | null;
+  audioDataUrl?: string | null;
+}
+
+export interface MobileDrillProgressResponse {
+  accountId: string;
+  updatedAt: number;
+  dueCount: number;
+  drills: MobileDrillSummary[];
 }
 
 export interface MobileRiskScenario {
@@ -176,11 +222,48 @@ export interface MobileRiskEvaluateRequest {
 }
 
 export interface MobileRouteState {
-  section: 'home' | 'orders' | 'ledger' | 'architecture' | 'cards' | 'risk';
+  section: 'home' | 'orders' | 'ledger' | 'architecture' | 'cards' | 'drills' | 'risk';
   orderId: string | null;
   cardId: string | null;
+  drillId: string | null;
 }
 
 export interface MobilePortfolioSnapshot {
   positions: Position[];
+}
+
+export interface MobileOptionEvaluateRequest {
+  symbol?: string | null;
+  optionType?: 'CALL' | 'PUT';
+  spotPrice?: number | null;
+  strikePrice?: number | null;
+  volatilityPercent?: number | null;
+  ratePercent?: number | null;
+  maturityDays?: number | null;
+  contracts?: number | null;
+}
+
+export interface MobileOptionEvaluation {
+  symbol: string;
+  symbolName: string;
+  optionType: 'CALL' | 'PUT';
+  spotPrice: number;
+  strikePrice: number;
+  volatilityPercent: number;
+  ratePercent: number;
+  maturityDays: number;
+  contracts: number;
+  optionPrice: number;
+  totalPremium: number;
+  greeks: {
+    delta: number;
+    gamma: number;
+    vega: number;
+    theta: number;
+  };
+  payoffCurve: Array<{
+    underlyingPrice: number;
+    payoff: number;
+  }>;
+  assumptions: string[];
 }

@@ -83,7 +83,7 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
       </section>
 
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-        <div className="text-base font-semibold text-white">面接で話すポイント</div>
+        <div className="text-base font-semibold text-white">説明の要点</div>
         <div className="mt-4 space-y-3">
           <Bullet body="gateway-rust には学習 UI や aggregation を載せず、hot path を守る。" />
           <Bullet body="OMS は注文状態、BackOffice は ledger / cash / positions の正本責務。" />

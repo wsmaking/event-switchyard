@@ -45,8 +45,9 @@ export function MobileHomeView({
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-5 grid grid-cols-2 gap-3">
           <MetricCard label="要復習" value={String(home.progress.dueCount)} />
+          <MetricCard label="反復" value={String(home.progress.dueDrillCount)} />
           <MetricCard label="Bookmark" value={String(home.progress.bookmarkedCount)} />
           <MetricCard label="完了" value={String(home.progress.completedCount)} />
         </div>
