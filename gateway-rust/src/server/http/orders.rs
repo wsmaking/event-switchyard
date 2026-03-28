@@ -4,10 +4,11 @@
 //! - 内包: 受理/取得/キャンセルとレスポンス型をこのファイルに集約。
 
 mod classic;
+mod response;
 mod support;
+mod tcp_codec;
 
 use crate::audit::{self, AuditEvent};
-use crate::auth::{AuthError, AuthResult};
 use crate::bus::BusEvent;
 use crate::engine::{FastPathEngine, ProcessResult};
 use crate::order::{OrderRequest, OrderResponse};
@@ -22,8 +23,6 @@ use axum::{
 };
 use gateway_core::now_nanos;
 use std::{
-    cell::RefCell,
-    ops::Deref,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -36,8 +35,14 @@ pub(super) use classic::{
     handle_amend_order, handle_cancel_order, handle_get_order, handle_get_order_by_client_id,
     handle_get_order_v2, handle_order, handle_order_v2, handle_replace_order,
 };
+pub(super) use response::{DurableOrderStatusResponse, VolatileOrderResponse};
 pub(super) use support::render_v3_symbol_key;
 use support::*;
+pub(super) use tcp_codec::{
+    V3TcpDecodedFrame, V3TcpDecodedRequest, authenticate_v3_tcp_token, decode_v3_tcp_frame,
+    decode_v3_tcp_request, encode_v3_tcp_auth_ok, encode_v3_tcp_decode_error,
+    encode_v3_tcp_response, encode_v3_tcp_response_raw,
+};
 
 type AuthResponse<T> = Result<T, (StatusCode, Json<AuthErrorResponse>)>;
 type OrderResponseResult =
@@ -82,23 +87,6 @@ const V3_TCP_INTENT_LEN_OFFSET: usize = 276;
 const V3_TCP_MODEL_LEN_OFFSET: usize = 278;
 const V3_TCP_QTY_OFFSET: usize = 280;
 const V3_TCP_PRICE_OFFSET: usize = 288;
-
-#[derive(Debug)]
-pub(super) struct V3TcpDecodedRequest<'a> {
-    pub(super) jwt_token: Option<&'a str>,
-    pub(super) intent_id: Option<&'a str>,
-    pub(super) model_id: Option<&'a str>,
-    pub(super) symbol_key: [u8; 8],
-    pub(super) side: u8,
-    pub(super) order_type: crate::order::OrderType,
-    pub(super) qty: u64,
-    pub(super) price: u64,
-}
-
-pub(super) enum V3TcpDecodedFrame<'a> {
-    AuthInit { jwt_token: &'a str },
-    Order(V3TcpDecodedRequest<'a>),
-}
 
 #[derive(Clone, Copy)]
 struct V3HotPathOutcome {
@@ -1031,225 +1019,6 @@ fn process_order_v3_hot_path_with_input(
     }
 }
 
-pub(super) fn decode_v3_tcp_frame<'a>(
-    frame: &'a [u8; V3_TCP_REQUEST_SIZE],
-) -> Result<V3TcpDecodedFrame<'a>, u32> {
-    let token_len =
-        u16::from_le_bytes(frame[0..2].try_into().expect("token length bytes")) as usize;
-    if token_len > V3_TCP_TOKEN_MAX_LEN {
-        return Err(V3_TCP_REASON_BAD_TOKEN_LEN);
-    }
-    let jwt_token = if token_len == 0 {
-        None
-    } else {
-        let token_end = V3_TCP_TOKEN_OFFSET + token_len;
-        let token = std::str::from_utf8(&frame[V3_TCP_TOKEN_OFFSET..token_end])
-            .map_err(|_| V3_TCP_REASON_BAD_TOKEN_UTF8)?;
-        Some(token)
-    };
-    let intent_len = u16::from_le_bytes(
-        frame[V3_TCP_INTENT_LEN_OFFSET..(V3_TCP_INTENT_LEN_OFFSET + 2)]
-            .try_into()
-            .expect("intent length bytes"),
-    ) as usize;
-    let model_len = u16::from_le_bytes(
-        frame[V3_TCP_MODEL_LEN_OFFSET..(V3_TCP_MODEL_LEN_OFFSET + 2)]
-            .try_into()
-            .expect("model length bytes"),
-    ) as usize;
-
-    let side_raw = frame[V3_TCP_SIDE_OFFSET];
-    let order_type_raw = frame[V3_TCP_TYPE_OFFSET];
-    let qty = u64::from_le_bytes(
-        frame[V3_TCP_QTY_OFFSET..(V3_TCP_QTY_OFFSET + 8)]
-            .try_into()
-            .expect("qty bytes"),
-    );
-    let price_or_reserved = u64::from_le_bytes(
-        frame[V3_TCP_PRICE_OFFSET..(V3_TCP_PRICE_OFFSET + 8)]
-            .try_into()
-            .expect("price bytes"),
-    );
-
-    // AuthInit frame marker:
-    // side/type/qty/price are all 0, and JWT is present.
-    let is_auth_init = side_raw == 0 && order_type_raw == 0 && qty == 0 && price_or_reserved == 0;
-    if is_auth_init {
-        let jwt_token = jwt_token.ok_or(V3_TCP_REASON_AUTH_REQUIRED)?;
-        return Ok(V3TcpDecodedFrame::AuthInit { jwt_token });
-    }
-
-    let (intent_id, model_id) = if token_len > 0 {
-        if intent_len > 0 || model_len > 0 {
-            return Err(V3_TCP_REASON_METADATA_WITH_INLINE_TOKEN);
-        }
-        (None, None)
-    } else {
-        if intent_len > V3_TCP_TOKEN_MAX_LEN {
-            return Err(V3_TCP_REASON_BAD_INTENT_LEN);
-        }
-        let model_offset = V3_TCP_TOKEN_OFFSET + intent_len;
-        if model_len > V3_TCP_TOKEN_MAX_LEN.saturating_sub(intent_len) {
-            return Err(V3_TCP_REASON_BAD_MODEL_LEN);
-        }
-        let intent_id = if intent_len == 0 {
-            None
-        } else {
-            Some(
-                std::str::from_utf8(
-                    &frame[V3_TCP_TOKEN_OFFSET..(V3_TCP_TOKEN_OFFSET + intent_len)],
-                )
-                .map_err(|_| V3_TCP_REASON_BAD_METADATA_UTF8)?,
-            )
-        };
-        let model_id = if model_len == 0 {
-            None
-        } else {
-            Some(
-                std::str::from_utf8(&frame[model_offset..(model_offset + model_len)])
-                    .map_err(|_| V3_TCP_REASON_BAD_METADATA_UTF8)?,
-            )
-        };
-        (intent_id, model_id)
-    };
-
-    let symbol_raw = &frame[V3_TCP_SYMBOL_OFFSET..(V3_TCP_SYMBOL_OFFSET + V3_TCP_SYMBOL_LEN)];
-    let symbol_len = symbol_raw
-        .iter()
-        .position(|b| *b == 0)
-        .unwrap_or(symbol_raw.len());
-    if symbol_len == 0 {
-        return Err(V3_TCP_REASON_BAD_SYMBOL);
-    }
-    let symbol =
-        std::str::from_utf8(&symbol_raw[..symbol_len]).map_err(|_| V3_TCP_REASON_BAD_SYMBOL)?;
-    let side = match side_raw {
-        1 | 2 => side_raw,
-        _ => return Err(V3_TCP_REASON_BAD_SIDE),
-    };
-    let order_type = match order_type_raw {
-        1 => crate::order::OrderType::Limit,
-        2 => crate::order::OrderType::Market,
-        _ => return Err(V3_TCP_REASON_BAD_TYPE),
-    };
-    let price = if order_type == crate::order::OrderType::Market {
-        0
-    } else {
-        price_or_reserved
-    };
-    let symbol_key = parse_v3_symbol_key(symbol).ok_or(V3_TCP_REASON_BAD_SYMBOL)?;
-
-    Ok(V3TcpDecodedFrame::Order(V3TcpDecodedRequest {
-        jwt_token,
-        intent_id,
-        model_id,
-        symbol_key,
-        side,
-        order_type,
-        qty,
-        price,
-    }))
-}
-
-pub(super) fn decode_v3_tcp_request<'a>(
-    frame: &'a [u8; V3_TCP_REQUEST_SIZE],
-) -> Result<V3TcpDecodedRequest<'a>, u32> {
-    match decode_v3_tcp_frame(frame)? {
-        V3TcpDecodedFrame::Order(decoded) => Ok(decoded),
-        V3TcpDecodedFrame::AuthInit { .. } => Err(V3_TCP_REASON_BAD_TYPE),
-    }
-}
-
-pub(super) fn authenticate_v3_tcp_token(
-    state: &AppState,
-    jwt_token: &str,
-) -> Result<crate::auth::Principal, (StatusCode, u32)> {
-    match state.jwt_auth.authenticate_token(jwt_token) {
-        AuthResult::Ok(p) => Ok(p),
-        AuthResult::Err(e) => {
-            let (status, reason) = match e {
-                AuthError::SecretNotConfigured => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    V3_TCP_REASON_AUTH_INTERNAL,
-                ),
-                AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_EXPIRED),
-                AuthError::TokenNotYetValid => {
-                    (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_NOT_YET_VALID)
-                }
-                _ => (StatusCode::UNAUTHORIZED, V3_TCP_REASON_AUTH_INVALID),
-            };
-            Err((status, reason))
-        }
-    }
-}
-
-pub(super) fn encode_v3_tcp_decode_error(
-    status: StatusCode,
-    reason_code: u32,
-    received_at_ns: u64,
-) -> [u8; V3_TCP_RESPONSE_SIZE] {
-    encode_v3_tcp_response_raw(
-        V3_TCP_KIND_DECODE_ERROR,
-        status,
-        reason_code,
-        0,
-        0,
-        received_at_ns,
-    )
-}
-
-pub(super) fn encode_v3_tcp_auth_ok(received_at_ns: u64) -> [u8; V3_TCP_RESPONSE_SIZE] {
-    encode_v3_tcp_response_raw(
-        V3_TCP_KIND_ACCEPT,
-        StatusCode::ACCEPTED,
-        V3_TCP_REASON_NONE,
-        0,
-        0,
-        received_at_ns,
-    )
-}
-
-pub(super) fn encode_v3_tcp_response(
-    status: StatusCode,
-    resp: &VolatileOrderResponse,
-) -> [u8; V3_TCP_RESPONSE_SIZE] {
-    encode_v3_tcp_response_raw(
-        v3_tcp_kind(resp),
-        status,
-        v3_tcp_reason_code_from_reason(resp.reason.as_deref()),
-        resp.session_seq.unwrap_or(0),
-        resp.session_seq.unwrap_or(0),
-        resp.received_at_ns,
-    )
-}
-
-fn encode_v3_tcp_response_raw(
-    kind: u8,
-    status: StatusCode,
-    reason_code: u32,
-    session_seq: u64,
-    attempt_seq: u64,
-    received_at_ns: u64,
-) -> [u8; V3_TCP_RESPONSE_SIZE] {
-    let mut out = [0u8; V3_TCP_RESPONSE_SIZE];
-    out[0] = kind;
-    out[1] = 0;
-    out[2..4].copy_from_slice(&(status.as_u16()).to_le_bytes());
-    out[4..8].copy_from_slice(&reason_code.to_le_bytes());
-    out[8..16].copy_from_slice(&session_seq.to_le_bytes());
-    out[16..24].copy_from_slice(&attempt_seq.to_le_bytes());
-    out[24..32].copy_from_slice(&received_at_ns.to_le_bytes());
-    out
-}
-
-fn v3_tcp_kind(resp: &VolatileOrderResponse) -> u8 {
-    match resp.status {
-        "VOLATILE_ACCEPT" => V3_TCP_KIND_ACCEPT,
-        "KILLED" => V3_TCP_KIND_KILLED,
-        _ => V3_TCP_KIND_REJECTED,
-    }
-}
-
 fn v3_tcp_reason_code_from_reason(reason: Option<&str>) -> u32 {
     match reason {
         None => V3_TCP_REASON_NONE,
@@ -1329,216 +1098,6 @@ pub(super) async fn handle_get_order_v3(
     };
 
     Ok(Json(body))
-}
-
-/// v3 入口の即時応答（VOLATILE_ACCEPT）
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct VolatileOrderResponse {
-    session_id: PooledJsonString,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_seq: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attempt_id: Option<PooledJsonString>,
-    received_at_ns: u64,
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<PooledJsonString>,
-}
-
-const V3_JSON_STRING_POOL_MAX_ITEMS: usize = 4096;
-const V3_JSON_STRING_POOL_MAX_CAPACITY: usize = 256;
-
-thread_local! {
-    static V3_JSON_STRING_POOL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-}
-
-fn v3_pool_take_string(min_capacity: usize) -> String {
-    V3_JSON_STRING_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if let Some(mut cached) = pool.pop() {
-            if cached.capacity() < min_capacity {
-                cached.reserve(min_capacity - cached.capacity());
-            }
-            cached
-        } else {
-            String::with_capacity(min_capacity.max(32))
-        }
-    })
-}
-
-fn v3_pool_put_string(mut value: String) {
-    if value.capacity() > V3_JSON_STRING_POOL_MAX_CAPACITY {
-        return;
-    }
-    value.clear();
-    V3_JSON_STRING_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if pool.len() < V3_JSON_STRING_POOL_MAX_ITEMS {
-            pool.push(value);
-        }
-    });
-}
-
-#[derive(Debug)]
-struct PooledJsonString {
-    inner: Option<String>,
-}
-
-impl PooledJsonString {
-    fn from_str(value: &str) -> Self {
-        let mut inner = v3_pool_take_string(value.len());
-        inner.push_str(value);
-        Self { inner: Some(inner) }
-    }
-
-    fn with_prefix_u64(prefix: &str, value: u64) -> Self {
-        let mut inner = v3_pool_take_string(prefix.len() + 20);
-        inner.push_str(prefix);
-        append_u64_decimal(&mut inner, value);
-        Self { inner: Some(inner) }
-    }
-
-    fn as_str(&self) -> &str {
-        self.inner.as_deref().unwrap_or("")
-    }
-}
-
-impl Clone for PooledJsonString {
-    fn clone(&self) -> Self {
-        Self::from_str(self.as_str())
-    }
-}
-
-impl Deref for PooledJsonString {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl serde::Serialize for PooledJsonString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl Drop for PooledJsonString {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            v3_pool_put_string(inner);
-        }
-    }
-}
-
-fn build_attempt_id(session_seq: u64) -> PooledJsonString {
-    PooledJsonString::with_prefix_u64("att_", session_seq)
-}
-
-fn append_u64_decimal(out: &mut String, mut value: u64) {
-    if value == 0 {
-        out.push('0');
-        return;
-    }
-    let mut buf = [0u8; 20];
-    let mut pos = buf.len();
-    while value > 0 {
-        pos -= 1;
-        buf[pos] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-    for b in &buf[pos..] {
-        out.push(*b as char);
-    }
-}
-
-impl VolatileOrderResponse {
-    fn from_hotpath(session_id: &str, outcome: V3HotPathOutcome) -> Self {
-        match outcome.session_seq {
-            Some(session_seq) => Self {
-                session_id: PooledJsonString::from_str(session_id),
-                session_seq: Some(session_seq),
-                attempt_id: Some(build_attempt_id(session_seq)),
-                received_at_ns: outcome.received_at_ns,
-                status: outcome.status_text,
-                reason: None,
-            },
-            None => Self {
-                session_id: PooledJsonString::from_str(session_id),
-                session_seq: None,
-                attempt_id: None,
-                received_at_ns: outcome.received_at_ns,
-                status: outcome.status_text,
-                reason: outcome.reason_text.map(PooledJsonString::from_str),
-            },
-        }
-    }
-
-    pub(super) fn algo_runtime_scheduled(session_id: &str, received_at_ns: u64) -> Self {
-        Self {
-            session_id: PooledJsonString::from_str(session_id),
-            session_seq: None,
-            attempt_id: None,
-            received_at_ns,
-            status: "ALGO_RUNTIME_SCHEDULED",
-            reason: None,
-        }
-    }
-
-    fn accepted(session_id: String, session_seq: u64, received_at_ns: u64) -> Self {
-        Self {
-            session_id: PooledJsonString::from_str(&session_id),
-            session_seq: Some(session_seq),
-            attempt_id: Some(build_attempt_id(session_seq)),
-            received_at_ns,
-            status: "VOLATILE_ACCEPT",
-            reason: None,
-        }
-    }
-
-    fn rejected(session_id: &str, status: &'static str, reason: &str) -> Self {
-        Self {
-            session_id: PooledJsonString::from_str(session_id),
-            session_seq: None,
-            attempt_id: None,
-            received_at_ns: now_nanos(),
-            status,
-            reason: Some(PooledJsonString::from_str(reason)),
-        }
-    }
-
-    pub(super) fn session_seq(&self) -> Option<u64> {
-        self.session_seq
-    }
-
-    pub(super) fn status_text(&self) -> &'static str {
-        self.status
-    }
-
-    pub(super) fn reason_text(&self) -> Option<&str> {
-        self.reason.as_deref()
-    }
-}
-
-/// v3 durable confirm 照会レスポンス。
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct DurableOrderStatusResponse {
-    session_id: String,
-    session_seq: u64,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attempt_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    received_at_ns: Option<u64>,
-    updated_at_ns: u64,
-    shard_id: u64,
 }
 
 #[cfg(test)]

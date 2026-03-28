@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::AuthResult;
 
 /// 注文受付（POST /orders）
 /// - JWT検証 → Idempotency-Key → FastPath → 監査/Bus/Snapshot 保存
