@@ -54,11 +54,16 @@ struct MobileWebView: UIViewRepresentable {
         let readAccessURL = entryURL.deletingLastPathComponent()
         do {
             let html = try String(contentsOf: entryURL, encoding: .utf8)
-            let normalizedHtml = html
-                .replacingOccurrences(of: "<head>", with: "<head><base href=\"./\">")
-                .replacingOccurrences(of: "href=\"/", with: "href=\"./")
-                .replacingOccurrences(of: "src=\"/", with: "src=\"./")
-            webView.loadHTMLString(normalizedHtml, baseURL: readAccessURL)
+            let needsRewrite = html.contains("href=\"/") || html.contains("src=\"/")
+            if needsRewrite {
+                let normalizedHtml = html
+                    .replacingOccurrences(of: "<head>", with: "<head><base href=\"./\">")
+                    .replacingOccurrences(of: "href=\"/", with: "href=\"./")
+                    .replacingOccurrences(of: "src=\"/", with: "src=\"./")
+                webView.loadHTMLString(normalizedHtml, baseURL: readAccessURL)
+            } else {
+                webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
+            }
         } catch {
             webView.loadFileURL(entryURL, allowingReadAccessTo: readAccessURL)
         }
