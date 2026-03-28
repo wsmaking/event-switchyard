@@ -22,6 +22,11 @@ application {
     mainClass.set('appjava.Main')
 }
 
+tasks.named('run') {
+    workingDir = rootProject.projectDir
+    systemProperty 'app.frontend.dist.dir', rootProject.file('frontend/dist').absolutePath
+}
+
 jar {
     manifest { attributes('Main-Class': application.mainClass.get()) }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

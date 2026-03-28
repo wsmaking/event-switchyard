@@ -1,8 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useState } from 'react';
-import { Dashboard } from './components/Dashboard';
-import { TradingView } from './components/TradingView';
-import { StrategySettings } from './components/StrategySettings';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { toAppPath, toBrowserPath } from './appBase';
+
+const Dashboard = lazy(() => import('./components/Dashboard').then((module) => ({ default: module.Dashboard })));
+const TradingView = lazy(() => import('./components/TradingView').then((module) => ({ default: module.TradingView })));
+const StrategySettings = lazy(() => import('./components/StrategySettings').then((module) => ({ default: module.StrategySettings })));
+const MobileLearningConsole = lazy(() =>
+  import('./components/mobile/MobileLearningConsole').then((module) => ({ default: module.MobileLearningConsole }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -14,6 +19,33 @@ const queryClient = new QueryClient({
 
 function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'trading' | 'strategy'>('dashboard');
+  const [path, setPath] = useState(() => toAppPath(window.location.pathname || '/'));
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPath(toAppPath(window.location.pathname || '/'));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigate = (nextPath: string) => {
+    const browserPath = toBrowserPath(nextPath);
+    if ((window.location.pathname || '/') !== browserPath) {
+      window.history.pushState({}, '', browserPath);
+    }
+    setPath(nextPath);
+  };
+
+  if (path.startsWith('/mobile')) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <Suspense fallback={<LoadingScreen message="Mobile Learning を読み込み中..." />}>
+          <MobileLearningConsole path={path} onNavigate={navigate} onExit={() => navigate('/')} />
+        </Suspense>
+      </QueryClientProvider>
+    );
+  }
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -31,6 +63,12 @@ function App() {
               </div>
             </div>
             <div className="flex items-center gap-6 text-sm font-medium">
+              <button
+                onClick={() => navigate('/mobile')}
+                className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-500/20"
+              >
+                Mobile Learning
+              </button>
               <button
                 onClick={() => setActiveTab('dashboard')}
                 className={`pb-4 pt-4 border-b-2 transition ${
@@ -66,11 +104,21 @@ function App() {
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'dashboard' && <Dashboard />}
-        {activeTab === 'trading' && <TradingView />}
-        {activeTab === 'strategy' && <StrategySettings />}
+        <Suspense fallback={<LoadingScreen message="画面を読み込み中..." />}>
+          {activeTab === 'dashboard' && <Dashboard />}
+          {activeTab === 'trading' && <TradingView />}
+          {activeTab === 'strategy' && <StrategySettings />}
+        </Suspense>
       </div>
     </QueryClientProvider>
+  );
+}
+
+function LoadingScreen({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center text-sm text-slate-300">
+      {message}
+    </div>
   );
 }
 

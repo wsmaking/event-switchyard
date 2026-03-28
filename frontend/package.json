@@ -4,10 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "NODE_DISABLE_COMPILE_CACHE=1 vite",
+    "build": "tsc -b && NODE_DISABLE_COMPILE_CACHE=1 vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "NODE_DISABLE_COMPILE_CACHE=1 vite preview"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.7",

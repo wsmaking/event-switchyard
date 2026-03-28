@@ -7,15 +7,26 @@ import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.http.AppHttpServer;
 import appjava.market.MarketDataService;
+import appjava.mobile.MobileLearningService;
+import appjava.mobile.MobileProgressStore;
 import appjava.order.OrderService;
+
+import java.nio.file.Path;
 
 public final class Main {
     private Main() {
     }
 
     public static void main(String[] args) throws Exception {
+        String host = System.getProperty("app.http.host", System.getenv().getOrDefault("APP_HTTP_HOST", "127.0.0.1"));
         int port = Integer.parseInt(System.getProperty("app.http.port", "8080"));
         String accountId = System.getProperty("app.account.id", System.getenv().getOrDefault("ACCOUNT_ID", "acct_demo"));
+        Path frontendDistDir = Path.of(
+            System.getProperty(
+                "app.frontend.dist.dir",
+                System.getenv().getOrDefault("APP_FRONTEND_DIST_DIR", "frontend/dist")
+            )
+        ).toAbsolutePath().normalize();
 
         MarketDataService marketDataService = new MarketDataService();
         BackOfficeClient backOfficeClient = new BackOfficeClient(accountId);
@@ -28,15 +39,26 @@ public final class Main {
             backOfficeClient,
             omsClient
         );
+        MobileProgressStore mobileProgressStore = new MobileProgressStore(accountId);
+        MobileLearningService mobileLearningService = new MobileLearningService(
+            accountId,
+            marketDataService,
+            backOfficeClient,
+            omsClient,
+            mobileProgressStore
+        );
 
         AppHttpServer server = new AppHttpServer(
+            host,
             port,
             accountId,
             marketDataService,
             backOfficeClient,
             omsClient,
             orderService,
-            replayScenarioService
+            replayScenarioService,
+            mobileLearningService,
+            frontendDistDir
         );
         server.start();
     }
