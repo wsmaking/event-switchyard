@@ -296,11 +296,27 @@ scripts/ops/run_business_mainline_stack.sh
 scripts/ops/smoke_business_mainline_stack.sh
 ```
 
-### 3. stop
+### 3. ops gate
+
+```bash
+scripts/ops/check_business_mainline_ops.sh
+```
+
+### 4. projection recovery drill
+
+```bash
+scripts/ops/drill_business_mainline_projection_recovery.sh
+```
+
+### 5. stop
 
 ```bash
 scripts/ops/stop_business_mainline_stack.sh
 ```
+
+runbook:
+
+- [docs/ops/business_mainline_operations_runbook.md](/Users/fujii/Desktop/dev/event-switchyard/docs/ops/business_mainline_operations_runbook.md)
 
 ## Java Replay Stack
 

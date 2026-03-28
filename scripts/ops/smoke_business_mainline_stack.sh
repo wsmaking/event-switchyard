@@ -14,6 +14,9 @@ echo "[check] ops overview"
 ops_json="$(curl -fsS "${APP_BASE_URL}/api/ops/overview")"
 echo "${ops_json}"
 
+echo "[check] mainline ops gates"
+"$(cd "$(dirname "$0")" && pwd)/check_business_mainline_ops.sh"
+
 echo "[check] submit order"
 submit_json="$(curl -fsS -X POST "${APP_BASE_URL}/api/orders" \
   -H 'content-type: application/json' \

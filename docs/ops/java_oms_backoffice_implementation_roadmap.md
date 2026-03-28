@@ -43,8 +43,11 @@
 - `oms-java` / `backoffice-java` の Postgres runtime と orphan / DLQ 正本化
 - `gateway-rust` outbox からの `bus_event_v2` 発行
 - Java 側の `bus_event_v2` HTTP / Kafka intake
+- Java OMS / BackOffice の `aggregateSeq` gap 保留 / replay / DLQ 再投入
 - `gateway-rust` の cancel venue 直結と amend cancel-replace 本線
 - `scripts/ops/run_business_mainline_stack.sh` による Kafka / Postgres / TCP venue simulator 込み導線
+- `scripts/ops/check_business_mainline_ops.sh` と projection recovery drill
+- business mainline の運用 runbook
 
 この時点で、**業務再現スコープの完了判定は満たした**。
 
