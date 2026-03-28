@@ -3,7 +3,7 @@ export async function registerServiceWorker() {
     return;
   }
   try {
-    await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
   } catch (error) {
     console.warn('service_worker_registration_failed', error);
   }

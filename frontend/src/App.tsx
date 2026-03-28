@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect, useState } from 'react';
+import { toAppPath, toBrowserPath } from './appBase';
 
 const Dashboard = lazy(() => import('./components/Dashboard').then((module) => ({ default: module.Dashboard })));
 const TradingView = lazy(() => import('./components/TradingView').then((module) => ({ default: module.TradingView })));
@@ -18,19 +19,20 @@ const queryClient = new QueryClient({
 
 function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'trading' | 'strategy'>('dashboard');
-  const [path, setPath] = useState(() => window.location.pathname || '/');
+  const [path, setPath] = useState(() => toAppPath(window.location.pathname || '/'));
 
   useEffect(() => {
     const handlePopState = () => {
-      setPath(window.location.pathname || '/');
+      setPath(toAppPath(window.location.pathname || '/'));
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   const navigate = (nextPath: string) => {
-    if ((window.location.pathname || '/') !== nextPath) {
-      window.history.pushState({}, '', nextPath);
+    const browserPath = toBrowserPath(nextPath);
+    if ((window.location.pathname || '/') !== browserPath) {
+      window.history.pushState({}, '', browserPath);
     }
     setPath(nextPath);
   };
