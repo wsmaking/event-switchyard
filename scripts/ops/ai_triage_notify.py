@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Post AI triage report as a Grafana annotation.
+"""AI トリアージレポートを Grafana アノテーションとして投稿する。
 
-Usage:
+使い方:
     python3 ai_triage_notify.py --triage-json var/results/run.triage.json
 
-Env vars:
-    GRAFANA_URL      (default: http://localhost:3000)
-    GRAFANA_USER     (default: admin)
-    GRAFANA_PASSWORD (default: admin)
-    GRAFANA_DASHBOARD_UID (default: hft-fast-path)
+環境変数:
+    GRAFANA_URL      (デフォルト: http://localhost:3000)
+    GRAFANA_USER     (デフォルト: admin)
+    GRAFANA_PASSWORD (デフォルト: admin)
+    GRAFANA_DASHBOARD_UID (デフォルト: hft-fast-path)
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from typing import Any
 
 
 def build_annotation_text(report: dict[str, Any]) -> str:
-    """Build human-readable annotation text from triage JSON."""
+    """トリアージ JSON から人間が読めるアノテーション本文を組み立てる。"""
     lines: list[str] = []
 
     run_name = report.get("run_name", "unknown")
@@ -34,7 +34,7 @@ def build_annotation_text(report: dict[str, Any]) -> str:
     lines.append(f"Run: `{run_name}`")
     lines.append("")
 
-    # Violations
+    # 違反一覧
     violations = [v for v in report.get("violations", []) if v.get("violated")]
     if violations:
         lines.append("**Violations:**")
@@ -46,7 +46,7 @@ def build_annotation_text(report: dict[str, Any]) -> str:
             lines.append(f"- `{name}`: {observed} ({rule}) deviation={dev}")
         lines.append("")
 
-    # Hypotheses
+    # 主因候補（仮説）
     analysis = report.get("analysis", {})
     hypotheses = analysis.get("hypotheses", [])
     if hypotheses:
@@ -56,13 +56,13 @@ def build_annotation_text(report: dict[str, Any]) -> str:
             lines.append(f"- [{conf:.0%}] {h.get('text', '')}")
         lines.append("")
 
-    # Recommended metrics
+    # 確認推奨メトリクス
     recommended = analysis.get("recommended_metrics", [])
     if recommended:
         lines.append("**Check metrics:** " + ", ".join(f"`{m}`" for m in recommended[:6]))
         lines.append("")
 
-    # Next actions
+    # 次のアクション
     actions = analysis.get("next_actions", [])
     if actions:
         lines.append("**Next:**")
@@ -73,7 +73,7 @@ def build_annotation_text(report: dict[str, Any]) -> str:
 
 
 def build_tags(report: dict[str, Any]) -> list[str]:
-    """Build annotation tags from triage report."""
+    """トリアージレポートからアノテーション用タグを生成する。"""
     tags = ["gate-fail", "ai-triage"]
     violations = [v for v in report.get("violations", []) if v.get("violated")]
     for v in violations:
@@ -88,7 +88,7 @@ def post_annotation(
     dashboard_uid: str,
     report: dict[str, Any],
 ) -> dict[str, Any]:
-    """Post annotation to Grafana Annotations API."""
+    """Grafana Annotations API にアノテーションを投稿する。"""
     text = build_annotation_text(report)
     tags = build_tags(report)
     now_ms = int(time.time() * 1000)
@@ -125,8 +125,8 @@ def post_annotation(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Post AI triage report to Grafana")
-    parser.add_argument("--triage-json", required=True, help="Path to .triage.json file")
+    parser = argparse.ArgumentParser(description="AI トリアージレポートを Grafana に投稿")
+    parser.add_argument("--triage-json", required=True, help=".triage.json ファイルのパス")
     parser.add_argument("--grafana-url", default=None)
     parser.add_argument("--grafana-user", default=None)
     parser.add_argument("--grafana-password", default=None)

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""LLM プロバイダ抽象レイヤ。
+
+mock / OpenAI / Anthropic(Claude) を統一インターフェースで切り替える。
+mock はテスト・CI 用の固定テンプレ応答を返す（API 呼び出しなし・0円）。
+有料プロバイダは環境変数 AI_LLM_NETWORK_ENABLED=1 で明示的に有効化する。
+"""
 from __future__ import annotations
 
 import json
@@ -19,7 +25,7 @@ class AnalysisResult:
     next_actions: list[str]
     confidence: float
     citations: list[str]
-    unknowns: list[str] = ()  # type: ignore[assignment]  # additional queries the LLM wants
+    unknowns: list[str] = ()  # type: ignore[assignment]  # LLM が根拠不足と判断した追加検索クエリ
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -462,7 +468,7 @@ class AnthropicAdapter(ModelAdapter):
             temperature=0.2,
         )
         raw = response.content[0].text if response.content else "{}"
-        # Strip markdown code fences if present.
+        # マークダウンのコードフェンス (```) が付いていたら除去する。
         stripped = raw.strip()
         if stripped.startswith("```"):
             lines = stripped.splitlines()
@@ -494,11 +500,11 @@ class AnthropicAdapter(ModelAdapter):
 
 
 class LLMError(Exception):
-    """Raised when LLM call fails."""
+    """LLM 呼び出しが失敗したときに送出される。"""
 
 
 class AgentError(Exception):
-    """Raised when agent orchestration fails."""
+    """Agent オーケストレーションが失敗したときに送出される。"""
 
 
 def create_model_adapter(provider: str, model: str) -> ModelAdapter:

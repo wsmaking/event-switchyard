@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""SLO 違反検出・因果シグナル構築・RAG 検索のユーティリティ群。
+
+主要機能:
+  - detect_violations(): summary.txt から SLO ルールに照らして違反を検出する（deterministic）
+  - build_causal_signals(): summary / metrics / perf / timeseries から因果順序ヒントを構築する
+  - retrieve_evidence(): SQLite FTS5 で設計正本・run artifact を全文検索する
+  - compare_recent_runs(): 直近 N 件の run を並べて傾向を比較する
+"""
 from __future__ import annotations
 
 import glob
@@ -695,7 +703,7 @@ def build_retrieval_queries(violations: list[Violation]) -> list[str]:
             queries.append("loss_suspect OR shard_killed OR global_killed OR kill")
         elif v.name == "rejected_killed":
             queries.append("rejected_killed OR queue OR kill OR escalation")
-    # Stable unique order.
+    # 安定した重複排除順序を維持する。
     return list(dict.fromkeys(queries))
 
 

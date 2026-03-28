@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""RAG インデックスへの手動クエリ CLI。
+
+SQLite FTS5 インデックスに対してキーワード検索を行い、
+関連チャンクを JSON で返す。デバッグ・動作確認用。
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +14,11 @@ from ai_tools import retrieve_evidence
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Query local RAG index")
-    parser.add_argument("--query", required=True)
+    parser = argparse.ArgumentParser(description="ローカル RAG インデックスを検索する")
+    parser.add_argument("--query", required=True, help="検索クエリ")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
-    parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--source-like", default=None, help="SQL LIKE pattern for source_path")
+    parser.add_argument("--top-k", type=int, default=5, help="返す結果の最大件数")
+    parser.add_argument("--source-like", default=None, help="source_path の SQL LIKE パターンで絞り込み")
     return parser.parse_args()
 
 

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""RAG + LLM によるインシデントトリアージ Agent。
+
+gate fail / SLO 違反の run に対して、artifact と設計正本を read-only で横断し、
+根拠付きの一次切り分けレポートを返す。
+
+3 階層フォールバック: Agent+LLM → deterministic（固定ルール）。
+"""
 from __future__ import annotations
 
 import argparse
@@ -49,14 +56,14 @@ def now_iso() -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RAG + Agent incident triage"
+        description="RAG + Agent インシデントトリアージ"
     )
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--results-dir", default="var/results")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
     parser.add_argument("--provider", default="mock", choices=("mock", "openai", "anthropic", "claude"))
     parser.add_argument("--model", default=None,
-                        help="Model name (default: mock-triage-v1 / gpt-5-nano / claude-sonnet-4-20250514)")
+                        help="モデル名 (デフォルト: mock-triage-v1 / gpt-5-nano / claude-sonnet-4-20250514)")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--recent-window", type=int, default=5)
     parser.add_argument("--out", default=None)
@@ -81,10 +88,10 @@ def run_agent_with_llm(
     top_k: int,
     recent_window: int,
 ) -> dict[str, Any]:
-    """Full Agent loop: Detect → (Retrieve → Analyze) × N → Report."""
+    """Agent ループ全体: 検出 → (根拠取得 → 分析) × N → レポート生成。"""
     t0 = time.monotonic()
 
-    # --- Detect ---
+    # --- 違反検出 ---
     summary, metrics = load_run_inputs(results_dir, run_name)
     perf_profile = load_perf_profile(results_dir, run_name)
     timeseries_samples = load_timeseries_samples(results_dir, run_name, summary_data=summary)
@@ -92,7 +99,7 @@ def run_agent_with_llm(
     violations = detect_violations(summary)
     recent = compare_recent_runs(results_dir, TREND_METRICS, limit=recent_window)
 
-    # --- Agent loop ---
+    # --- Agent ループ（最大 MAX_STEPS 回） ---
     adapter = create_model_adapter(provider=provider, model=model)
     all_evidence: list[Any] = []
     all_queries: list[str] = []
@@ -108,7 +115,7 @@ def run_agent_with_llm(
             logger.warning("timeout after %.1fs at step %d", elapsed, step)
             break
 
-        # --- Retrieve ---
+        # --- 根拠取得 ---
         for q in queries:
             if retrieval_calls >= MAX_RETRIEVAL_CALLS:
                 break
@@ -121,7 +128,7 @@ def run_agent_with_llm(
 
         evidence = dedupe_evidence(all_evidence, limit=12)
 
-        # --- Analyze ---
+        # --- LLM 分析 ---
         context = {
             "run_name": run_name,
             "violations": [v.to_dict() for v in violations],
@@ -136,13 +143,13 @@ def run_agent_with_llm(
         analysis = adapter.generate_analysis(context)
         steps_taken = step + 1
 
-        # --- Check: enough? ---
+        # --- 十分な確信度に達したか確認 ---
         if analysis.confidence >= CONFIDENCE_THRESHOLD:
             break
         if not analysis.unknowns:
             break
 
-        # --- NeedMore: use LLM's requested queries ---
+        # --- 根拠不足: LLM が要求した追加クエリで再検索 ---
         queries = list(analysis.unknowns)[:3]
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -188,7 +195,7 @@ def run_deterministic(
     run_name: str,
     results_dir: Path,
 ) -> dict[str, Any]:
-    """Deterministic fallback: SLO violation list + fixed metric recommendations."""
+    """deterministic フォールバック: SLO 違反一覧 + 固定メトリクス推奨を返す（LLM 不要）。"""
     summary, metrics = load_run_inputs(results_dir, run_name)
     perf_profile = load_perf_profile(results_dir, run_name)
     timeseries_samples = load_timeseries_samples(results_dir, run_name, summary_data=summary)
@@ -232,7 +239,7 @@ def main() -> int:
     results_dir = Path(args.results_dir)
     db_path = Path(args.db_path)
 
-    # 3-tier fallback: Agent+LLM → deterministic
+    # 3 階層フォールバック: Agent+LLM → deterministic
     try:
         report = run_agent_with_llm(
             run_name=args.run_name,

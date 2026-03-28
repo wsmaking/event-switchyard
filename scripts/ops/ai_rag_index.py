@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""RAG 用ローカルインデックスの構築。
+
+docs/ops/*.md（設計正本）と var/results/ 配下の run artifact
+（summary.txt / metrics.prom / perf.json）を SQLite FTS5 に登録する。
+VectorDB は使わず、lexical 検索だけで開始する方針。
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +19,7 @@ from pathlib import Path
 HEADER_RE = re.compile(r"^(#{2,4})\s+(.+)$")
 SECTION_RE = re.compile(r"^(\d+)\.")
 
-# Important metrics to extract from .metrics.prom files.
+# .metrics.prom から抽出する重要メトリクスのプレフィックス一覧。
 IMPORTANT_METRIC_PREFIXES = (
     "gateway_live_ack",
     "gateway_v3_accepted",
@@ -73,7 +79,7 @@ def chunk_markdown(path: Path) -> list[dict[str, str | int | None]]:
 
 
 def chunk_summary(path: Path) -> list[dict[str, str | int | None]]:
-    """Index a summary.txt as a single chunk."""
+    """summary.txt を 1 チャンクとしてインデックスに登録する。"""
     text = path.read_text(encoding="utf-8", errors="replace").strip()
     if not text:
         return []
@@ -93,7 +99,7 @@ def chunk_summary(path: Path) -> list[dict[str, str | int | None]]:
 
 
 def chunk_metrics_prom(path: Path) -> list[dict[str, str | int | None]]:
-    """Index important lines from a .metrics.prom file as a single chunk."""
+    """metrics.prom から重要行を抽出して 1 チャンクとしてインデックスに登録する。"""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     important: list[str] = []
     for line in lines:
@@ -120,7 +126,7 @@ def chunk_metrics_prom(path: Path) -> list[dict[str, str | int | None]]:
 
 
 def chunk_perf_json(path: Path) -> list[dict[str, str | int | None]]:
-    """Index a perf profile JSON as a single chunk."""
+    """perf.json を 1 チャンクとしてインデックスに登録する。"""
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError:
@@ -177,7 +183,7 @@ def chunk_perf_json(path: Path) -> list[dict[str, str | int | None]]:
 
 
 def _find_result_files(results_dir: Path) -> tuple[list[Path], list[Path], list[Path]]:
-    """Find summary / metrics / perf profile files in results dir (flat + nested)."""
+    """results ディレクトリ（フラット + ネスト）から summary / metrics / perf ファイルを探す。"""
     summary_globs = [
         str(results_dir / "*.summary.txt"),
         str(results_dir / "*" / "*.summary.txt"),
@@ -275,7 +281,7 @@ def rebuild_index(
         indexed_docs = 0
         updated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
-        # --- Markdown docs ---
+        # --- Markdown ドキュメント ---
         for path in md_files:
             chunks = chunk_markdown(path)
             if not chunks:
@@ -283,7 +289,7 @@ def rebuild_index(
             indexed_docs += 1
             inserted_chunks += _insert_chunks(conn, chunks, updated_at)
 
-        # --- Run results (summary + metrics) ---
+        # --- Run artifact（summary + metrics + perf） ---
         if results_dir and results_dir.exists():
             summaries, metrics_files, perf_profiles = _find_result_files(results_dir)
             for path in summaries:
@@ -309,10 +315,10 @@ def rebuild_index(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build local RAG index for ops docs + run results")
+    parser = argparse.ArgumentParser(description="運用ドキュメント + run artifact のローカル RAG インデックスを構築する")
     parser.add_argument("--docs-dir", default="docs/ops")
     parser.add_argument("--results-dir", default="var/results",
-                        help="Directory containing summary/metrics files (set empty to skip)")
+                        help="summary/metrics ファイルを含むディレクトリ（空でスキップ）")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
     parser.add_argument("--include-old", action="store_true")
     return parser.parse_args()

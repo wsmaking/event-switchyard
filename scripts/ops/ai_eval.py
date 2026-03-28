@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Evaluation framework for AI triage agent.
+"""AI トリアージ Agent の評価フレームワーク。
 
-Runs test cases against the agent and measures KPIs:
-  - first_hypothesis_hit_rate: % of cases where at least one hypothesis
-    matches expected keywords (target >= 70%)
-  - grounded_answer_ratio: % of hypotheses that have citations (target >= 99%)
-  - violation_detection_accuracy: % of expected violations correctly detected
-  - response_time_p95: 95th percentile response time in seconds (target <= 12s)
+テストケースを Agent に通し、以下の KPI を計測する:
+  - first_hypothesis_hit_rate: 主因候補が期待キーワードに当たった割合（目標 >= 70%）
+  - grounded_answer_ratio: 仮説に根拠 citation が付いている割合（目標 >= 99%）
+  - violation_detection_accuracy: 期待した違反を正しく検出できた割合（目標 100%）
+  - response_time_p95: 応答時間の 95 パーセンタイル（目標 <= 12 秒）
+
+使い方:
+  python3 ai_eval.py --provider mock          # 0円で回帰テスト
+  python3 ai_eval.py --provider openai        # LLM で prompt 精度を評価（有料）
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Add scripts/ops to path for local imports.
+# scripts/ops をパスに追加してローカルインポートを有効にする。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ai_incident_agent import run_agent_with_llm, run_deterministic  # noqa: E402
@@ -65,7 +68,7 @@ def evaluate_case(
         mode = "deterministic-fallback"
     elapsed = time.monotonic() - t0
 
-    # --- Evaluate violation detection ---
+    # --- 違反検出の正確性を評価 ---
     detected_violations = {
         v["name"] for v in report.get("violations", []) if v.get("violated")
     }
@@ -73,7 +76,7 @@ def evaluate_case(
     violation_hits = expected_violations & detected_violations
     violation_accuracy = len(violation_hits) / max(len(expected_violations), 1)
 
-    # --- Evaluate hypothesis quality ---
+    # --- 仮説の品質を評価（キーワードヒット + 根拠付き率） ---
     analysis = report.get("analysis", {})
     hypotheses = analysis.get("hypotheses", [])
     expected_keywords = [kw.lower() for kw in expected.get("hypothesis_keywords", [])]
@@ -90,15 +93,15 @@ def evaluate_case(
         if citations:
             grounded_count += 1
 
-    # For mock adapter (no LLM), check top-level citations as fallback.
+    # mock adapter（LLM なし）は citation をトップレベルに置くので、フォールバックで確認。
     if total_hypotheses > 0 and grounded_count == 0:
         top_citations = analysis.get("citations", [])
         if top_citations:
-            grounded_count = total_hypotheses  # mock puts citations at top level
+            grounded_count = total_hypotheses  # mock は citation をトップレベルに集約する
 
     grounded_ratio = grounded_count / max(total_hypotheses, 1)
 
-    # --- Evaluate metric recommendations ---
+    # --- メトリクス推奨の正確性を評価 ---
     recommended = set(analysis.get("recommended_metrics", []))
     must_recommend = set(expected.get("must_recommend_metrics", []))
     metric_hits = must_recommend & recommended
@@ -150,7 +153,7 @@ def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate AI triage agent against test cases")
+    parser = argparse.ArgumentParser(description="AI トリアージ Agent をテストケースで評価する")
     parser.add_argument("--eval-dir", default="var/ai_eval")
     parser.add_argument("--results-dir", default="var/results")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")

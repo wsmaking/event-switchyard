@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""
-Legacy CLI wrapper for SLO analysis.
+"""SLO 分析のレガシー CLI ラッパー。
 
-This script is now unified to the Agent path (ai_incident_agent.py) so that
-provider behavior (mock/openai/claude) and triage logic are consistent across
-all entrypoints.
+Agent パス (ai_incident_agent.py) に統合済み。
+provider の挙動 (mock/openai/claude) とトリアージロジックが
+全エントリポイントで一貫するようにするためのラッパー。
 
-Stdout output remains compatible with the historical 3-section layout:
-1) Violation Summary
-2) LLM Analysis
-3) Recommended Metrics
+標準出力は旧来の 3 セクション形式を維持:
+1) 違反サマリ
+2) LLM 分析結果
+3) 確認推奨メトリクス
 """
 
 from __future__ import annotations
@@ -28,29 +27,29 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Analyze run SLO via unified Agent path"
+        description="統合 Agent パス経由で run の SLO を分析する"
     )
-    parser.add_argument("--run-name", required=True, help="Run name without extension")
+    parser.add_argument("--run-name", required=True, help="拡張子なしの run 名")
     parser.add_argument("--results-dir", default="var/results")
     parser.add_argument("--db-path", default="var/ai_index/docs.sqlite")
     parser.add_argument(
         "--provider",
         default="mock",
         choices=("mock", "openai", "anthropic", "claude"),
-        help="LLM provider",
+        help="LLM プロバイダ",
     )
     parser.add_argument(
         "--model",
         default=None,
-        help="Default: mock-triage-v1 (mock) / gpt-5-nano (openai) / claude-sonnet-4-20250514 (claude)",
+        help="デフォルト: mock-triage-v1 (mock) / gpt-5-nano (openai) / claude-sonnet-4-20250514 (claude)",
     )
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--recent-window", type=int, default=5)
-    parser.add_argument("--out", default=None, help="Optional JSON report output path")
-    parser.add_argument("--dry-run", action="store_true", help="Skip LLM and emit deterministic report")
+    parser.add_argument("--out", default=None, help="JSON レポートの出力パス（省略可）")
+    parser.add_argument("--dry-run", action="store_true", help="LLM をスキップして deterministic レポートのみ出力")
     parser.add_argument("--verbose", action="store_true")
 
-    # Legacy flags kept for CLI compatibility (no-op in Agent-unified flow).
+    # レガシーフラグ（Agent 統合後は無操作だが CLI 互換のため残す）。
     parser.add_argument("--design-doc", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--timeout-sec", type=int, default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
