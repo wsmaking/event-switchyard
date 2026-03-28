@@ -1,0 +1,20 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+WEBAPP_DIR="$ROOT_DIR/ios/MobileLearningShell/WebApp"
+
+echo "[build] frontend mobile bundle"
+(
+  cd "$ROOT_DIR/frontend"
+  npm run build
+)
+
+echo "[sync] iOS WebApp resources"
+mkdir -p "$WEBAPP_DIR"
+rsync -a --delete --exclude '.gitignore' "$ROOT_DIR/frontend/dist/" "$WEBAPP_DIR/"
+
+echo "[ok] iOS shell resources prepared"
+echo "  xcodeproj : $ROOT_DIR/ios/MobileLearningShell.xcodeproj"
+echo "  web bundle: $WEBAPP_DIR"
