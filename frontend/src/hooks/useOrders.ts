@@ -1,6 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import type { AuditReplayResult, OpsOverview, Order, OrderFinalOut, OrderRequest, OrphanRequeueResult } from '../types/trading';
+import type {
+  AuditReplayResult,
+  DeadLetterRequeueResult,
+  OpsOverview,
+  Order,
+  OrderFinalOut,
+  OrderRequest,
+  OrphanRequeueResult,
+} from '../types/trading';
 
 const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
@@ -113,6 +121,22 @@ async function requeueOrphans(orderId: string | null): Promise<OrphanRequeueResu
   return response.json();
 }
 
+async function requeueDeadLetter(eventRef: string): Promise<DeadLetterRequeueResult> {
+  const response = await fetch(`${API_BASE_URL}/api/ops/dlq/requeue`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ eventRef }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 export function useOrders() {
   return useQuery({
     queryKey: ['orders'],
@@ -195,6 +219,20 @@ export function useRequeueOrphans() {
 
   return useMutation({
     mutationFn: requeueOrphans,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['positions'] });
+      queryClient.invalidateQueries({ queryKey: ['orderFinalOut'] });
+      queryClient.invalidateQueries({ queryKey: ['opsOverview'] });
+    },
+  });
+}
+
+export function useRequeueDeadLetter() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: requeueDeadLetter,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       queryClient.invalidateQueries({ queryKey: ['positions'] });

@@ -36,12 +36,17 @@
 - `app-java:/api/ops/overview` `app-java:/api/ops/audit/replay`
 - frontend からの ops 可視化と audit replay 起動
 - orphan / DLQ の保存と UI 可視化
+- pending orphan 保留、手動 requeue、再起動復元
+- `app-java:/api/order-stream` と frontend の live 反映
+- `scripts/ops/run_business_replay_stack.sh` による `gateway-rust` 込み起動導線
+- DLQ の個別再投入と UI からの運用操作
 
-一方で、まだ未完なのは次である。
+この時点で、**業務再現スコープの完了判定は満たした**。
+
+残るのは、本線化 / 将来ハードニングの候補であり、次が対象になる。
 
 - `gateway-rust` outbox / Kafka からの Java 側 event intake
-- sequence / orphan pending / DLQ の本格化
-- UI の SSE / WebSocket 反映
+- PostgreSQL + jOOQ / Flyway への正本永続化
 - audit log ではなく bus event / exchange truth で OMS / BackOffice を収束させる本線
 
 ## 前提
@@ -260,6 +265,10 @@ client / strategy
 - PR は「土台」「OMS 最小核」「BackOffice 最小核」「UI replay」のように少数に絞る
 
 ## フェーズ別ロードマップ
+
+以下の Phase 0-6 は、業務再現完了後に本線化する場合の拡張計画として残す。
+
+2026-03-28 時点では、業務再現に必要な最小一気通貫環境は audit / file snapshot / Java BFF / frontend 導線で達成済みである。
 
 ## Phase 0 基盤整備
 
@@ -663,7 +672,7 @@ reconcile / replay / DLQ を含めて運用再現できる
 
 ## 完了判定
 
-次を満たしたら、「注文、リスクチェック、取引所連携、BackOffice までの一気通貫業務再現」ができたと判定する。
+2026-03-28 時点で、次を満たしているため「注文、リスクチェック、取引所連携、BackOffice までの一気通貫業務再現」ができたと判定する。
 
 - フロント UI から注文できる
 - gateway-rust が注文を受ける

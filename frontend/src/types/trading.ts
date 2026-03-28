@@ -299,6 +299,23 @@ export interface OrphanRequeueResult {
   } | null;
 }
 
+export interface DeadLetterRequeueResult {
+  oms: {
+    status: string;
+    eventRef: string | null;
+    outcome: string;
+    pendingRemaining: number;
+    deadLetterRemaining: number;
+  } | null;
+  backOffice: {
+    status: string;
+    eventRef: string | null;
+    outcome: string;
+    pendingRemaining: number;
+    deadLetterRemaining: number;
+  } | null;
+}
+
 export interface AuditReplayResult {
   oms: {
     status: string;

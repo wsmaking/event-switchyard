@@ -60,6 +60,17 @@ public final class OpsApiHandler extends JsonHttpHandler {
             }
             return JsonResponse.ok(new OrphanRequeueOverview(omsResult, backOfficeResult));
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/dlq/requeue".equals(path)) {
+            DeadLetterRequeueRequest request = exchange.getRequestBody().available() > 0
+                ? readJson(exchange, DeadLetterRequeueRequest.class)
+                : new DeadLetterRequeueRequest(null);
+            OmsClient.DeadLetterRequeueResult omsResult = omsClient.requeueDeadLetter(request.eventRef());
+            BackOfficeClient.DeadLetterRequeueResult backOfficeResult = backOfficeClient.requeueDeadLetter(request.eventRef());
+            if (omsResult == null || backOfficeResult == null) {
+                throw new IllegalStateException("dlq_requeue_failed");
+            }
+            return JsonResponse.ok(new DeadLetterRequeueOverview(omsResult, backOfficeResult));
+        }
         throw new NotFoundException("route_not_found:" + path);
     }
 
@@ -72,6 +83,15 @@ public final class OpsApiHandler extends JsonHttpHandler {
     public record OrphanRequeueOverview(
         OmsClient.RequeueResult oms,
         BackOfficeClient.RequeueResult backOffice
+    ) {
+    }
+
+    public record DeadLetterRequeueRequest(String eventRef) {
+    }
+
+    public record DeadLetterRequeueOverview(
+        OmsClient.DeadLetterRequeueResult oms,
+        BackOfficeClient.DeadLetterRequeueResult backOffice
     ) {
     }
 }

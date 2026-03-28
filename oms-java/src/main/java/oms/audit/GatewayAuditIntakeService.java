@@ -150,6 +150,44 @@ public final class GatewayAuditIntakeService {
         }
     }
 
+    public DeadLetterRequeueResult requeueDeadLetter(String eventRef) {
+        synchronized (loopLock) {
+            DeadLetterEntryView entry = deadLetterStore.findByEventRef(eventRef);
+            if (entry == null) {
+                return new DeadLetterRequeueResult("NOT_FOUND", eventRef, "NOT_FOUND", pendingOrphanStore.size(), deadLetterStore.size());
+            }
+            GatewayAuditEvent event;
+            try {
+                event = OBJECT_MAPPER.readValue(entry.rawLine(), GatewayAuditEvent.class);
+            } catch (IOException exception) {
+                deadLetterStore.append(deadLetter(
+                    entry.eventRef(),
+                    entry.accountId(),
+                    entry.orderId(),
+                    entry.eventType(),
+                    "DLQ_REPLAY_PARSE_FAILED",
+                    exception.getMessage(),
+                    entry.rawLine(),
+                    entry.eventAt()
+                ));
+                return new DeadLetterRequeueResult("FAILED", eventRef, "PARSE_FAILED", pendingOrphanStore.size(), deadLetterStore.size());
+            }
+            boolean applied = handleEvent(event, entry.eventRef(), entry.rawLine(), true);
+            boolean queuedPending = event.orderId() != null && pendingOrphanStore.find(event.orderId(), Integer.MAX_VALUE).stream()
+                .anyMatch(candidate -> eventRef.equals(candidate.eventRef()));
+            if (applied || queuedPending) {
+                deadLetterStore.removeByEventRef(eventRef);
+            }
+            return new DeadLetterRequeueResult(
+                applied || queuedPending ? "REQUEUED" : "UNCHANGED",
+                eventRef,
+                applied ? "REPROCESSED" : queuedPending ? "PENDING" : "STILL_DLQ",
+                pendingOrphanStore.size(),
+                deadLetterStore.size()
+            );
+        }
+    }
+
     public ReconcileReport reconcile(String requestedAccountId) {
         List<OrderView> orders = orderReadModel.findAll().stream()
             .filter(order -> requestedAccountId == null || requestedAccountId.isBlank() || requestedAccountId.equals(order.accountId()))
@@ -696,7 +734,7 @@ public final class GatewayAuditIntakeService {
             event.type(),
             reason,
             detail,
-            safeData(event.data()).toString(),
+            serializeEvent(event),
             event.at()
         ));
     }
@@ -728,6 +766,14 @@ public final class GatewayAuditIntakeService {
 
     private static String textOr(JsonNode node, String fieldName, String fallback) {
         return node.hasNonNull(fieldName) ? node.get(fieldName).asText() : fallback;
+    }
+
+    private static String serializeEvent(GatewayAuditEvent event) {
+        try {
+            return OBJECT_MAPPER.writeValueAsString(event);
+        } catch (Exception exception) {
+            return safeData(event.data()).toString();
+        }
     }
 
     private long currentAuditSize() {
@@ -829,6 +875,15 @@ public final class GatewayAuditIntakeService {
         String orderId,
         int reprocessed,
         int pendingRemaining
+    ) {
+    }
+
+    public record DeadLetterRequeueResult(
+        String status,
+        String eventRef,
+        String outcome,
+        int pendingRemaining,
+        int deadLetterRemaining
     ) {
     }
 

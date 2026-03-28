@@ -223,6 +223,10 @@ public final class BackOfficeClient {
         return postJsonWithResponse("/internal/orphans/requeue", new RequeueRequest(orderId), RequeueResult.class);
     }
 
+    public DeadLetterRequeueResult requeueDeadLetter(String eventRef) {
+        return postJsonWithResponse("/internal/orphans/dlq/requeue", new DeadLetterRequeueRequest(eventRef), DeadLetterRequeueResult.class);
+    }
+
     private void postNoBody(String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -404,6 +408,18 @@ public final class BackOfficeClient {
         String orderId,
         int reprocessed,
         int pendingRemaining
+    ) {
+    }
+
+    public record DeadLetterRequeueRequest(String eventRef) {
+    }
+
+    public record DeadLetterRequeueResult(
+        String status,
+        String eventRef,
+        String outcome,
+        int pendingRemaining,
+        int deadLetterRemaining
     ) {
     }
 }

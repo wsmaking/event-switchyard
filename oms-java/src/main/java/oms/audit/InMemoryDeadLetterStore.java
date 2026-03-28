@@ -25,6 +25,9 @@ public final class InMemoryDeadLetterStore {
     }
 
     public synchronized void append(DeadLetterEntryView entry) {
+        if (entry.eventRef() != null) {
+            entries.removeIf(existing -> entry.eventRef().equals(existing.eventRef()));
+        }
         entries.add(entry);
         entries.sort(Comparator.comparingLong(DeadLetterEntryView::recordedAt).reversed());
         persist();
@@ -39,6 +42,18 @@ public final class InMemoryDeadLetterStore {
 
     public synchronized int size() {
         return entries.size();
+    }
+
+    public synchronized DeadLetterEntryView findByEventRef(String eventRef) {
+        return entries.stream()
+            .filter(entry -> eventRef != null && eventRef.equals(entry.eventRef()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    public synchronized void removeByEventRef(String eventRef) {
+        entries.removeIf(entry -> eventRef != null && eventRef.equals(entry.eventRef()));
+        persist();
     }
 
     public synchronized void reset() {

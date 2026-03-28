@@ -3,6 +3,7 @@ import {
   useOrderFinalOut,
   useOpsOverview,
   useOrderStream,
+  useRequeueDeadLetter,
   useRequeueOrphans,
   useReplayGatewayAudit,
   useOrders,
@@ -31,6 +32,7 @@ export function TradingView() {
   const resetDemo = useResetDemo();
   const runReplayScenario = useRunReplayScenario();
   const replayGatewayAudit = useReplayGatewayAudit();
+  const requeueDeadLetter = useRequeueDeadLetter();
   const requeueOrphans = useRequeueOrphans();
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
@@ -1070,6 +1072,11 @@ export function TradingView() {
                       OMS reprocessed: {requeueOrphans.data.oms?.reprocessed ?? 0} / BackOffice reprocessed: {requeueOrphans.data.backOffice?.reprocessed ?? 0}
                     </div>
                   )}
+                  {requeueDeadLetter.isSuccess && requeueDeadLetter.data && (
+                    <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                      OMS: {requeueDeadLetter.data.oms?.outcome ?? 'N/A'} / BackOffice: {requeueDeadLetter.data.backOffice?.outcome ?? 'N/A'}
+                    </div>
+                  )}
                 </div>
 
                 <div className="rounded-xl border border-slate-800/60 bg-slate-950/50 p-4 xl:col-span-2 2xl:col-span-3">
@@ -1131,15 +1138,31 @@ export function TradingView() {
                     <div className="mt-3 space-y-3">
                       {[...opsOverview.omsOrphans, ...opsOverview.backOfficeOrphans].map((entry) => (
                         <div key={entry.entryId} className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="text-sm font-semibold text-rose-50">
-                              {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-rose-50">
+                                {entry.reason} {entry.eventType ? `/ ${entry.eventType}` : ''}
+                              </div>
+                              <div className="mt-1 text-xs text-rose-100">{entry.detail}</div>
                             </div>
-                            <div className="text-[11px] text-rose-200">
-                              {formatEventTime(entry.recordedAt)}
+                            <div className="flex flex-col items-end gap-2">
+                              <div className="text-[11px] text-rose-200">
+                                {formatEventTime(entry.recordedAt)}
+                              </div>
+                              {entry.eventRef && (
+                                <button
+                                  type="button"
+                                  onClick={() => requeueDeadLetter.mutate(entry.eventRef)}
+                                  disabled={requeueDeadLetter.isPending}
+                                  className="rounded-md border border-rose-400/40 bg-rose-500/10 px-2 py-1 text-[11px] font-medium text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {requeueDeadLetter.isPending && requeueDeadLetter.variables === entry.eventRef
+                                    ? '再投入中...'
+                                    : 'DLQ再投入'}
+                                </button>
+                              )}
                             </div>
                           </div>
-                          <div className="mt-1 text-xs text-rose-100">{entry.detail}</div>
                           <div className="mt-2 text-[11px] text-rose-200">
                             orderId: {entry.orderId ?? '-'} / source: {entry.source}
                           </div>

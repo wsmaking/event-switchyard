@@ -233,6 +233,10 @@ public final class OmsClient {
         return postJsonWithResponse("/internal/orphans/requeue", new RequeueRequest(orderId), RequeueResult.class);
     }
 
+    public DeadLetterRequeueResult requeueDeadLetter(String eventRef) {
+        return postJsonWithResponse("/internal/orphans/dlq/requeue", new DeadLetterRequeueRequest(eventRef), DeadLetterRequeueResult.class);
+    }
+
     private void postJson(String path, Object payload) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -354,6 +358,18 @@ public final class OmsClient {
         String orderId,
         int reprocessed,
         int pendingRemaining
+    ) {
+    }
+
+    public record DeadLetterRequeueRequest(String eventRef) {
+    }
+
+    public record DeadLetterRequeueResult(
+        String status,
+        String eventRef,
+        String outcome,
+        int pendingRemaining,
+        int deadLetterRemaining
     ) {
     }
 }

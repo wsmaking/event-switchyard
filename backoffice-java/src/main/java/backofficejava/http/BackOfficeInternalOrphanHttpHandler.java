@@ -12,10 +12,19 @@ public final class BackOfficeInternalOrphanHttpHandler extends JsonHttpHandler {
                     : new RequeueRequest(null);
                 return JsonResponse.ok(intakeService.requeuePending(request.orderId()));
             }
+            if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/orphans/dlq/requeue".equals(path)) {
+                DeadLetterRequeueRequest request = exchange.getRequestBody().available() > 0
+                    ? readJson(exchange, DeadLetterRequeueRequest.class)
+                    : new DeadLetterRequeueRequest(null);
+                return JsonResponse.ok(intakeService.requeueDeadLetter(request.eventRef()));
+            }
             throw new NotFoundException("route_not_found:" + path);
         });
     }
 
     public record RequeueRequest(String orderId) {
+    }
+
+    public record DeadLetterRequeueRequest(String eventRef) {
     }
 }
