@@ -41,7 +41,7 @@ stop_matching_processes() {
   local pattern="$2"
   local pids
 
-  pids="$(ps -ax -o pid= -o command= | rg "${pattern}" | awk '{print $1}')"
+  pids="$(ps -ax -o pid= -o command= | awk -v pat="${pattern}" '$0 ~ pat {print $1}')"
   if [[ -z "${pids}" ]]; then
     return
   fi
