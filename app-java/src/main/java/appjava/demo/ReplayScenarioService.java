@@ -23,9 +23,13 @@ import appjava.order.OrderStatus;
 import appjava.order.OrderView;
 import appjava.clients.BackOfficeClient.AllocationPlan;
 import appjava.clients.BackOfficeClient.AllocationSlice;
+import appjava.clients.BackOfficeClient.AllocationState;
+import appjava.clients.BackOfficeClient.BookAllocationState;
 import appjava.clients.BackOfficeClient.ChildOrderSlice;
+import appjava.clients.BackOfficeClient.ChildExecutionState;
 import appjava.clients.BackOfficeClient.CorporateActionHook;
 import appjava.clients.BackOfficeClient.FeeBreakdown;
+import appjava.clients.BackOfficeClient.ParentExecutionState;
 import appjava.clients.BackOfficeClient.PostTradeStage;
 import appjava.clients.BackOfficeClient.SettlementCheck;
 import appjava.clients.BackOfficeClient.StatementPreview;
@@ -119,6 +123,8 @@ public final class ReplayScenarioService {
         BackOfficeOrderState orderState = buildOrderState(order, snapshot, workingPrice);
         List<LedgerEntry> ledgerEntries = buildLedgerEntries(order, snapshot);
         ExecutionPackage executionPackage = buildExecutionPackage(order, snapshot, marketStructure, workingPrice);
+        ParentExecutionState parentExecutionState = buildParentExecutionState(order, snapshot, executionPackage);
+        AllocationState allocationState = buildAllocationState(order, snapshot, executionPackage);
         PostTradePackage postTradePackage = buildPostTradePackage(order, snapshot, fills, marketStructure);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
@@ -142,6 +148,8 @@ public final class ReplayScenarioService {
         backOfficeClient.replaceFills(order.id(), fills);
         backOfficeClient.replaceLedger(ledgerEntries);
         backOfficeClient.upsertExecutionPackage(executionPackage);
+        backOfficeClient.upsertParentExecutionState(parentExecutionState);
+        backOfficeClient.upsertAllocationState(allocationState);
         backOfficeClient.upsertPostTradePackage(postTradePackage);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
@@ -579,6 +587,114 @@ public final class ReplayScenarioService {
                 new CorporateActionHook("Cash Dividend", "権利落ち後の statement 説明に影響", "position date と record date を結びつける必要がある"),
                 new CorporateActionHook("Stock Split", "保有数量と平均単価の見え方が変わる", "post-trade book の数量換算が必要"),
                 new CorporateActionHook("Tender Offer", "通常受渡と違う案内が必要", "corporate action workflow に引き渡す入口が必要")
+            )
+        );
+    }
+
+    private ParentExecutionState buildParentExecutionState(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        ExecutionPackage executionPackage
+    ) {
+        List<ChildExecutionState> childStates = executionPackage.childOrders().stream()
+            .map(slice -> {
+                long executedQuantity;
+                String state;
+                String nextAction;
+                if (snapshot.status() == OrderStatus.REJECTED) {
+                    executedQuantity = 0L;
+                    state = "REJECTED";
+                    nextAction = "reject reason を確認して再設計";
+                } else if (snapshot.status() == OrderStatus.CANCELED || snapshot.status() == OrderStatus.EXPIRED) {
+                    executedQuantity = 0L;
+                    state = snapshot.status().name();
+                    nextAction = "残数量は再執行方針を別途決める";
+                } else {
+                    long ratioExecuted = Math.min(slice.plannedQuantity(), Math.round((double) snapshot.filledQuantity() * slice.plannedQuantity() / Math.max(1L, order.quantity())));
+                    executedQuantity = ratioExecuted;
+                    state = ratioExecuted >= slice.plannedQuantity()
+                        ? "FILLED"
+                        : ratioExecuted > 0L
+                        ? "WORKING"
+                        : "QUEUED";
+                    nextAction = ratioExecuted >= slice.plannedQuantity()
+                        ? "次 slice へ進む"
+                        : snapshot.remainingQuantity() > 0L
+                        ? "participation を確認しつつ残数量を継続"
+                        : "親注文完了";
+                }
+                return new ChildExecutionState(
+                    slice.id(),
+                    state,
+                    slice.venueIntent(),
+                    slice.plannedQuantity(),
+                    executedQuantity,
+                    Math.max(0L, slice.plannedQuantity() - executedQuantity),
+                    slice.benchmarkPrice(),
+                    executedQuantity > 0L ? slice.expectedFillPrice() : 0.0,
+                    executedQuantity > 0L ? slice.expectedSlippageBps() : 0.0,
+                    nextAction
+                );
+            })
+            .toList();
+
+        return new ParentExecutionState(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            snapshot.status().name(),
+            executionPackage.parentOrderPlan().chosenStyle(),
+            executionPackage.parentOrderPlan().totalQuantity(),
+            snapshot.filledQuantity(),
+            snapshot.remainingQuantity(),
+            executionPackage.parentOrderPlan().targetParticipationPercent(),
+            round2(snapshot.filledQuantity() <= 0L ? 0.0 : ((double) snapshot.filledQuantity() / Math.max(1L, order.quantity())) * 100.0),
+            executionPackage.parentOrderPlan().scheduleWindowMinutes() + "分",
+            childStates,
+            List.of(
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "partial fill の間は arrival benchmark と remaining quantity を同時に追う" : "親注文の benchmark は固定して child の判断だけを動かす",
+                snapshot.status() == OrderStatus.REJECTED ? "reject 後に working state を成功扱いへ丸めない" : "child state の executed total と parent filled total を一致させる",
+                snapshot.remainingQuantity() > 0L ? "未約定残は close まで carry するか cancel するかを operator が決める" : "親注文完了後に allocation を fix する"
+            )
+        );
+    }
+
+    private AllocationState buildAllocationState(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        ExecutionPackage executionPackage
+    ) {
+        long allocatedQuantity = snapshot.filledQuantity();
+        List<BookAllocationState> books = executionPackage.allocationPlan().allocations().stream()
+            .map(book -> {
+                long target = book.quantity();
+                long allocated = snapshot.filledQuantity() <= 0L ? 0L : Math.min(target, Math.round((double) allocatedQuantity * target / Math.max(1L, executionPackage.allocationPlan().totalQuantity())));
+                String status = allocated >= target && target > 0L
+                    ? "ALLOCATED"
+                    : allocated > 0L
+                    ? "PARTIAL"
+                    : snapshot.filledQuantity() <= 0L
+                    ? "PENDING_FILL"
+                    : "PENDING";
+                return new BookAllocationState(book.targetBook(), target, allocated, status, book.note());
+            })
+            .toList();
+
+        return new AllocationState(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            snapshot.filledQuantity() <= 0L ? "PENDING_FILL" : snapshot.remainingQuantity() > 0L ? "PARTIAL" : "ALLOCATED",
+            allocatedQuantity,
+            Math.max(0L, order.quantity() - allocatedQuantity),
+            executionPackage.allocationPlan().averagePrice(),
+            books,
+            List.of(
+                "book 配賦の合計数量と parent fill 総数を一致させる",
+                "allocation は child fill 単価ではなく平均単価を基準にする",
+                snapshot.remainingQuantity() > 0L ? "working 中は未配賦残を持ち、statement へ先出ししない" : "配賦完了後に statement と confirm の数量を閉じる"
             )
         );
     }

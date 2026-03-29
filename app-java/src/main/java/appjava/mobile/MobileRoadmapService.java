@@ -42,8 +42,10 @@ public final class MobileRoadmapService {
         OrderView anchorOrder = latestOrder();
         if (anchorOrder != null) {
             BackOfficeClient.ExecutionPackage executionPackage = backOfficeClient.fetchExecutionPackage(anchorOrder.id());
+            BackOfficeClient.ParentExecutionState parentExecutionState = backOfficeClient.fetchParentExecutionState(anchorOrder.id());
+            BackOfficeClient.AllocationState allocationState = backOfficeClient.fetchAllocationState(anchorOrder.id());
             if (executionPackage != null) {
-                return mapExecutionPackage(executionPackage, anchorOrder.id());
+                return mapExecutionPackage(executionPackage, anchorOrder.id(), parentExecutionState, allocationState);
             }
         }
         String symbol = anchorOrder == null ? "7203" : anchorOrder.symbol();
@@ -122,6 +124,8 @@ public final class MobileRoadmapService {
                     "care order と DMA を混在させる場合も allocation の truth は親注文 fill 総数に置く"
                 )
             ),
+            null,
+            null,
             List.of(
                 "arrival benchmark を親注文単位で固定しているか",
                 "participation rate を market volume の変化に応じて上下させた理由を説明できるか",
@@ -579,7 +583,12 @@ public final class MobileRoadmapService {
         );
     }
 
-    private InstitutionalFlowResponse mapExecutionPackage(BackOfficeClient.ExecutionPackage executionPackage, String anchorOrderId) {
+    private InstitutionalFlowResponse mapExecutionPackage(
+        BackOfficeClient.ExecutionPackage executionPackage,
+        String anchorOrderId,
+        BackOfficeClient.ParentExecutionState parentExecutionState,
+        BackOfficeClient.AllocationState allocationState
+    ) {
         return new InstitutionalFlowResponse(
             executionPackage.generatedAt(),
             anchorOrderId,
@@ -630,6 +639,47 @@ public final class MobileRoadmapService {
                     .toList(),
                 executionPackage.allocationPlan().settlementNote(),
                 executionPackage.allocationPlan().controlChecks()
+            ),
+            parentExecutionState == null ? null : new ParentExecutionState(
+                parentExecutionState.parentStatus(),
+                parentExecutionState.executionStyle(),
+                parentExecutionState.targetQuantity(),
+                parentExecutionState.executedQuantity(),
+                parentExecutionState.remainingQuantity(),
+                parentExecutionState.participationTargetPercent(),
+                parentExecutionState.participationActualPercent(),
+                parentExecutionState.scheduleWindowLabel(),
+                parentExecutionState.childStates().stream()
+                    .map(child -> new ChildExecutionState(
+                        child.childId(),
+                        child.state(),
+                        child.venueIntent(),
+                        child.plannedQuantity(),
+                        child.executedQuantity(),
+                        child.remainingQuantity(),
+                        child.benchmarkPrice(),
+                        child.averageFillPrice(),
+                        child.slippageBps(),
+                        child.nextAction()
+                    ))
+                    .toList(),
+                parentExecutionState.operatorAlerts()
+            ),
+            allocationState == null ? null : new AllocationState(
+                allocationState.allocationStatus(),
+                allocationState.allocatedQuantity(),
+                allocationState.pendingQuantity(),
+                allocationState.allocationAveragePrice(),
+                allocationState.books().stream()
+                    .map(book -> new AllocationBookState(
+                        book.book(),
+                        book.targetQuantity(),
+                        book.allocatedQuantity(),
+                        book.status(),
+                        book.rationale()
+                    ))
+                    .toList(),
+                allocationState.controls()
             ),
             executionPackage.operatorChecks(),
             institutionalFlowAnchors()
@@ -811,6 +861,8 @@ public final class MobileRoadmapService {
         ParentOrderPlan parentOrderPlan,
         List<ChildOrderSlice> childOrders,
         AllocationPlan allocationPlan,
+        ParentExecutionState parentExecutionState,
+        AllocationState allocationState,
         List<String> operatorChecks,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
@@ -863,6 +915,53 @@ public final class MobileRoadmapService {
         long quantity,
         double ratioPercent,
         String note
+    ) {
+    }
+
+    public record ParentExecutionState(
+        String parentStatus,
+        String executionStyle,
+        long targetQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double participationTargetPercent,
+        double participationActualPercent,
+        String scheduleWindowLabel,
+        List<ChildExecutionState> childStates,
+        List<String> operatorAlerts
+    ) {
+    }
+
+    public record ChildExecutionState(
+        String childId,
+        String state,
+        String venueIntent,
+        long plannedQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double benchmarkPrice,
+        double averageFillPrice,
+        double slippageBps,
+        String nextAction
+    ) {
+    }
+
+    public record AllocationState(
+        String allocationStatus,
+        long allocatedQuantity,
+        long pendingQuantity,
+        double allocationAveragePrice,
+        List<AllocationBookState> books,
+        List<String> controls
+    ) {
+    }
+
+    public record AllocationBookState(
+        String book,
+        long targetQuantity,
+        long allocatedQuantity,
+        String status,
+        String rationale
     ) {
     }
 

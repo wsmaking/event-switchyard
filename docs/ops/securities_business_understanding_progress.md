@@ -995,6 +995,8 @@ repo に入れるべきもの:
 - [x] app-java に live / on-device 両対応の `institutional-flow` API を追加
 - [x] backoffice-java に execution package 正本 read model を追加
 - [x] replay scenario から execution package を upsert し、mobile が正本 package を優先して読む形に変更
+- [x] backoffice-java に parent execution state / allocation state の正本 read model を追加
+- [x] mobile が親注文進捗、child state、allocation state を正本から読めるように変更
 
 追加すべき論点:
 
@@ -1013,8 +1015,8 @@ repo に入れるべきもの:
 - [x] `TWAP / VWAP / POV` を業務意図から説明する
 - [x] fill rate、slippage、残数量戦略の判断カードを追加する
 - [x] execution package を `backoffice-java` の public/internal API で read/write できるようにする
-- [ ] parent order の working state、child slice 実行状態、participation 実測を OMS / BackOffice 正本で持つ
-- [ ] allocation を package 内プレビューではなく独立した正本状態として持つ
+- [x] parent order の working state、child slice 実行状態、participation 実測を OMS / BackOffice 正本で持つ
+- [x] allocation を package 内プレビューではなく独立した正本状態として持つ
 - [ ] replay だけでなく live order から execution package を組み立てる
 
 この優先度で増やすファイル:
@@ -1024,6 +1026,8 @@ repo に入れるべきもの:
 - `app-java/src/main/java/appjava/mobile/MobileRoadmapService.java`
 - `backoffice-java/src/main/java/backofficejava/business/ExecutionPackageView.java`
 - `backoffice-java/src/main/java/backofficejava/http/ExecutionPackageHttpHandler.java`
+- `backoffice-java/src/main/java/backofficejava/business/ParentExecutionStateView.java`
+- `backoffice-java/src/main/java/backofficejava/business/AllocationStateView.java`
 
 ### 優先度 3: post-trade とファイナンス
 

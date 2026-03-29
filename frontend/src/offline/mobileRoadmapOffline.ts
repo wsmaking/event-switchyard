@@ -142,6 +142,8 @@ export function getOfflineMobileInstitutionalFlow(): MobileInstitutionalFlow {
         'care と DMA 混在時も平均価格説明を一本化',
       ],
     },
+    parentExecutionState: null,
+    allocationState: null,
     operatorChecks: [
       'arrival benchmark を親注文単位で固定しているか',
       'participation rate を market volume 変化に応じて見直した理由を言えるか',

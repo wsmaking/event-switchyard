@@ -125,6 +125,44 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public ParentExecutionState fetchParentExecutionState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/parent-execution-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ParentExecutionState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public AllocationState fetchAllocationState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/allocation-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), AllocationState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -159,6 +197,14 @@ public final class BackOfficeClient {
 
     public void upsertPostTradePackage(PostTradePackage postTradePackage) {
         postJson("/internal/business/post-trade-package/upsert", postTradePackage);
+    }
+
+    public void upsertParentExecutionState(ParentExecutionState parentExecutionState) {
+        postJson("/internal/business/parent-execution-state/upsert", parentExecutionState);
+    }
+
+    public void upsertAllocationState(AllocationState allocationState) {
+        postJson("/internal/business/allocation-state/upsert", allocationState);
     }
 
     public BackOfficeStats fetchStats() {
@@ -515,6 +561,61 @@ public final class BackOfficeClient {
         String name,
         String businessImpact,
         String systemImpact
+    ) {
+    }
+
+    public record ParentExecutionState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String parentStatus,
+        String executionStyle,
+        long targetQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double participationTargetPercent,
+        double participationActualPercent,
+        String scheduleWindowLabel,
+        List<ChildExecutionState> childStates,
+        List<String> operatorAlerts
+    ) {
+    }
+
+    public record ChildExecutionState(
+        String childId,
+        String state,
+        String venueIntent,
+        long plannedQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double benchmarkPrice,
+        double averageFillPrice,
+        double slippageBps,
+        String nextAction
+    ) {
+    }
+
+    public record AllocationState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String allocationStatus,
+        long allocatedQuantity,
+        long pendingQuantity,
+        double allocationAveragePrice,
+        List<BookAllocationState> books,
+        List<String> controls
+    ) {
+    }
+
+    public record BookAllocationState(
+        String book,
+        long targetQuantity,
+        long allocatedQuantity,
+        String status,
+        String rationale
     ) {
     }
 

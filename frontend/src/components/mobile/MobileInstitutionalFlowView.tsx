@@ -110,6 +110,51 @@ export function MobileInstitutionalFlowView({ onNavigate }: MobileInstitutionalF
         ))}
       </section>
 
+      {data.parentExecutionState && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">親注文の進捗</div>
+          <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+            <MetricCard label="status" value={data.parentExecutionState.parentStatus} />
+            <MetricCard label="style" value={data.parentExecutionState.executionStyle} />
+            <MetricCard label="target" value={`${formatNumber(data.parentExecutionState.targetQuantity)} 株`} />
+            <MetricCard label="executed" value={`${formatNumber(data.parentExecutionState.executedQuantity)} 株`} />
+            <MetricCard label="remaining" value={`${formatNumber(data.parentExecutionState.remainingQuantity)} 株`} />
+            <MetricCard label="window" value={data.parentExecutionState.scheduleWindowLabel} />
+            <MetricCard label="target participation" value={formatPercent(data.parentExecutionState.participationTargetPercent, 0)} />
+            <MetricCard label="actual participation" value={formatPercent(data.parentExecutionState.participationActualPercent, 0)} />
+          </div>
+          <div className="mt-4 space-y-2">
+            {data.parentExecutionState.operatorAlerts.map((alert) => (
+              <div key={alert} className="rounded-2xl border border-amber-300/15 bg-amber-500/10 px-3 py-3 text-sm leading-6 text-amber-50/90">
+                {alert}
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.parentExecutionState.childStates.map((child) => (
+              <div key={child.childId} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-white">{child.childId}</div>
+                    <div className="mt-1 text-xs text-slate-400">{child.venueIntent}</div>
+                  </div>
+                  <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{child.state}</div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <MetricCard label="planned" value={`${formatNumber(child.plannedQuantity)} 株`} />
+                  <MetricCard label="executed" value={`${formatNumber(child.executedQuantity)} 株`} />
+                  <MetricCard label="remaining" value={`${formatNumber(child.remainingQuantity)} 株`} />
+                  <MetricCard label="avg fill" value={child.executedQuantity > 0 ? formatCurrency(child.averageFillPrice) : '-'} />
+                </div>
+                <div className="mt-3 rounded-2xl border border-white/8 bg-black/20 px-3 py-3 text-xs leading-5 text-slate-300">
+                  {child.nextAction}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
         <div className="text-sm font-semibold text-white">配賦とブロック説明</div>
         <div className="mt-2 text-sm leading-6 text-slate-300">{data.allocationPlan.settlementNote}</div>
@@ -130,6 +175,40 @@ export function MobileInstitutionalFlowView({ onNavigate }: MobileInstitutionalF
           ))}
         </div>
       </section>
+
+      {data.allocationState && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">配賦の正本状態</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="status" value={data.allocationState.allocationStatus} />
+            <MetricCard label="avg price" value={formatCurrency(data.allocationState.allocationAveragePrice)} />
+            <MetricCard label="allocated" value={`${formatNumber(data.allocationState.allocatedQuantity)} 株`} />
+            <MetricCard label="pending" value={`${formatNumber(data.allocationState.pendingQuantity)} 株`} />
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.allocationState.books.map((book) => (
+              <div key={book.book} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-white">{book.book}</div>
+                  <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{book.status}</div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <MetricCard label="target" value={`${formatNumber(book.targetQuantity)} 株`} />
+                  <MetricCard label="allocated" value={`${formatNumber(book.allocatedQuantity)} 株`} />
+                </div>
+                <div className="mt-3 text-xs leading-5 text-slate-400">{book.rationale}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 space-y-2">
+            {data.allocationState.controls.map((control) => (
+              <div key={control} className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3 text-sm leading-6 text-slate-300">
+                {control}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <ChecklistSection title="運用で確認すること" items={data.operatorChecks} />
       <AnchorsSection anchors={data.implementationAnchors} />

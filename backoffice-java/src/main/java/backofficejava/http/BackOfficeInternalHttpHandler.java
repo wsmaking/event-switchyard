@@ -10,8 +10,12 @@ import backofficejava.account.OrderProjectionState;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
+import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.AllocationStateView;
 import backofficejava.business.ExecutionPackageReadModel;
 import backofficejava.business.ExecutionPackageView;
+import backofficejava.business.ParentExecutionStateReadModel;
+import backofficejava.business.ParentExecutionStateView;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.PostTradePackageView;
 import com.sun.net.httpserver.HttpExchange;
@@ -26,7 +30,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
         ExecutionPackageReadModel executionPackageReadModel,
-        PostTradePackageReadModel postTradePackageReadModel
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -36,7 +42,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             orderProjectionStateStore,
             ledgerReadModel,
             executionPackageReadModel,
-            postTradePackageReadModel
+            postTradePackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel
         ));
     }
 
@@ -48,7 +56,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
         ExecutionPackageReadModel executionPackageReadModel,
-        PostTradePackageReadModel postTradePackageReadModel
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -87,6 +97,16 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             postTradePackageReadModel.upsert(request);
             return JsonResponse.ok(request);
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/parent-execution-state/upsert".equals(path)) {
+            ParentExecutionStateView request = readJson(exchange, ParentExecutionStateView.class);
+            parentExecutionStateReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/allocation-state/upsert".equals(path)) {
+            AllocationStateView request = readJson(exchange, AllocationStateView.class);
+            allocationStateReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -95,6 +115,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             ledgerReadModel.reset();
             executionPackageReadModel.reset();
             postTradePackageReadModel.reset();
+            parentExecutionStateReadModel.reset();
+            allocationStateReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

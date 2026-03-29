@@ -5,7 +5,9 @@ import backofficejava.account.FillReadModel;
 import backofficejava.account.LedgerReadModel;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
+import backofficejava.business.AllocationStateReadModel;
 import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import com.sun.net.httpserver.HttpExchange;
 
@@ -17,7 +19,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
         ExecutionPackageReadModel executionPackageReadModel,
-        PostTradePackageReadModel postTradePackageReadModel
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -27,7 +31,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
             orderProjectionStateStore,
             ledgerReadModel,
             executionPackageReadModel,
-            postTradePackageReadModel
+            postTradePackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel
         ));
     }
 
@@ -39,7 +45,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
         ExecutionPackageReadModel executionPackageReadModel,
-        PostTradePackageReadModel postTradePackageReadModel
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel
     ) {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             return new JsonResponse(204, new ResetResponse("OK"));
@@ -54,6 +62,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         ledgerReadModel.reset();
         executionPackageReadModel.reset();
         postTradePackageReadModel.reset();
+        parentExecutionStateReadModel.reset();
+        allocationStateReadModel.reset();
         return JsonResponse.ok(new ResetResponse("RESET"));
     }
 

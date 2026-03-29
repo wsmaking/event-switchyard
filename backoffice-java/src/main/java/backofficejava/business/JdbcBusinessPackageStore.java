@@ -30,6 +30,14 @@ public final class JdbcBusinessPackageStore {
         return new PostTradePackageAdapter(this);
     }
 
+    public ParentExecutionStateReadModel parentExecutionStateReadModel() {
+        return new ParentExecutionStateAdapter(this);
+    }
+
+    public AllocationStateReadModel allocationStateReadModel() {
+        return new AllocationStateAdapter(this);
+    }
+
     private Optional<ExecutionPackageView> loadExecutionPackage(String orderId) {
         return load(orderId, "bo_execution_packages", ExecutionPackageView.class);
     }
@@ -44,6 +52,22 @@ public final class JdbcBusinessPackageStore {
 
     private void upsertPostTradePackage(PostTradePackageView view) {
         upsert("bo_post_trade_packages", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<ParentExecutionStateView> loadParentExecutionState(String orderId) {
+        return load(orderId, "bo_parent_execution_states", ParentExecutionStateView.class);
+    }
+
+    private void upsertParentExecutionState(ParentExecutionStateView view) {
+        upsert("bo_parent_execution_states", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<AllocationStateView> loadAllocationState(String orderId) {
+        return load(orderId, "bo_allocation_states", AllocationStateView.class);
+    }
+
+    private void upsertAllocationState(AllocationStateView view) {
+        upsert("bo_allocation_states", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
     }
 
     private <T> Optional<T> load(String orderId, String tableName, Class<T> type) {
@@ -94,10 +118,14 @@ public final class JdbcBusinessPackageStore {
         try (
             Connection connection = connectionFactory.openConnection();
             PreparedStatement executionDelete = connection.prepareStatement("DELETE FROM bo_execution_packages");
-            PreparedStatement postTradeDelete = connection.prepareStatement("DELETE FROM bo_post_trade_packages")
+            PreparedStatement postTradeDelete = connection.prepareStatement("DELETE FROM bo_post_trade_packages");
+            PreparedStatement parentExecutionDelete = connection.prepareStatement("DELETE FROM bo_parent_execution_states");
+            PreparedStatement allocationDelete = connection.prepareStatement("DELETE FROM bo_allocation_states")
         ) {
             executionDelete.executeUpdate();
             postTradeDelete.executeUpdate();
+            parentExecutionDelete.executeUpdate();
+            allocationDelete.executeUpdate();
         } catch (SQLException exception) {
             throw new IllegalStateException("failed_to_reset_business_packages", exception);
         }
@@ -129,6 +157,40 @@ public final class JdbcBusinessPackageStore {
         @Override
         public void upsert(PostTradePackageView view) {
             store.upsertPostTradePackage(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record ParentExecutionStateAdapter(JdbcBusinessPackageStore store) implements ParentExecutionStateReadModel {
+        @Override
+        public Optional<ParentExecutionStateView> findByOrderId(String orderId) {
+            return store.loadParentExecutionState(orderId);
+        }
+
+        @Override
+        public void upsert(ParentExecutionStateView view) {
+            store.upsertParentExecutionState(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record AllocationStateAdapter(JdbcBusinessPackageStore store) implements AllocationStateReadModel {
+        @Override
+        public Optional<AllocationStateView> findByOrderId(String orderId) {
+            return store.loadAllocationState(orderId);
+        }
+
+        @Override
+        public void upsert(AllocationStateView view) {
+            store.upsertAllocationState(view);
         }
 
         @Override

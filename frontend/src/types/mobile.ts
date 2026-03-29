@@ -315,6 +315,43 @@ export interface MobileInstitutionalFlow {
     settlementNote: string;
     controlChecks: string[];
   };
+  parentExecutionState: {
+    parentStatus: string;
+    executionStyle: string;
+    targetQuantity: number;
+    executedQuantity: number;
+    remainingQuantity: number;
+    participationTargetPercent: number;
+    participationActualPercent: number;
+    scheduleWindowLabel: string;
+    childStates: Array<{
+      childId: string;
+      state: string;
+      venueIntent: string;
+      plannedQuantity: number;
+      executedQuantity: number;
+      remainingQuantity: number;
+      benchmarkPrice: number;
+      averageFillPrice: number;
+      slippageBps: number;
+      nextAction: string;
+    }>;
+    operatorAlerts: string[];
+  } | null;
+  allocationState: {
+    allocationStatus: string;
+    allocatedQuantity: number;
+    pendingQuantity: number;
+    allocationAveragePrice: number;
+    books: Array<{
+      book: string;
+      targetQuantity: number;
+      allocatedQuantity: number;
+      status: string;
+      rationale: string;
+    }>;
+    controls: string[];
+  } | null;
   operatorChecks: string[];
   implementationAnchors: MobileImplementationAnchor[];
 }

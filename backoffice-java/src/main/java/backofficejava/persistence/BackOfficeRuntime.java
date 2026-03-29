@@ -10,7 +10,9 @@ import backofficejava.audit.AuditOffsetStore;
 import backofficejava.audit.DeadLetterStore;
 import backofficejava.audit.PendingOrphanStore;
 import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.AllocationStateReadModel;
 
 public record BackOfficeRuntime(
     AccountOverviewReadModel accountOverviewReadModel,
@@ -20,6 +22,8 @@ public record BackOfficeRuntime(
     LedgerReadModel ledgerReadModel,
     ExecutionPackageReadModel executionPackageReadModel,
     PostTradePackageReadModel postTradePackageReadModel,
+    ParentExecutionStateReadModel parentExecutionStateReadModel,
+    AllocationStateReadModel allocationStateReadModel,
     AuditOffsetStore auditOffsetStore,
     DeadLetterStore deadLetterStore,
     PendingOrphanStore pendingOrphanStore,
