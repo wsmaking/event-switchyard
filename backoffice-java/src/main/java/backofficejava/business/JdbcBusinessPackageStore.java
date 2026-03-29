@@ -38,6 +38,14 @@ public final class JdbcBusinessPackageStore {
         return new AllocationStateAdapter(this);
     }
 
+    public SettlementProjectionReadModel settlementProjectionReadModel() {
+        return new SettlementProjectionAdapter(this);
+    }
+
+    public StatementProjectionReadModel statementProjectionReadModel() {
+        return new StatementProjectionAdapter(this);
+    }
+
     private Optional<ExecutionPackageView> loadExecutionPackage(String orderId) {
         return load(orderId, "bo_execution_packages", ExecutionPackageView.class);
     }
@@ -68,6 +76,22 @@ public final class JdbcBusinessPackageStore {
 
     private void upsertAllocationState(AllocationStateView view) {
         upsert("bo_allocation_states", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<SettlementProjectionView> loadSettlementProjection(String orderId) {
+        return load(orderId, "bo_settlement_projections", SettlementProjectionView.class);
+    }
+
+    private void upsertSettlementProjection(SettlementProjectionView view) {
+        upsert("bo_settlement_projections", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<StatementProjectionView> loadStatementProjection(String orderId) {
+        return load(orderId, "bo_statement_projections", StatementProjectionView.class);
+    }
+
+    private void upsertStatementProjection(StatementProjectionView view) {
+        upsert("bo_statement_projections", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
     }
 
     private <T> Optional<T> load(String orderId, String tableName, Class<T> type) {
@@ -120,12 +144,16 @@ public final class JdbcBusinessPackageStore {
             PreparedStatement executionDelete = connection.prepareStatement("DELETE FROM bo_execution_packages");
             PreparedStatement postTradeDelete = connection.prepareStatement("DELETE FROM bo_post_trade_packages");
             PreparedStatement parentExecutionDelete = connection.prepareStatement("DELETE FROM bo_parent_execution_states");
-            PreparedStatement allocationDelete = connection.prepareStatement("DELETE FROM bo_allocation_states")
+            PreparedStatement allocationDelete = connection.prepareStatement("DELETE FROM bo_allocation_states");
+            PreparedStatement settlementDelete = connection.prepareStatement("DELETE FROM bo_settlement_projections");
+            PreparedStatement statementDelete = connection.prepareStatement("DELETE FROM bo_statement_projections")
         ) {
             executionDelete.executeUpdate();
             postTradeDelete.executeUpdate();
             parentExecutionDelete.executeUpdate();
             allocationDelete.executeUpdate();
+            settlementDelete.executeUpdate();
+            statementDelete.executeUpdate();
         } catch (SQLException exception) {
             throw new IllegalStateException("failed_to_reset_business_packages", exception);
         }
@@ -191,6 +219,40 @@ public final class JdbcBusinessPackageStore {
         @Override
         public void upsert(AllocationStateView view) {
             store.upsertAllocationState(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record SettlementProjectionAdapter(JdbcBusinessPackageStore store) implements SettlementProjectionReadModel {
+        @Override
+        public Optional<SettlementProjectionView> findByOrderId(String orderId) {
+            return store.loadSettlementProjection(orderId);
+        }
+
+        @Override
+        public void upsert(SettlementProjectionView view) {
+            store.upsertSettlementProjection(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record StatementProjectionAdapter(JdbcBusinessPackageStore store) implements StatementProjectionReadModel {
+        @Override
+        public Optional<StatementProjectionView> findByOrderId(String orderId) {
+            return store.loadStatementProjection(orderId);
+        }
+
+        @Override
+        public void upsert(StatementProjectionView view) {
+            store.upsertStatementProjection(view);
         }
 
         @Override

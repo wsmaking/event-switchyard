@@ -93,6 +93,60 @@ export function MobilePostTradeView({ onNavigate }: MobilePostTradeViewProps) {
       </section>
 
       <SimpleListSection title="Settlement の確認点" items={data.settlementChecks.map((check) => `${check.title}: ${check.rule} / ${check.currentValue}`)} />
+      {data.settlementProjection && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">受渡の正本状態</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="status" value={data.settlementProjection.settlementStatus} />
+            <MetricCard label="trade date" value={data.settlementProjection.tradeDateLabel} />
+            <MetricCard label="settlement" value={data.settlementProjection.settlementDateLabel} />
+            <MetricCard label="settled qty" value={`${data.settlementProjection.settledQuantity.toLocaleString('ja-JP')} 株`} />
+            <MetricCard label="cash leg" value={data.settlementProjection.cashLegStatus} />
+            <MetricCard label="securities leg" value={data.settlementProjection.securitiesLegStatus} />
+          </div>
+          <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 px-3 py-3 text-sm leading-6 text-slate-300">
+            {data.settlementProjection.nextAction}
+          </div>
+          <div className="mt-4 space-y-2">
+            {data.settlementProjection.exceptionFlags.map((flag) => (
+              <div key={flag} className="rounded-2xl border border-amber-300/15 bg-amber-500/10 px-3 py-3 text-sm leading-6 text-amber-50/90">
+                {flag}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {data.statementProjection && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">Confirm / Statement の正本状態</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="statement status" value={data.statementProjection.statementStatus} />
+            <MetricCard label="confirm ref" value={data.statementProjection.confirmReference} />
+            <MetricCard label="statement ref" value={data.statementProjection.statementReference} />
+          </div>
+          <div className="mt-4 rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3 text-sm leading-6 text-slate-200">
+            {data.statementProjection.customerFacingSummary}
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.statementProjection.lines.map((line) => (
+              <div key={`${line.label}-${line.value}`} className="rounded-[20px] border border-white/8 bg-black/20 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-white">{line.label}</div>
+                  <div className="text-sm text-slate-200">{line.value}</div>
+                </div>
+                <div className="mt-2 text-xs leading-5 text-slate-400">{line.note}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 space-y-2">
+            {data.statementProjection.controls.map((control) => (
+              <div key={control} className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3 text-sm leading-6 text-slate-300">
+                {control}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       <SimpleListSection title="Corporate Action 入口" items={data.corporateActionHooks.map((hook) => `${hook.name}: ${hook.businessImpact} / ${hook.systemImpact}`)} />
       <AnchorsSection anchors={data.implementationAnchors} />
     </div>

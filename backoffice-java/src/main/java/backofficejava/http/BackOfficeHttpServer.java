@@ -11,6 +11,8 @@ import backofficejava.business.AllocationStateReadModel;
 import backofficejava.business.ExecutionPackageReadModel;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -28,6 +30,8 @@ public final class BackOfficeHttpServer {
     private final PostTradePackageReadModel postTradePackageReadModel;
     private final ParentExecutionStateReadModel parentExecutionStateReadModel;
     private final AllocationStateReadModel allocationStateReadModel;
+    private final SettlementProjectionReadModel settlementProjectionReadModel;
+    private final StatementProjectionReadModel statementProjectionReadModel;
     private final GatewayAuditIntakeService intakeService;
     private final BusEventIntakeService busEventIntakeService;
 
@@ -42,6 +46,8 @@ public final class BackOfficeHttpServer {
         PostTradePackageReadModel postTradePackageReadModel,
         ParentExecutionStateReadModel parentExecutionStateReadModel,
         AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel,
         GatewayAuditIntakeService intakeService,
         BusEventIntakeService busEventIntakeService
     ) {
@@ -55,6 +61,8 @@ public final class BackOfficeHttpServer {
         this.postTradePackageReadModel = postTradePackageReadModel;
         this.parentExecutionStateReadModel = parentExecutionStateReadModel;
         this.allocationStateReadModel = allocationStateReadModel;
+        this.settlementProjectionReadModel = settlementProjectionReadModel;
+        this.statementProjectionReadModel = statementProjectionReadModel;
         this.intakeService = intakeService;
         this.busEventIntakeService = busEventIntakeService;
     }
@@ -76,6 +84,8 @@ public final class BackOfficeHttpServer {
         server.createContext("/business/post-trade-package", new PostTradePackageHttpHandler(postTradePackageReadModel));
         server.createContext("/business/parent-execution-state", new ParentExecutionStateHttpHandler(parentExecutionStateReadModel));
         server.createContext("/business/allocation-state", new AllocationStateHttpHandler(allocationStateReadModel));
+        server.createContext("/business/settlement-projection", new SettlementProjectionHttpHandler(settlementProjectionReadModel));
+        server.createContext("/business/statement-projection", new StatementProjectionHttpHandler(statementProjectionReadModel));
         server.createContext(
             "/demo/reset",
             new DemoResetHttpHandler(
@@ -87,7 +97,9 @@ public final class BackOfficeHttpServer {
                 executionPackageReadModel,
                 postTradePackageReadModel,
                 parentExecutionStateReadModel,
-                allocationStateReadModel
+                allocationStateReadModel,
+                settlementProjectionReadModel,
+                statementProjectionReadModel
             )
         );
         server.createContext(
@@ -101,7 +113,9 @@ public final class BackOfficeHttpServer {
                 executionPackageReadModel,
                 postTradePackageReadModel,
                 parentExecutionStateReadModel,
-                allocationStateReadModel
+                allocationStateReadModel,
+                settlementProjectionReadModel,
+                statementProjectionReadModel
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));

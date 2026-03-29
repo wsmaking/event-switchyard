@@ -18,6 +18,10 @@ import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.ParentExecutionStateView;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.PostTradePackageView;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.SettlementProjectionView;
+import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.StatementProjectionView;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.List;
@@ -32,7 +36,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         ExecutionPackageReadModel executionPackageReadModel,
         PostTradePackageReadModel postTradePackageReadModel,
         ParentExecutionStateReadModel parentExecutionStateReadModel,
-        AllocationStateReadModel allocationStateReadModel
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -44,7 +50,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             executionPackageReadModel,
             postTradePackageReadModel,
             parentExecutionStateReadModel,
-            allocationStateReadModel
+            allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel
         ));
     }
 
@@ -58,7 +66,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         ExecutionPackageReadModel executionPackageReadModel,
         PostTradePackageReadModel postTradePackageReadModel,
         ParentExecutionStateReadModel parentExecutionStateReadModel,
-        AllocationStateReadModel allocationStateReadModel
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -107,6 +117,16 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             allocationStateReadModel.upsert(request);
             return JsonResponse.ok(request);
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/settlement-projection/upsert".equals(path)) {
+            SettlementProjectionView request = readJson(exchange, SettlementProjectionView.class);
+            settlementProjectionReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/statement-projection/upsert".equals(path)) {
+            StatementProjectionView request = readJson(exchange, StatementProjectionView.class);
+            statementProjectionReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -117,6 +137,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             postTradePackageReadModel.reset();
             parentExecutionStateReadModel.reset();
             allocationStateReadModel.reset();
+            settlementProjectionReadModel.reset();
+            statementProjectionReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

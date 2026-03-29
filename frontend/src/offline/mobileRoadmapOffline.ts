@@ -215,6 +215,8 @@ export function getOfflineMobilePostTradeGuide(): MobilePostTradeGuide {
       { name: 'Split / Reverse Split', businessImpact: 'quantity と average price の変換が必要', systemImpact: 'order history は変えず position 表示を調整' },
       { name: 'Ticker Change / Merger', businessImpact: 'symbol identity が変わっても会計の連続性を保つ', systemImpact: 'asset master と reporting label を分けて持つ' },
     ],
+    settlementProjection: null,
+    statementProjection: null,
     implementationAnchors: [
       anchor('fills / ledger client', '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/clients/BackOfficeClient.java', 'post-trade 説明のために fills と ledger を引く入口'),
       anchor('BackOffice ledger', '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger', 'cash / position / realized PnL の正本'),

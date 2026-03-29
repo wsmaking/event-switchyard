@@ -31,7 +31,10 @@ import appjava.clients.BackOfficeClient.CorporateActionHook;
 import appjava.clients.BackOfficeClient.FeeBreakdown;
 import appjava.clients.BackOfficeClient.ParentExecutionState;
 import appjava.clients.BackOfficeClient.PostTradeStage;
+import appjava.clients.BackOfficeClient.SettlementProjection;
 import appjava.clients.BackOfficeClient.SettlementCheck;
+import appjava.clients.BackOfficeClient.StatementLine;
+import appjava.clients.BackOfficeClient.StatementProjection;
 import appjava.clients.BackOfficeClient.StatementPreview;
 
 import java.time.Instant;
@@ -126,6 +129,8 @@ public final class ReplayScenarioService {
         ParentExecutionState parentExecutionState = buildParentExecutionState(order, snapshot, executionPackage);
         AllocationState allocationState = buildAllocationState(order, snapshot, executionPackage);
         PostTradePackage postTradePackage = buildPostTradePackage(order, snapshot, fills, marketStructure);
+        SettlementProjection settlementProjection = buildSettlementProjection(order, snapshot, postTradePackage);
+        StatementProjection statementProjection = buildStatementProjection(order, snapshot, postTradePackage);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
             symbol,
@@ -151,6 +156,8 @@ public final class ReplayScenarioService {
         backOfficeClient.upsertParentExecutionState(parentExecutionState);
         backOfficeClient.upsertAllocationState(allocationState);
         backOfficeClient.upsertPostTradePackage(postTradePackage);
+        backOfficeClient.upsertSettlementProjection(settlementProjection);
+        backOfficeClient.upsertStatementProjection(statementProjection);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -695,6 +702,70 @@ public final class ReplayScenarioService {
                 "book 配賦の合計数量と parent fill 総数を一致させる",
                 "allocation は child fill 単価ではなく平均単価を基準にする",
                 snapshot.remainingQuantity() > 0L ? "working 中は未配賦残を持ち、statement へ先出ししない" : "配賦完了後に statement と confirm の数量を閉じる"
+            )
+        );
+    }
+
+    private SettlementProjection buildSettlementProjection(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        PostTradePackage postTradePackage
+    ) {
+        String settlementStatus = snapshot.filledQuantity() <= 0L
+            ? "PENDING_FILL"
+            : snapshot.remainingQuantity() > 0L
+            ? "PARTIAL"
+            : "READY_TO_SETTLE";
+        String cashLegStatus = snapshot.filledQuantity() <= 0L ? "UNPOSTED" : "PENDING_VALUE_DATE";
+        String securitiesLegStatus = snapshot.filledQuantity() <= 0L ? "UNPOSTED" : "PENDING_DELIVERY";
+
+        return new SettlementProjection(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            settlementStatus,
+            "Trade Date " + new java.util.Date(order.submittedAt()),
+            postTradePackage.statementPreview().settlementDateLabel(),
+            postTradePackage.feeBreakdown().grossNotional(),
+            postTradePackage.feeBreakdown().netCashMovement(),
+            postTradePackage.statementPreview().settledQuantity(),
+            cashLegStatus,
+            securitiesLegStatus,
+            List.of(
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "未約定残があるため statement quantity と parent quantity を混同しない" : "受渡数量は fill 済数量だけで確定する",
+                postTradePackage.feeBreakdown().taxes() > 0L ? "sell side の税控除を cash leg に含める" : "buy side は cash outflow のみを扱う"
+            ),
+            snapshot.filledQuantity() <= 0L ? "fill 確定待ち" : "settlement calendar と fail exception を監視する"
+        );
+    }
+
+    private StatementProjection buildStatementProjection(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        PostTradePackage postTradePackage
+    ) {
+        return new StatementProjection(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            snapshot.filledQuantity() <= 0L ? "DRAFT" : "READY",
+            "CONF-" + order.id().toUpperCase(Locale.ROOT),
+            "STMT-" + order.id().toUpperCase(Locale.ROOT),
+            order.symbol() + " " + postTradePackage.statementPreview().settledQuantity() + "株 / 平均 " + postTradePackage.statementPreview().averagePrice(),
+            List.of(
+                new StatementLine("口座", accountId, "statement の受取先"),
+                new StatementLine("銘柄", postTradePackage.statementPreview().symbolName(), "内部 symbol と表示名を分けて保持"),
+                new StatementLine("受渡数量", postTradePackage.statementPreview().settledQuantity() + "株", "fill 済数量のみを使う"),
+                new StatementLine("平均単価", String.valueOf(postTradePackage.statementPreview().averagePrice()), "block average"),
+                new StatementLine("現金移動", postTradePackage.statementPreview().netCashMovementLabel(), "fee/tax 控除後"),
+                new StatementLine("受渡日", postTradePackage.statementPreview().settlementDateLabel(), "trade date と混同しない")
+            ),
+            List.of(
+                "confirm / statement は final-out より短く、対外説明に耐える文言を優先する",
+                "order status が canceled でも fill 済数量があれば statement は draft ではなく partial execution を示す",
+                "顧客向け表現と raw event ref を混在させない"
             )
         );
     }

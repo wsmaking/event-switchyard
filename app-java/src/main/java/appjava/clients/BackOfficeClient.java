@@ -163,6 +163,44 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public SettlementProjection fetchSettlementProjection(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/settlement-projection?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), SettlementProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public StatementProjection fetchStatementProjection(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/statement-projection?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), StatementProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -205,6 +243,14 @@ public final class BackOfficeClient {
 
     public void upsertAllocationState(AllocationState allocationState) {
         postJson("/internal/business/allocation-state/upsert", allocationState);
+    }
+
+    public void upsertSettlementProjection(SettlementProjection settlementProjection) {
+        postJson("/internal/business/settlement-projection/upsert", settlementProjection);
+    }
+
+    public void upsertStatementProjection(StatementProjection statementProjection) {
+        postJson("/internal/business/statement-projection/upsert", statementProjection);
     }
 
     public BackOfficeStats fetchStats() {
@@ -616,6 +662,45 @@ public final class BackOfficeClient {
         long allocatedQuantity,
         String status,
         String rationale
+    ) {
+    }
+
+    public record SettlementProjection(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String settlementStatus,
+        String tradeDateLabel,
+        String settlementDateLabel,
+        long grossNotional,
+        long netCashMovement,
+        long settledQuantity,
+        String cashLegStatus,
+        String securitiesLegStatus,
+        List<String> exceptionFlags,
+        String nextAction
+    ) {
+    }
+
+    public record StatementProjection(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String statementStatus,
+        String confirmReference,
+        String statementReference,
+        String customerFacingSummary,
+        List<StatementLine> lines,
+        List<String> controls
+    ) {
+    }
+
+    public record StatementLine(
+        String label,
+        String value,
+        String note
     ) {
     }
 

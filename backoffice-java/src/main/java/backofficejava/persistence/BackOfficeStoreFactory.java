@@ -29,9 +29,13 @@ import backofficejava.business.InMemoryExecutionPackageReadModel;
 import backofficejava.business.InMemoryAllocationStateReadModel;
 import backofficejava.business.InMemoryParentExecutionStateReadModel;
 import backofficejava.business.InMemoryPostTradePackageReadModel;
+import backofficejava.business.InMemorySettlementProjectionReadModel;
+import backofficejava.business.InMemoryStatementProjectionReadModel;
 import backofficejava.business.JdbcBusinessPackageStore;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,7 +54,8 @@ public final class BackOfficeStoreFactory {
                 "db/migration/V2__backoffice_orphan_state.sql",
                 "db/migration/V3__backoffice_aggregate_progress.sql",
                 "db/migration/V4__backoffice_business_packages.sql",
-                "db/migration/V5__backoffice_institutional_states.sql"
+                "db/migration/V5__backoffice_institutional_states.sql",
+                "db/migration/V6__backoffice_post_trade_projections.sql"
             );
             JdbcBackOfficeStore store = new JdbcBackOfficeStore(connectionFactory, accountId);
             JdbcBusinessPackageStore businessPackageStore = new JdbcBusinessPackageStore(connectionFactory);
@@ -68,6 +73,8 @@ public final class BackOfficeStoreFactory {
                 businessPackageStore.postTradePackageReadModel(),
                 businessPackageStore.parentExecutionStateReadModel(),
                 businessPackageStore.allocationStateReadModel(),
+                businessPackageStore.settlementProjectionReadModel(),
+                businessPackageStore.statementProjectionReadModel(),
                 offsetStore,
                 deadLetterStore,
                 pendingOrphanStore,
@@ -85,6 +92,8 @@ public final class BackOfficeStoreFactory {
         PostTradePackageReadModel postTradePackageReadModel = new InMemoryPostTradePackageReadModel();
         ParentExecutionStateReadModel parentExecutionStateReadModel = new InMemoryParentExecutionStateReadModel();
         AllocationStateReadModel allocationStateReadModel = new InMemoryAllocationStateReadModel();
+        SettlementProjectionReadModel settlementProjectionReadModel = new InMemorySettlementProjectionReadModel();
+        StatementProjectionReadModel statementProjectionReadModel = new InMemoryStatementProjectionReadModel();
         Path offsetPath = resolvePath(
             System.getProperty(
                 "backoffice.gateway.audit.offset.path",
@@ -101,6 +110,8 @@ public final class BackOfficeStoreFactory {
             postTradePackageReadModel,
             parentExecutionStateReadModel,
             allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
             new FileAuditOffsetStore(offsetPath),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),

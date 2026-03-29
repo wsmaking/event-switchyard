@@ -9,6 +9,8 @@ import backofficejava.business.AllocationStateReadModel;
 import backofficejava.business.ExecutionPackageReadModel;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
 import com.sun.net.httpserver.HttpExchange;
 
 public final class DemoResetHttpHandler extends JsonHttpHandler {
@@ -21,7 +23,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         ExecutionPackageReadModel executionPackageReadModel,
         PostTradePackageReadModel postTradePackageReadModel,
         ParentExecutionStateReadModel parentExecutionStateReadModel,
-        AllocationStateReadModel allocationStateReadModel
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -33,7 +37,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
             executionPackageReadModel,
             postTradePackageReadModel,
             parentExecutionStateReadModel,
-            allocationStateReadModel
+            allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel
         ));
     }
 
@@ -47,7 +53,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         ExecutionPackageReadModel executionPackageReadModel,
         PostTradePackageReadModel postTradePackageReadModel,
         ParentExecutionStateReadModel parentExecutionStateReadModel,
-        AllocationStateReadModel allocationStateReadModel
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel
     ) {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             return new JsonResponse(204, new ResetResponse("OK"));
@@ -64,6 +72,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         postTradePackageReadModel.reset();
         parentExecutionStateReadModel.reset();
         allocationStateReadModel.reset();
+        settlementProjectionReadModel.reset();
+        statementProjectionReadModel.reset();
         return JsonResponse.ok(new ResetResponse("RESET"));
     }
 

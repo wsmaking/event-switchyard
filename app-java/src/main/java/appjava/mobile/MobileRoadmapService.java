@@ -140,8 +140,10 @@ public final class MobileRoadmapService {
         OrderView anchorOrder = latestOrder();
         if (anchorOrder != null) {
             BackOfficeClient.PostTradePackage postTradePackage = backOfficeClient.fetchPostTradePackage(anchorOrder.id());
+            BackOfficeClient.SettlementProjection settlementProjection = backOfficeClient.fetchSettlementProjection(anchorOrder.id());
+            BackOfficeClient.StatementProjection statementProjection = backOfficeClient.fetchStatementProjection(anchorOrder.id());
             if (postTradePackage != null) {
-                return mapPostTradePackage(postTradePackage);
+                return mapPostTradePackage(postTradePackage, settlementProjection, statementProjection);
             }
         }
         String orderId = anchorOrder == null ? null : anchorOrder.id();
@@ -206,6 +208,8 @@ public final class MobileRoadmapService {
                 new CorporateActionHook("Split / Reverse Split", "quantity と average price の変換が必要", "order history は変えず position 表示を調整"),
                 new CorporateActionHook("Ticker Change / Merger", "symbol identity が変わっても ledger と statement の連続性を保つ", "asset master と reporting label の分離が必要")
             ),
+            null,
+            null,
             postTradeAnchors()
         );
     }
@@ -686,7 +690,11 @@ public final class MobileRoadmapService {
         );
     }
 
-    private PostTradeGuideResponse mapPostTradePackage(BackOfficeClient.PostTradePackage postTradePackage) {
+    private PostTradeGuideResponse mapPostTradePackage(
+        BackOfficeClient.PostTradePackage postTradePackage,
+        BackOfficeClient.SettlementProjection settlementProjection,
+        BackOfficeClient.StatementProjection statementProjection
+    ) {
         return new PostTradeGuideResponse(
             postTradePackage.generatedAt(),
             postTradePackage.orderId(),
@@ -725,6 +733,28 @@ public final class MobileRoadmapService {
             postTradePackage.corporateActionHooks().stream()
                 .map(hook -> new CorporateActionHook(hook.name(), hook.businessImpact(), hook.systemImpact()))
                 .toList(),
+            settlementProjection == null ? null : new SettlementProjection(
+                settlementProjection.settlementStatus(),
+                settlementProjection.tradeDateLabel(),
+                settlementProjection.settlementDateLabel(),
+                settlementProjection.grossNotional(),
+                settlementProjection.netCashMovement(),
+                settlementProjection.settledQuantity(),
+                settlementProjection.cashLegStatus(),
+                settlementProjection.securitiesLegStatus(),
+                settlementProjection.exceptionFlags(),
+                settlementProjection.nextAction()
+            ),
+            statementProjection == null ? null : new StatementProjection(
+                statementProjection.statementStatus(),
+                statementProjection.confirmReference(),
+                statementProjection.statementReference(),
+                statementProjection.customerFacingSummary(),
+                statementProjection.lines().stream()
+                    .map(line -> new StatementLine(line.label(), line.value(), line.note()))
+                    .toList(),
+                statementProjection.controls()
+            ),
             postTradeAnchors()
         );
     }
@@ -975,6 +1005,8 @@ public final class MobileRoadmapService {
         StatementPreview statementPreview,
         List<SettlementCheck> settlementChecks,
         List<CorporateActionHook> corporateActionHooks,
+        SettlementProjection settlementProjection,
+        StatementProjection statementProjection,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
@@ -1021,6 +1053,37 @@ public final class MobileRoadmapService {
         String name,
         String businessImpact,
         String systemImpact
+    ) {
+    }
+
+    public record SettlementProjection(
+        String settlementStatus,
+        String tradeDateLabel,
+        String settlementDateLabel,
+        long grossNotional,
+        long netCashMovement,
+        long settledQuantity,
+        String cashLegStatus,
+        String securitiesLegStatus,
+        List<String> exceptionFlags,
+        String nextAction
+    ) {
+    }
+
+    public record StatementProjection(
+        String statementStatus,
+        String confirmReference,
+        String statementReference,
+        String customerFacingSummary,
+        List<StatementLine> lines,
+        List<String> controls
+    ) {
+    }
+
+    public record StatementLine(
+        String label,
+        String value,
+        String note
     ) {
     }
 

@@ -396,6 +396,30 @@ export interface MobilePostTradeGuide {
     businessImpact: string;
     systemImpact: string;
   }>;
+  settlementProjection: {
+    settlementStatus: string;
+    tradeDateLabel: string;
+    settlementDateLabel: string;
+    grossNotional: number;
+    netCashMovement: number;
+    settledQuantity: number;
+    cashLegStatus: string;
+    securitiesLegStatus: string;
+    exceptionFlags: string[];
+    nextAction: string;
+  } | null;
+  statementProjection: {
+    statementStatus: string;
+    confirmReference: string;
+    statementReference: string;
+    customerFacingSummary: string;
+    lines: Array<{
+      label: string;
+      value: string;
+      note: string;
+    }>;
+    controls: string[];
+  } | null;
   implementationAnchors: MobileImplementationAnchor[];
 }
 

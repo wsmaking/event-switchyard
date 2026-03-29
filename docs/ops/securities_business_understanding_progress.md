@@ -1042,6 +1042,8 @@ repo に入れるべきもの:
 - [x] app-java に `post-trade` API を追加
 - [x] backoffice-java に post-trade package 正本 read model を追加
 - [x] replay scenario から post-trade package を upsert し、mobile が正本 package を優先して読む形に変更
+- [x] backoffice-java に settlement projection / statement projection の正本 read model を追加
+- [x] mobile が受渡状態と confirm / statement 状態を正本 projection から読めるように変更
 
 追加すべき論点:
 
@@ -1064,8 +1066,8 @@ repo に入れるべきもの:
   の 4 層に分けて見せる
 - [x] fee / tax / confirm を教育用に追加する
 - [x] post-trade package を `backoffice-java` の public/internal API で read/write できるようにする
-- [ ] settlement state を package ではなく独立した正本 projection にする
-- [ ] confirm / statement を独立 read model として持つ
+- [x] settlement state を package ではなく独立した正本 projection にする
+- [x] confirm / statement を独立 read model として持つ
 - [ ] fail / exception / corporate action workflow を BackOffice 本体へ落とす
 
 この優先度で増やすファイル:
@@ -1075,6 +1077,8 @@ repo に入れるべきもの:
 - `frontend/src/offline/mobileRoadmapOffline.ts`
 - `backoffice-java/src/main/java/backofficejava/business/PostTradePackageView.java`
 - `backoffice-java/src/main/java/backofficejava/http/PostTradePackageHttpHandler.java`
+- `backoffice-java/src/main/java/backofficejava/business/SettlementProjectionView.java`
+- `backoffice-java/src/main/java/backofficejava/business/StatementProjectionView.java`
 
 ### 優先度 4: risk の厚み
 

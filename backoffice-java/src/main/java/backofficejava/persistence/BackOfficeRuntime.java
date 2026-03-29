@@ -13,6 +13,8 @@ import backofficejava.business.ExecutionPackageReadModel;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
 
 public record BackOfficeRuntime(
     AccountOverviewReadModel accountOverviewReadModel,
@@ -24,6 +26,8 @@ public record BackOfficeRuntime(
     PostTradePackageReadModel postTradePackageReadModel,
     ParentExecutionStateReadModel parentExecutionStateReadModel,
     AllocationStateReadModel allocationStateReadModel,
+    SettlementProjectionReadModel settlementProjectionReadModel,
+    StatementProjectionReadModel statementProjectionReadModel,
     AuditOffsetStore auditOffsetStore,
     DeadLetterStore deadLetterStore,
     PendingOrphanStore pendingOrphanStore,
