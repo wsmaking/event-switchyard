@@ -24,6 +24,22 @@ application {
     mainClass.set('backofficejava.Main')
 }
 
+def applyDebugAgent = { JavaExec execTask, String portEnv, String defaultPort, String suspendEnv ->
+    String debugPort = System.getenv(portEnv) ?: defaultPort
+    String debugSuspend = System.getenv(suspendEnv) ?: 'n'
+    execTask.jvmArgs "-agentlib:jdwp=transport=dt_socket,server=y,suspend=${debugSuspend},address=*:${debugPort}"
+}
+
+tasks.register('runDebug', JavaExec) { task ->
+    group = 'application'
+    description = 'Run backoffice-java with JDWP enabled'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass.set(application.mainClass)
+    workingDir = rootProject.projectDir
+    applyDebugAgent(task, 'BACKOFFICE_DEBUG_PORT', '5007', 'BACKOFFICE_DEBUG_SUSPEND')
+}
+
 jar {
     manifest { attributes('Main-Class': application.mainClass.get()) }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

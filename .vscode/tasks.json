@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Business Debug Stack: Start",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/ops/run_business_debug_stack.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Business Debug Stack: Stop",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/ops/stop_business_debug_stack.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Business Debug Stack: Smoke",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/ops/smoke_business_debug_stack.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

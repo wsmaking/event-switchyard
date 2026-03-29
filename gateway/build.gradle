@@ -51,6 +51,22 @@ application {
     mainClass.set((findProperty('mainClass') ?: "gateway.MainKt") as String)
 }
 
+def applyDebugAgent = { JavaExec execTask, String portEnv, String defaultPort, String suspendEnv ->
+    String debugPort = System.getenv(portEnv) ?: defaultPort
+    String debugSuspend = System.getenv(suspendEnv) ?: 'n'
+    execTask.jvmArgs "-agentlib:jdwp=transport=dt_socket,server=y,suspend=${debugSuspend},address=*:${debugPort}"
+}
+
+tasks.register('runDebug', JavaExec) { task ->
+    group = 'application'
+    description = 'Run gateway module with JDWP enabled'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass.set(application.mainClass)
+    workingDir = rootProject.projectDir
+    applyDebugAgent(task, 'GATEWAY_SIM_DEBUG_PORT', '5008', 'GATEWAY_SIM_DEBUG_SUSPEND')
+}
+
 jar {
     manifest { attributes('Main-Class': application.mainClass.get()) }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
@@ -82,6 +98,8 @@ def nativeLibName = {
     throw new GradleException("Unsupported OS: ${os}")
 }()
 
+def resolvedGatewayMainClass = (findProperty('mainClass') ?: "gateway.MainKt") as String
+
 task buildRust(type: Exec) {
     description = 'Build Rust gateway-core library'
     group = 'build'
@@ -90,6 +108,9 @@ task buildRust(type: Exec) {
 
     // cargo がなければスキップ
     onlyIf {
+        if (resolvedGatewayMainClass == 'gateway.exchange.TcpExchangeSimulatorMain') {
+            return false
+        }
         try {
             def result = ['which', 'cargo'].execute()
             result.waitFor()
@@ -111,6 +132,9 @@ task copyRustLib(type: Copy) {
     into("${projectDir}/src/main/resources/native")
 
     onlyIf {
+        if (resolvedGatewayMainClass == 'gateway.exchange.TcpExchangeSimulatorMain') {
+            return false
+        }
         def libFile = new File(rustTargetDir, nativeLibName)
         libFile.exists()
     }

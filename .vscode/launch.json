@@ -1,0 +1,67 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "pwa-chrome",
+      "request": "launch",
+      "name": "Frontend (Vite)",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}/frontend"
+    },
+    {
+      "type": "pwa-chrome",
+      "request": "launch",
+      "name": "Frontend (app-java static)",
+      "url": "http://localhost:8080",
+      "webRoot": "${workspaceFolder}/frontend"
+    },
+    {
+      "type": "java",
+      "name": "Attach app-java",
+      "request": "attach",
+      "hostName": "127.0.0.1",
+      "port": 5005
+    },
+    {
+      "type": "java",
+      "name": "Attach oms-java",
+      "request": "attach",
+      "hostName": "127.0.0.1",
+      "port": 5006
+    },
+    {
+      "type": "java",
+      "name": "Attach backoffice-java",
+      "request": "attach",
+      "hostName": "127.0.0.1",
+      "port": 5007
+    },
+    {
+      "type": "java",
+      "name": "Attach tcp-exchange-sim",
+      "request": "attach",
+      "hostName": "127.0.0.1",
+      "port": 5008
+    },
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach gateway-rust",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": [
+        "rust"
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Attach business Java services",
+      "configurations": [
+        "Attach app-java",
+        "Attach oms-java",
+        "Attach backoffice-java",
+        "Attach tcp-exchange-sim"
+      ]
+    }
+  ]
+}

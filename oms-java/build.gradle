@@ -24,6 +24,22 @@ application {
     mainClass.set('oms.Main')
 }
 
+def applyDebugAgent = { JavaExec execTask, String portEnv, String defaultPort, String suspendEnv ->
+    String debugPort = System.getenv(portEnv) ?: defaultPort
+    String debugSuspend = System.getenv(suspendEnv) ?: 'n'
+    execTask.jvmArgs "-agentlib:jdwp=transport=dt_socket,server=y,suspend=${debugSuspend},address=*:${debugPort}"
+}
+
+tasks.register('runDebug', JavaExec) { task ->
+    group = 'application'
+    description = 'Run oms-java with JDWP enabled'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass.set(application.mainClass)
+    workingDir = rootProject.projectDir
+    applyDebugAgent(task, 'OMS_DEBUG_PORT', '5006', 'OMS_DEBUG_SUSPEND')
+}
+
 jar {
     manifest { attributes('Main-Class': application.mainClass.get()) }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

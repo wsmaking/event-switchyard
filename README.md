@@ -318,6 +318,152 @@ runbook:
 
 - [docs/ops/business_mainline_operations_runbook.md](/Users/fujii/Desktop/dev/event-switchyard/docs/ops/business_mainline_operations_runbook.md)
 
+## Business Debug Stack
+
+注文投入から OMS / BackOffice の反映完了までを breakpoint 前提で追う導線です。Docker は不要です。
+
+### 0. 前提
+
+- VS Code は repo root の [event-switchyard](/Users/fujii/Desktop/dev/event-switchyard) を開く
+- frontend 静的配信元は `frontend/dist`
+- state は `var/business-debug/` に分離される
+- Java は JDWP attach、Rust は LLDB attach を使う
+
+### 1. stack 起動
+
+VS Code の task から起動する場合:
+
+- `Terminal -> Run Task...`
+- `Business Debug Stack: Start`
+
+ターミナルから起動する場合:
+
+```bash
+scripts/ops/run_business_debug_stack.sh
+```
+
+起動後の endpoint:
+
+- `app-java`: `http://localhost:8080`
+- `gateway-rust`: `http://localhost:8081`
+- `oms-java`: `http://localhost:18081`
+- `backoffice-java`: `http://localhost:18082`
+- `tcp-exchange-sim`: `127.0.0.1:9901`
+
+debug port:
+
+- `app-java`: `5005`
+- `oms-java`: `5006`
+- `backoffice-java`: `5007`
+- `tcp-exchange-sim`: `5008`
+
+### 2. Java attach
+
+Java 側は 1 回でまとめて attach できます。
+
+- `Run and Debug`
+- launch 設定 `Attach business Java services`
+
+これで次の 4 つに attach します。
+
+- `app-java`
+- `oms-java`
+- `backoffice-java`
+- `tcp-exchange-sim`
+
+### 3. Rust attach
+
+`gateway-rust` は Java compound に含めず、別で attach します。
+
+- `Run and Debug`
+- launch 設定 `Attach gateway-rust`
+- process 一覧から `gateway-rust/target/debug/gateway-rust` を選ぶ
+
+Rust attach には `CodeLLDB` 拡張が必要です。
+
+もし `lldb is not supported` と出る場合:
+
+- VS Code 拡張 `CodeLLDB` を入れる
+
+もし `Not allowed to attach to process` と出る場合:
+
+- macOS `システム設定 -> プライバシーとセキュリティ -> Developer Tools` で VS Code を許可
+- 必要なら次を実行
+
+```bash
+sudo DevToolsSecurity -enable
+```
+
+### 4. breakpoint の貼りどころ
+
+最小なら次の 5 箇所です。
+
+1. gateway 受理
+   - [gateway-rust/src/server/http/orders/classic.rs](gateway-rust/src/server/http/orders/classic.rs)
+   - `handle_order_with_contract`
+2. gateway の venue report 反映
+   - [gateway-rust/src/engine/exchange_worker.rs](gateway-rust/src/engine/exchange_worker.rs)
+   - `apply_execution_report`
+3. OMS 反映
+   - [oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java](oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java)
+   - `applyExecutionReport`
+4. BackOffice 反映
+   - [backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java](backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java)
+   - `applyExecutionReport`
+5. final-out 組み立て
+   - [app-java/src/main/java/appjava/http/OrderApiHandler.java](app-java/src/main/java/appjava/http/OrderApiHandler.java)
+   - `/api/orders/{id}/final-out`
+
+詳細は [docs/ops/debug_business_flow.md](/Users/fujii/Desktop/dev/event-switchyard/docs/ops/debug_business_flow.md)。
+
+### 5. 注文投入
+
+```bash
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"symbol":"7203","side":"BUY","type":"MARKET","quantity":100,"price":null,"timeInForce":"GTC","expireAt":null}'
+```
+
+ここで `gateway-rust -> OMS -> BackOffice` の順に止めて step 実行できます。
+
+### 6. 出力確認
+
+`<orderId>` を実際の注文 ID に置き換えて確認します。
+
+```bash
+curl http://localhost:8080/api/orders/<orderId>/final-out
+curl http://localhost:18081/orders/<orderId>/events
+curl http://localhost:18082/fills?orderId=<orderId>
+curl "http://localhost:18082/ledger?accountId=acct_demo&orderId=<orderId>&limit=20"
+```
+
+確認ポイント:
+
+- `final-out.order.status` が `FILLED`
+- `final-out.fills` に fill 明細が入る
+- OMS event に `ORDER_ACCEPTED -> PARTIAL_FILL / FULL_FILL -> ORDER_UPDATED` が並ぶ
+- BackOffice `fills` と `ledger` に同じ `orderId` の行が入る
+
+自動確認だけしたい場合:
+
+```bash
+scripts/ops/smoke_business_debug_stack.sh
+```
+
+VS Code task なら:
+
+- `Business Debug Stack: Smoke`
+
+### 7. 停止
+
+```bash
+scripts/ops/stop_business_debug_stack.sh
+```
+
+VS Code task なら:
+
+- `Business Debug Stack: Stop`
+
 ## Java Replay Stack
 
 UI から注文し、OMS / BackOffice の最終 out まで追う Java replay 環境は別導線で起動します。
