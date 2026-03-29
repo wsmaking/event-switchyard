@@ -24,17 +24,27 @@ import appjava.order.OrderView;
 import appjava.clients.BackOfficeClient.AllocationPlan;
 import appjava.clients.BackOfficeClient.AllocationSlice;
 import appjava.clients.BackOfficeClient.AllocationState;
+import appjava.clients.BackOfficeClient.AccountHierarchy;
+import appjava.clients.BackOfficeClient.ApprovalRequirement;
+import appjava.clients.BackOfficeClient.BookHierarchy;
 import appjava.clients.BackOfficeClient.BookAllocationState;
 import appjava.clients.BackOfficeClient.ChildOrderSlice;
 import appjava.clients.BackOfficeClient.ChildExecutionState;
 import appjava.clients.BackOfficeClient.CorporateActionHook;
 import appjava.clients.BackOfficeClient.FeeBreakdown;
+import appjava.clients.BackOfficeClient.OperatorAcknowledgement;
+import appjava.clients.BackOfficeClient.OperatorControlState;
 import appjava.clients.BackOfficeClient.ParentExecutionState;
+import appjava.clients.BackOfficeClient.PermissionGrant;
 import appjava.clients.BackOfficeClient.PostTradeStage;
 import appjava.clients.BackOfficeClient.RiskBacktestSample;
 import appjava.clients.BackOfficeClient.RiskBacktestingPreview;
 import appjava.clients.BackOfficeClient.RiskConcentrationMetric;
+import appjava.clients.BackOfficeClient.RiskFactorExposure;
+import appjava.clients.BackOfficeClient.RiskGovernanceCheck;
+import appjava.clients.BackOfficeClient.RiskLimitBreach;
 import appjava.clients.BackOfficeClient.RiskLiquidityMetric;
+import appjava.clients.BackOfficeClient.RiskLiquidityBucket;
 import appjava.clients.BackOfficeClient.RiskModelBoundary;
 import appjava.clients.BackOfficeClient.RiskScenarioLibraryEntry;
 import appjava.clients.BackOfficeClient.RiskSnapshot;
@@ -151,6 +161,8 @@ public final class ReplayScenarioService {
         MarginProjection marginProjection = buildMarginProjection(snapshot, riskSnapshot);
         ScenarioEvaluationHistory scenarioEvaluationHistory = buildScenarioEvaluationHistory(snapshot);
         BacktestHistory backtestHistory = buildBacktestHistory(riskSnapshot);
+        AccountHierarchy accountHierarchy = buildAccountHierarchy(order, snapshot);
+        OperatorControlState operatorControlState = buildOperatorControlState(order, snapshot, parentExecutionState, settlementExceptionWorkflow);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
             symbol,
@@ -184,6 +196,8 @@ public final class ReplayScenarioService {
         backOfficeClient.upsertMarginProjection(marginProjection);
         backOfficeClient.upsertScenarioEvaluationHistory(scenarioEvaluationHistory);
         backOfficeClient.upsertBacktestHistory(backtestHistory);
+        backOfficeClient.upsertAccountHierarchy(accountHierarchy);
+        backOfficeClient.upsertOperatorControlState(operatorControlState);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -839,6 +853,16 @@ public final class ReplayScenarioService {
                 );
             })
             .toList();
+        List<RiskFactorExposure> factorExposures = List.of(
+            new RiskFactorExposure("Japan beta", round2(snapshot.fillNotional() * 0.62), 2_800_000.0, round2(Math.abs(snapshot.fillNotional() * 0.62) / 2_800_000.0 * 100.0), "market beta へ落とした教育用 proxy"),
+            new RiskFactorExposure("Auto / consumer cyclical", round2(snapshot.fillNotional() * 0.48), 2_100_000.0, round2(Math.abs(snapshot.fillNotional() * 0.48) / 2_100_000.0 * 100.0), "sector factor が one-name concentration と重なる"),
+            new RiskFactorExposure("JPY sensitivity", round2(snapshot.fillNotional() * 0.21), 1_200_000.0, round2(Math.abs(snapshot.fillNotional() * 0.21) / 1_200_000.0 * 100.0), "輸出比率の高い銘柄では FX と equities が分離しない")
+        );
+        List<RiskLiquidityBucket> liquidityBuckets = List.of(
+            new RiskLiquidityBucket("same-session", round2(Math.abs(snapshot.fillNotional()) * 0.35), liquidity.stream().anyMatch(metric -> metric.participationPercent() > 120.0) ? 2.4 : 0.8, "top-of-book で閉じない数量は後場へ繰り延べる"),
+            new RiskLiquidityBucket("multi-session", round2(Math.abs(snapshot.fillNotional()) * 0.45), liquidity.stream().anyMatch(metric -> metric.participationPercent() > 120.0) ? 4.8 : 1.6, "care / POV へ切り替えて footprint を抑える"),
+            new RiskLiquidityBucket("event-driven", round2(Math.abs(snapshot.fillNotional()) * 0.20), 6.0, "決算 / halt 後は説明責任が増える")
+        );
 
         List<RiskScenarioLibraryEntry> scenarios = List.of(
             new RiskScenarioLibraryEntry("single-name-gap", "単一銘柄ギャップダウン", "concentration", "-12%", "材料イベントで one-name risk が顕在化", "single-name exposure と liquidity を同時に確認"),
@@ -856,6 +880,16 @@ public final class ReplayScenarioService {
             .map(Math::abs)
             .average()
             .orElse(0.0);
+        List<RiskGovernanceCheck> governanceChecks = List.of(
+            new RiskGovernanceCheck("scenario library freshness", "PASS", "risk", "主要シナリオは営業日単位で更新"),
+            new RiskGovernanceCheck("backtesting breach review", snapshot.status() == OrderStatus.REJECTED ? "WATCH" : "PASS", "risk + control", snapshot.status() == OrderStatus.REJECTED ? "pre-trade reject 後の false positive を review" : "直近 breach は説明可能"),
+            new RiskGovernanceCheck("valuation guard", snapshot.positions().isEmpty() ? "PASS" : "WATCH", "finance", snapshot.positions().isEmpty() ? "ポジションなし" : "market data stale 時は statement を止める")
+        );
+        List<RiskLimitBreach> limitBreaches = List.of(
+            new RiskLimitBreach("single-name concentration", concentration.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "HIGH" : "LOW", concentration.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "WATCH" : "WITHIN_LIMIT", concentration.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "hedge または size down を優先する" : "継続監視"),
+            new RiskLimitBreach("liquidity participation", liquidity.stream().anyMatch(metric -> metric.participationPercent() >= 100.0) ? "HIGH" : "MEDIUM", liquidity.stream().anyMatch(metric -> metric.participationPercent() >= 100.0) ? "WATCH" : "WITHIN_LIMIT", liquidity.stream().anyMatch(metric -> metric.participationPercent() >= 100.0) ? "execution style を care / POV へ変える" : "same-session で閉じられる"),
+            new RiskLimitBreach("margin headroom", snapshot.availableBuyingPower() < 2_000_000L ? "HIGH" : "LOW", snapshot.availableBuyingPower() < 2_000_000L ? "WATCH" : "WITHIN_LIMIT", snapshot.availableBuyingPower() < 2_000_000L ? "new risk を増やさず utilization を再計算する" : "headroom あり")
+        );
 
         return new RiskSnapshot(
             System.currentTimeMillis(),
@@ -863,7 +897,9 @@ public final class ReplayScenarioService {
             round2(marketValue),
             round2(snapshot.cashBalance()),
             concentration,
+            factorExposures,
             liquidity,
+            liquidityBuckets,
             scenarios,
             new RiskBacktestingPreview(
                 samples.size(),
@@ -878,6 +914,8 @@ public final class ReplayScenarioService {
                 new RiskModelBoundary("Scenario Library", "何を shock するかを業務言語に変換", "single-name / market / spread widening", "stochastic correlation、vol surface"),
                 new RiskModelBoundary("Backtesting", "前提が外れた回数をざっくり把握", "簡易 breach count と tail loss", "regulatory backtesting や model governance")
             ),
+            governanceChecks,
+            limitBreaches,
             List.of(
                 concentration.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0)
                     ? "single-name concentration が高く、liquidity と stress を同時に見る必要あり"
@@ -932,7 +970,23 @@ public final class ReplayScenarioService {
                 case REJECTED -> "execution 前 reject で post-trade workflow は起動しない";
                 default -> "追加例外なし";
             },
+            switch (snapshot.status()) {
+                case PARTIALLY_FILLED -> "settlement-ops";
+                case CANCELED, EXPIRED -> "middle-office";
+                case REJECTED -> "front-control";
+                default -> "none";
+            },
+            snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "T+1 午前" : "当日中",
+            snapshot.status() == OrderStatus.PARTIALLY_FILLED ? Math.round(snapshot.fillNotional() * 0.02) : 0L,
+            snapshot.status() == OrderStatus.PARTIALLY_FILLED ? snapshot.remainingQuantity() : 0L,
+            snapshot.status() == OrderStatus.REJECTED,
+            snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "DAY_1" : "NONE",
             nextAction,
+            List.of(
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "cash break を allocation 平均単価と照合する" : "cash break なし",
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "security break は remaining quantity 起因で説明する" : "security break なし",
+                snapshot.status() == OrderStatus.REJECTED ? "cancel/correct は不要" : "cancel/correct 要否を settlement team が確認"
+            ),
             List.of(
                 "fill quantity と settlement quantity を同一視しない",
                 "statement draft を final-out 完了より先に確定しない",
@@ -964,6 +1018,8 @@ public final class ReplayScenarioService {
                 ? "保有数量と平均単価の説明に corporate action を織り込む必要がある"
                 : "保有残が無いので顧客向け影響は限定的",
             eventName + " が発生すると statement line と position quantity の見え方が変わる",
+            "books and records は pre/post event の statement 連続性を優先する",
+            snapshot.filledQuantity() > 0L ? "pre-event / post-event statement を event ref で結ぶ" : "continuity check not required",
             snapshot.filledQuantity() > 0L ? "asset master と statement 文面を同時に更新する" : "watch list のみ更新する",
             List.of(
                 "order history は変えず position / statement 側で変換する",
@@ -1014,7 +1070,13 @@ public final class ReplayScenarioService {
                 "reservation は order-level の拘束、margin は portfolio-level の許容度",
                 "資産相関と清算機関ルールは簡略化している",
                 "feed stale 時は valuation と margin の両方を guard 対象にする"
-            )
+            ),
+            List.of(
+                snapshot.filledQuantity() > 0L ? "fill 済 notional が利用率を押し上げた" : "working order reservation が headroom を圧迫した",
+                riskSnapshot.liquidityBuckets().stream().anyMatch(bucket -> bucket.stressedExitDays() > 3.0) ? "liquidity add-on を適用" : "liquidity add-on は軽微",
+                riskSnapshot.limitBreaches().stream().anyMatch(breach -> "WATCH".equals(breach.state())) ? "limit breach workflow を margin review に反映" : "limit breach なし"
+            ),
+            breachStatus.equals("BREACH") ? "next 15m" : "next 1h"
         );
     }
 
@@ -1023,6 +1085,9 @@ public final class ReplayScenarioService {
             System.currentTimeMillis(),
             accountId,
             "latest replay at " + new java.util.Date(snapshot.statusEventAt() != null ? snapshot.statusEventAt() : System.currentTimeMillis()),
+            snapshot.status() == OrderStatus.REJECTED ? "WATCH" : "APPROVED",
+            "risk-sim-v2",
+            List.of("risk lead approval", "control note attached"),
             List.of(
                 new ScenarioEvaluationEntry("single-name gap", "-12%", round2(-snapshot.fillNotional() * 0.12), "one-name shock の最初の説明軸"),
                 new ScenarioEvaluationEntry("market beta down", "-5%", round2(-snapshot.fillNotional() * 0.05), "gross / net の影響を見る軸"),
@@ -1036,7 +1101,12 @@ public final class ReplayScenarioService {
             System.currentTimeMillis(),
             accountId,
             "直近 8 tick",
+            "board top + replay fills",
             riskSnapshot.backtesting().breachRatePercent(),
+            List.of(
+                "holiday / auction session は除外",
+                "venue fragmentation は未反映"
+            ),
             riskSnapshot.backtesting().samples().stream()
                 .map(sample -> new BacktestHistoryPoint(
                     sample.label(),
@@ -1045,6 +1115,83 @@ public final class ReplayScenarioService {
                     sample.breached() ? "loss limit を超えたサンプル" : "想定範囲内"
                 ))
                 .toList()
+        );
+    }
+
+    private AccountHierarchy buildAccountHierarchy(OrderView order, ScenarioSnapshot snapshot) {
+        return new AccountHierarchy(
+            System.currentTimeMillis(),
+            accountId,
+            "switchyard client alpha",
+            "Switchyard Securities Japan",
+            "JP",
+            "cash-equities",
+            snapshot.status() == OrderStatus.REJECTED ? "risk-control" : "benchmark-plus",
+            "demo-clearing-broker",
+            "demo-custodian",
+            List.of(
+                new BookHierarchy("Switchyard Japan Fund", "japan-long-only", "acct-jp-long-01", "desk-trader-a", "TSE/JASDEC", "benchmark tracking"),
+                new BookHierarchy("Switchyard Event Fund", "event-driven", "acct-event-02", "desk-trader-b", "TSE/JASDEC", "event capture"),
+                new BookHierarchy("Switchyard Multi Strategy", "multi-strat", "acct-ms-03", "desk-trader-c", "TSE/JASDEC", "liquidity recycling")
+            ),
+            List.of(
+                new PermissionGrant("trader", "order-entry", List.of("submit order", "cancel working order", "request care escalation"), false, "新規リスクを増やす行為は trader scope"),
+                new PermissionGrant("sales-trader", "care-order", List.of("switch to care", "approve block communication", "ack client note"), true, "顧客向け説明を伴う"),
+                new PermissionGrant("middle-office", "allocation-settlement", List.of("approve allocation", "ack settlement exception", "release statement"), true, "books and records を閉じる権限"),
+                new PermissionGrant("risk-control", "limit-override", List.of("reduce-only", "deny new risk", "force re-evaluate margin"), true, "override は承認必須")
+            ),
+            List.of(
+                "client -> legal entity -> desk -> fund -> book -> sub-account の順で辿る",
+                "allocation と statement は同じ hierarchy 上で説明できる必要がある",
+                "権限は UI ではなく book / workflow 単位で切る"
+            ),
+            List.of(
+                "book hierarchy と allocation ratio の合計を一致させる",
+                "statement recipient と custodian leg を混同しない",
+                "role ごとに permitted / blocked actions を audit trail に残す"
+            )
+        );
+    }
+
+    private OperatorControlState buildOperatorControlState(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        ParentExecutionState parentExecutionState,
+        SettlementExceptionWorkflow settlementExceptionWorkflow
+    ) {
+        String workflowState = switch (snapshot.status()) {
+            case PARTIALLY_FILLED -> "AWAITING_ALLOCATION_ACK";
+            case REJECTED -> "RISK_REVIEW";
+            case CANCELED, EXPIRED -> "RELEASE_RECORDED";
+            default -> "CLEAR";
+        };
+        return new OperatorControlState(
+            System.currentTimeMillis(),
+            order.id(),
+            accountId,
+            workflowState,
+            snapshot.status() == OrderStatus.REJECTED ? "HIGH" : snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "MEDIUM" : "LOW",
+            List.of(
+                new ApprovalRequirement("allocation approval", "middle-office", snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "REQUIRED" : "CLEAR", "partial fill は block average と配賦総数の確認が必要", "book allocation を確認して statement draft を更新する"),
+                new ApprovalRequirement("risk acknowledgement", "risk-control", snapshot.status() == OrderStatus.REJECTED ? "REQUIRED" : "CLEAR", "pre-trade reject は deny 理由を残す必要がある", "limit breach と entitlement を operator log に残す"),
+                new ApprovalRequirement("books release", "back-office", settlementExceptionWorkflow.workflowStatus().equals("CLEAR") ? "CLEAR" : "REQUIRED", "books and records を閉じる前に exception workflow を確認する", "settlement / statement を解放する")
+            ),
+            List.of(
+                new OperatorAcknowledgement("desk-trader-a", "arrival benchmark fixed", "T+0 09:00", "parent benchmark を固定"),
+                new OperatorAcknowledgement("middle-office", "allocation sanity check", "T+0 15:35", snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "partial allocation review pending" : "allocation ready"),
+                new OperatorAcknowledgement("back-office", "books release review", "T+1 08:10", settlementExceptionWorkflow.workflowStatus().equals("CLEAR") ? "release ready" : "exception watch")
+            ),
+            List.of("submit child order", "cancel remaining", "request care escalation", "ack settlement workflow"),
+            List.of(
+                snapshot.status() == OrderStatus.REJECTED ? "release new risk" : "none",
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "final statement release" : "none"
+            ),
+            List.of(
+                "workflow=" + workflowState,
+                "parentStatus=" + (parentExecutionState == null ? "N/A" : parentExecutionState.parentStatus()),
+                "settlementWorkflow=" + settlementExceptionWorkflow.workflowStatus(),
+                "operator action は order status ではなく workflow state と一緒に残す"
+            )
         );
     }
 

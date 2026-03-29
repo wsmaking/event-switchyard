@@ -19,6 +19,8 @@ import backofficejava.business.CorporateActionWorkflowReadModel;
 import backofficejava.business.MarginProjectionReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -48,6 +50,8 @@ public final class Main {
         MarginProjectionReadModel marginProjectionReadModel = runtime.marginProjectionReadModel();
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel = runtime.scenarioEvaluationHistoryReadModel();
         BacktestHistoryReadModel backtestHistoryReadModel = runtime.backtestHistoryReadModel();
+        AccountHierarchyReadModel accountHierarchyReadModel = runtime.accountHierarchyReadModel();
+        OperatorControlStateReadModel operatorControlStateReadModel = runtime.operatorControlStateReadModel();
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -79,6 +83,8 @@ public final class Main {
             marginProjectionReadModel,
             scenarioEvaluationHistoryReadModel,
             backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel,
             intakeService,
             busEventIntakeService
         );

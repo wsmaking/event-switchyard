@@ -8,10 +8,14 @@ public record RiskSnapshotView(
     double marketValue,
     double cashBalance,
     List<ConcentrationMetricView> concentration,
+    List<FactorExposureView> factorExposures,
     List<LiquidityMetricView> liquidity,
+    List<LiquidityBucketView> liquidityBuckets,
     List<ScenarioLibraryEntryView> scenarioLibrary,
     BacktestingPreviewView backtesting,
     List<ModelBoundaryView> modelBoundaries,
+    List<GovernanceCheckView> governanceChecks,
+    List<LimitBreachView> limitBreaches,
     List<String> marginAlerts
 ) {
     public record ConcentrationMetricView(
@@ -31,6 +35,23 @@ public record RiskSnapshotView(
         double participationPercent,
         double estimatedDaysToExit,
         String note
+    ) {
+    }
+
+    public record FactorExposureView(
+        String factor,
+        double exposure,
+        double limit,
+        double utilizationPercent,
+        String note
+    ) {
+    }
+
+    public record LiquidityBucketView(
+        String bucket,
+        double grossExposure,
+        double stressedExitDays,
+        String action
     ) {
     }
 
@@ -65,6 +86,22 @@ public record RiskSnapshotView(
         String whyItMatters,
         String whatIncluded,
         String whatExcluded
+    ) {
+    }
+
+    public record GovernanceCheckView(
+        String title,
+        String state,
+        String owner,
+        String note
+    ) {
+    }
+
+    public record LimitBreachView(
+        String limitName,
+        String severity,
+        String state,
+        String nextAction
     ) {
     }
 }

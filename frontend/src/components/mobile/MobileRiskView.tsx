@@ -228,6 +228,26 @@ export function MobileRiskView() {
                     </div>
                   ))}
                 </div>
+                <div className="mt-4">
+                  <div className="text-xs uppercase tracking-[0.14em] text-slate-500">Factor Exposures</div>
+                  <div className="mt-3 space-y-3">
+                    {deepDive.factorExposures.map((item) => (
+                      <div key={item.factor} className="rounded-[20px] border border-white/8 bg-black/20 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-white">{item.factor}</div>
+                          <div className="rounded-full border border-amber-300/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-100">
+                            {formatPercent(item.utilizationPercent, 1)}
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <RiskMetric label="Exposure" value={formatCurrency(item.exposure)} />
+                          <RiskMetric label="Limit" value={formatCurrency(item.limit)} />
+                        </div>
+                        <div className="mt-3 text-xs leading-5 text-slate-400">{item.note}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 <div className="mt-4 space-y-3">
                   {deepDive.liquidity.map((item) => (
                     <div key={`${item.symbol}-liq`} className="rounded-[20px] border border-white/8 bg-black/20 px-4 py-4">
@@ -246,6 +266,26 @@ export function MobileRiskView() {
                       <div className="mt-3 text-xs leading-5 text-slate-400">{item.note}</div>
                     </div>
                   ))}
+                </div>
+                <div className="mt-4">
+                  <div className="text-xs uppercase tracking-[0.14em] text-slate-500">Liquidity Buckets</div>
+                  <div className="mt-3 space-y-3">
+                    {deepDive.liquidityBuckets.map((bucket) => (
+                      <div key={bucket.bucket} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-white">{bucket.bucket}</div>
+                          <div className="rounded-full border border-cyan-300/30 bg-cyan-500/10 px-3 py-1 text-[11px] text-cyan-100">
+                            {bucket.stressedExitDays.toFixed(1)}d
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                          <RiskMetric label="Gross" value={formatCurrency(bucket.grossExposure)} />
+                          <RiskMetric label="Exit Days" value={`${bucket.stressedExitDays.toFixed(1)}d`} />
+                        </div>
+                        <div className="mt-3 text-xs leading-5 text-slate-400">{bucket.action}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </section>
 
@@ -310,6 +350,11 @@ export function MobileRiskView() {
                     <RiskMetric label="Utilization" value={formatPercent(deepDive.marginProjection.utilizationPercent, 1)} />
                   </div>
                   <div className="mt-4 space-y-2">
+                    {deepDive.marginProjection.marginChangeDrivers.map((item) => (
+                      <div key={item} className="rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
+                        driver: {item}
+                      </div>
+                    ))}
                     {deepDive.marginProjection.breachedLimits.map((item) => (
                       <div key={item} className="rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
                         {item}
@@ -326,6 +371,9 @@ export function MobileRiskView() {
                       </div>
                     ))}
                   </div>
+                  <div className="mt-4 rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3 text-sm leading-6 text-slate-300">
+                    next review: {deepDive.marginProjection.nextReviewWindowLabel}
+                  </div>
                 </section>
               )}
 
@@ -333,6 +381,17 @@ export function MobileRiskView() {
                 <section className="rounded-[24px] border border-cyan-300/20 bg-cyan-500/10 p-4">
                   <div className="text-sm font-semibold text-cyan-50">Scenario Evaluation History</div>
                   <div className="mt-2 text-xs leading-5 text-cyan-100/80">{deepDive.scenarioEvaluationHistory.lastEvaluatedAtLabel}</div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <RiskMetric label="Governance" value={deepDive.scenarioEvaluationHistory.governanceState} />
+                    <RiskMetric label="Model" value={deepDive.scenarioEvaluationHistory.modelVersion} />
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {deepDive.scenarioEvaluationHistory.approvals.map((item) => (
+                      <div key={item} className="rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+                        approval: {item}
+                      </div>
+                    ))}
+                  </div>
                   <div className="mt-4 space-y-3">
                     {deepDive.scenarioEvaluationHistory.evaluations.map((item) => (
                       <div key={`${item.title}-${item.shock}`} className="rounded-[20px] border border-cyan-200/20 bg-black/20 px-4 py-4">
@@ -354,6 +413,14 @@ export function MobileRiskView() {
                   <div className="mt-2 text-xs leading-5 text-slate-400">
                     {deepDive.backtestHistory.windowLabel} / breach {formatPercent(deepDive.backtestHistory.breachRatePercent, 1)}
                   </div>
+                  <div className="mt-2 text-xs leading-5 text-slate-400">{deepDive.backtestHistory.coverageLabel}</div>
+                  <div className="mt-4 space-y-2">
+                    {deepDive.backtestHistory.exceptions.map((item) => (
+                      <div key={item} className="rounded-2xl border border-amber-300/15 bg-amber-500/10 px-3 py-3 text-sm leading-6 text-amber-50/90">
+                        exception: {item}
+                      </div>
+                    ))}
+                  </div>
                   <div className="mt-4 space-y-2">
                     {deepDive.backtestHistory.history.map((point) => (
                       <div key={`${point.label}-${point.pnl}`} className="rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3">
@@ -369,6 +436,33 @@ export function MobileRiskView() {
                   </div>
                 </section>
               )}
+
+              <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+                <div className="text-sm font-semibold text-white">Governance と Limit Breach</div>
+                <div className="mt-4 space-y-3">
+                  {deepDive.governanceChecks.map((item) => (
+                    <div key={item.title} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-white">{item.title}</div>
+                        <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{item.state}</div>
+                      </div>
+                      <div className="mt-2 text-xs leading-5 text-slate-400">owner: {item.owner}</div>
+                      <div className="mt-3 text-sm leading-6 text-slate-300">{item.note}</div>
+                    </div>
+                  ))}
+                  {deepDive.limitBreaches.map((item) => (
+                    <div key={item.limitName} className="rounded-[20px] border border-rose-300/20 bg-rose-500/10 px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-rose-50">{item.limitName}</div>
+                        <div className="rounded-full border border-rose-200/20 bg-black/20 px-3 py-1 text-[11px] text-rose-100">
+                          {item.severity} / {item.state}
+                        </div>
+                      </div>
+                      <div className="mt-3 text-sm leading-6 text-rose-50/90">{item.nextAction}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </>
           )}
         </>

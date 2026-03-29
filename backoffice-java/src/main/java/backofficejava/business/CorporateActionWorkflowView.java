@@ -13,6 +13,8 @@ public record CorporateActionWorkflowView(
     String effectiveDateLabel,
     String customerImpact,
     String ledgerImpact,
+    String booksRecordImpact,
+    String ledgerContinuityCheck,
     String nextAction,
     List<String> controls
 ) {

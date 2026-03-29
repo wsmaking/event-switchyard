@@ -17,6 +17,8 @@ import backofficejava.business.CorporateActionWorkflowReadModel;
 import backofficejava.business.MarginProjectionReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 import com.sun.net.httpserver.HttpExchange;
 
 public final class DemoResetHttpHandler extends JsonHttpHandler {
@@ -37,7 +39,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
         MarginProjectionReadModel marginProjectionReadModel,
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
-        BacktestHistoryReadModel backtestHistoryReadModel
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -57,7 +61,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
             corporateActionWorkflowReadModel,
             marginProjectionReadModel,
             scenarioEvaluationHistoryReadModel,
-            backtestHistoryReadModel
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel
         ));
     }
 
@@ -79,7 +85,9 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
         MarginProjectionReadModel marginProjectionReadModel,
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
-        BacktestHistoryReadModel backtestHistoryReadModel
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             return new JsonResponse(204, new ResetResponse("OK"));
@@ -104,6 +112,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         marginProjectionReadModel.reset();
         scenarioEvaluationHistoryReadModel.reset();
         backtestHistoryReadModel.reset();
+        accountHierarchyReadModel.reset();
+        operatorControlStateReadModel.reset();
         return JsonResponse.ok(new ResetResponse("RESET"));
     }
 

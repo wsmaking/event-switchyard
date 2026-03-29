@@ -19,6 +19,8 @@ import backofficejava.business.CorporateActionWorkflowReadModel;
 import backofficejava.business.MarginProjectionReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -44,6 +46,8 @@ public final class BackOfficeHttpServer {
     private final MarginProjectionReadModel marginProjectionReadModel;
     private final ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel;
     private final BacktestHistoryReadModel backtestHistoryReadModel;
+    private final AccountHierarchyReadModel accountHierarchyReadModel;
+    private final OperatorControlStateReadModel operatorControlStateReadModel;
     private final GatewayAuditIntakeService intakeService;
     private final BusEventIntakeService busEventIntakeService;
 
@@ -66,6 +70,8 @@ public final class BackOfficeHttpServer {
         MarginProjectionReadModel marginProjectionReadModel,
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
         BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel,
         GatewayAuditIntakeService intakeService,
         BusEventIntakeService busEventIntakeService
     ) {
@@ -87,6 +93,8 @@ public final class BackOfficeHttpServer {
         this.marginProjectionReadModel = marginProjectionReadModel;
         this.scenarioEvaluationHistoryReadModel = scenarioEvaluationHistoryReadModel;
         this.backtestHistoryReadModel = backtestHistoryReadModel;
+        this.accountHierarchyReadModel = accountHierarchyReadModel;
+        this.operatorControlStateReadModel = operatorControlStateReadModel;
         this.intakeService = intakeService;
         this.busEventIntakeService = busEventIntakeService;
     }
@@ -116,6 +124,8 @@ public final class BackOfficeHttpServer {
         server.createContext("/business/margin-projection", new MarginProjectionHttpHandler(marginProjectionReadModel));
         server.createContext("/business/scenario-evaluation-history", new ScenarioEvaluationHistoryHttpHandler(scenarioEvaluationHistoryReadModel));
         server.createContext("/business/backtest-history", new BacktestHistoryHttpHandler(backtestHistoryReadModel));
+        server.createContext("/business/account-hierarchy", new AccountHierarchyHttpHandler(accountHierarchyReadModel));
+        server.createContext("/business/operator-control-state", new OperatorControlStateHttpHandler(operatorControlStateReadModel));
         server.createContext(
             "/demo/reset",
             new DemoResetHttpHandler(
@@ -135,7 +145,9 @@ public final class BackOfficeHttpServer {
                 corporateActionWorkflowReadModel,
                 marginProjectionReadModel,
                 scenarioEvaluationHistoryReadModel,
-                backtestHistoryReadModel
+                backtestHistoryReadModel,
+                accountHierarchyReadModel,
+                operatorControlStateReadModel
             )
         );
         server.createContext(
@@ -157,7 +169,9 @@ public final class BackOfficeHttpServer {
                 corporateActionWorkflowReadModel,
                 marginProjectionReadModel,
                 scenarioEvaluationHistoryReadModel,
-                backtestHistoryReadModel
+                backtestHistoryReadModel,
+                accountHierarchyReadModel,
+                operatorControlStateReadModel
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));

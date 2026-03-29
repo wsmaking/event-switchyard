@@ -315,6 +315,44 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public AccountHierarchy fetchAccountHierarchy(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/account-hierarchy?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), AccountHierarchy.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public OperatorControlState fetchOperatorControlState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/operator-control-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), OperatorControlState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -389,6 +427,14 @@ public final class BackOfficeClient {
 
     public void upsertBacktestHistory(BacktestHistory history) {
         postJson("/internal/business/backtest-history/upsert", history);
+    }
+
+    public void upsertAccountHierarchy(AccountHierarchy hierarchy) {
+        postJson("/internal/business/account-hierarchy/upsert", hierarchy);
+    }
+
+    public void upsertOperatorControlState(OperatorControlState controlState) {
+        postJson("/internal/business/operator-control-state/upsert", controlState);
     }
 
     public BackOfficeStats fetchStats() {
@@ -848,10 +894,14 @@ public final class BackOfficeClient {
         double marketValue,
         double cashBalance,
         List<RiskConcentrationMetric> concentration,
+        List<RiskFactorExposure> factorExposures,
         List<RiskLiquidityMetric> liquidity,
+        List<RiskLiquidityBucket> liquidityBuckets,
         List<RiskScenarioLibraryEntry> scenarioLibrary,
         RiskBacktestingPreview backtesting,
         List<RiskModelBoundary> modelBoundaries,
+        List<RiskGovernanceCheck> governanceChecks,
+        List<RiskLimitBreach> limitBreaches,
         List<String> marginAlerts
     ) {
     }
@@ -873,6 +923,23 @@ public final class BackOfficeClient {
         double participationPercent,
         double estimatedDaysToExit,
         String note
+    ) {
+    }
+
+    public record RiskFactorExposure(
+        String factor,
+        double exposure,
+        double limit,
+        double utilizationPercent,
+        String note
+    ) {
+    }
+
+    public record RiskLiquidityBucket(
+        String bucket,
+        double grossExposure,
+        double stressedExitDays,
+        String action
     ) {
     }
 
@@ -910,6 +977,22 @@ public final class BackOfficeClient {
     ) {
     }
 
+    public record RiskGovernanceCheck(
+        String title,
+        String state,
+        String owner,
+        String note
+    ) {
+    }
+
+    public record RiskLimitBreach(
+        String limitName,
+        String severity,
+        String state,
+        String nextAction
+    ) {
+    }
+
     public record SettlementExceptionWorkflow(
         long generatedAt,
         String orderId,
@@ -920,7 +1003,14 @@ public final class BackOfficeClient {
         String blockedStage,
         String ageingLabel,
         String rootCause,
+        String exceptionOwner,
+        String resolutionEtaLabel,
+        long cashBreakAmount,
+        long securitiesBreakQuantity,
+        boolean cancelCorrectRequired,
+        String failAgingBucket,
         String nextAction,
+        List<String> breakDetails,
         List<String> controls,
         List<String> operatorNotes
     ) {
@@ -937,6 +1027,8 @@ public final class BackOfficeClient {
         String effectiveDateLabel,
         String customerImpact,
         String ledgerImpact,
+        String booksRecordImpact,
+        String ledgerContinuityCheck,
         String nextAction,
         List<String> controls
     ) {
@@ -952,7 +1044,9 @@ public final class BackOfficeClient {
         String breachStatus,
         List<String> breachedLimits,
         List<String> requiredActions,
-        List<String> modelNotes
+        List<String> modelNotes,
+        List<String> marginChangeDrivers,
+        String nextReviewWindowLabel
     ) {
     }
 
@@ -960,6 +1054,9 @@ public final class BackOfficeClient {
         long generatedAt,
         String accountId,
         String lastEvaluatedAtLabel,
+        String governanceState,
+        String modelVersion,
+        List<String> approvals,
         List<ScenarioEvaluationEntry> evaluations
     ) {
     }
@@ -976,8 +1073,77 @@ public final class BackOfficeClient {
         long generatedAt,
         String accountId,
         String windowLabel,
+        String coverageLabel,
         double breachRatePercent,
+        List<String> exceptions,
         List<BacktestHistoryPoint> history
+    ) {
+    }
+
+    public record AccountHierarchy(
+        long generatedAt,
+        String accountId,
+        String clientName,
+        String legalEntity,
+        String region,
+        String desk,
+        String strategy,
+        String clearingBroker,
+        String custodian,
+        List<BookHierarchy> books,
+        List<PermissionGrant> permissions,
+        List<String> reportingLines,
+        List<String> controlChecks
+    ) {
+    }
+
+    public record BookHierarchy(
+        String fund,
+        String book,
+        String subAccount,
+        String trader,
+        String settlementLocation,
+        String mandate
+    ) {
+    }
+
+    public record PermissionGrant(
+        String role,
+        String scope,
+        List<String> actions,
+        boolean approvalRequired,
+        String note
+    ) {
+    }
+
+    public record OperatorControlState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String workflowState,
+        String escalationLevel,
+        List<ApprovalRequirement> requiredApprovals,
+        List<OperatorAcknowledgement> acknowledgements,
+        List<String> permittedActions,
+        List<String> blockedActions,
+        List<String> auditTrail
+    ) {
+    }
+
+    public record ApprovalRequirement(
+        String name,
+        String role,
+        String state,
+        String reason,
+        String nextAction
+    ) {
+    }
+
+    public record OperatorAcknowledgement(
+        String actor,
+        String action,
+        String atLabel,
+        String note
     ) {
     }
 

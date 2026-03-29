@@ -12,7 +12,14 @@ public record SettlementExceptionWorkflowView(
     String blockedStage,
     String ageingLabel,
     String rootCause,
+    String exceptionOwner,
+    String resolutionEtaLabel,
+    long cashBreakAmount,
+    long securitiesBreakQuantity,
+    boolean cancelCorrectRequired,
+    String failAgingBucket,
     String nextAction,
+    List<String> breakDetails,
     List<String> controls,
     List<String> operatorNotes
 ) {

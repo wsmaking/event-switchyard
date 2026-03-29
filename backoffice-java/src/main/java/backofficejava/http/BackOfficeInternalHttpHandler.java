@@ -34,6 +34,10 @@ import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryView;
 import backofficejava.business.BacktestHistoryReadModel;
 import backofficejava.business.BacktestHistoryView;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.AccountHierarchyView;
+import backofficejava.business.OperatorControlStateReadModel;
+import backofficejava.business.OperatorControlStateView;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.List;
@@ -56,7 +60,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
         MarginProjectionReadModel marginProjectionReadModel,
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
-        BacktestHistoryReadModel backtestHistoryReadModel
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -76,7 +82,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             corporateActionWorkflowReadModel,
             marginProjectionReadModel,
             scenarioEvaluationHistoryReadModel,
-            backtestHistoryReadModel
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel
         ));
     }
 
@@ -98,7 +106,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
         MarginProjectionReadModel marginProjectionReadModel,
         ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
-        BacktestHistoryReadModel backtestHistoryReadModel
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -187,6 +197,16 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             backtestHistoryReadModel.upsert(request);
             return JsonResponse.ok(request);
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/account-hierarchy/upsert".equals(path)) {
+            AccountHierarchyView request = readJson(exchange, AccountHierarchyView.class);
+            accountHierarchyReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/operator-control-state/upsert".equals(path)) {
+            OperatorControlStateView request = readJson(exchange, OperatorControlStateView.class);
+            operatorControlStateReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -205,6 +225,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             marginProjectionReadModel.reset();
             scenarioEvaluationHistoryReadModel.reset();
             backtestHistoryReadModel.reset();
+            accountHierarchyReadModel.reset();
+            operatorControlStateReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

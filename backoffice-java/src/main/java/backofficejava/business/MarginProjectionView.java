@@ -12,6 +12,8 @@ public record MarginProjectionView(
     String breachStatus,
     List<String> breachedLimits,
     List<String> requiredActions,
-    List<String> modelNotes
+    List<String> modelNotes,
+    List<String> marginChangeDrivers,
+    String nextReviewWindowLabel
 ) {
 }

@@ -70,6 +70,14 @@ public final class JdbcBusinessPackageStore {
         return new BacktestHistoryAdapter(this);
     }
 
+    public AccountHierarchyReadModel accountHierarchyReadModel() {
+        return new AccountHierarchyAdapter(this);
+    }
+
+    public OperatorControlStateReadModel operatorControlStateReadModel() {
+        return new OperatorControlStateAdapter(this);
+    }
+
     private Optional<ExecutionPackageView> loadExecutionPackage(String orderId) {
         return load(orderId, "bo_execution_packages", ExecutionPackageView.class);
     }
@@ -180,6 +188,22 @@ public final class JdbcBusinessPackageStore {
         upsertByAccountId("bo_backtest_histories", view.accountId(), view.generatedAt(), view);
     }
 
+    private Optional<AccountHierarchyView> loadAccountHierarchy(String accountId) {
+        return loadByAccountId(accountId, "bo_account_hierarchies", AccountHierarchyView.class);
+    }
+
+    private void upsertAccountHierarchy(AccountHierarchyView view) {
+        upsertByAccountId("bo_account_hierarchies", view.accountId(), view.generatedAt(), view);
+    }
+
+    private Optional<OperatorControlStateView> loadOperatorControlState(String orderId) {
+        return load(orderId, "bo_operator_control_states", OperatorControlStateView.class);
+    }
+
+    private void upsertOperatorControlState(OperatorControlStateView view) {
+        upsert("bo_operator_control_states", view.orderId(), view.accountId(), "__control__", view.generatedAt(), view);
+    }
+
     private <T> Optional<T> loadByAccountId(String accountId, String tableName, Class<T> type) {
         String sql = "SELECT payload FROM " + tableName + " WHERE account_id = ?";
         try (
@@ -278,7 +302,9 @@ public final class JdbcBusinessPackageStore {
             PreparedStatement corporateActionDelete = connection.prepareStatement("DELETE FROM bo_corporate_action_workflows");
             PreparedStatement marginProjectionDelete = connection.prepareStatement("DELETE FROM bo_margin_projections");
             PreparedStatement scenarioHistoryDelete = connection.prepareStatement("DELETE FROM bo_scenario_evaluation_histories");
-            PreparedStatement backtestHistoryDelete = connection.prepareStatement("DELETE FROM bo_backtest_histories")
+            PreparedStatement backtestHistoryDelete = connection.prepareStatement("DELETE FROM bo_backtest_histories");
+            PreparedStatement accountHierarchyDelete = connection.prepareStatement("DELETE FROM bo_account_hierarchies");
+            PreparedStatement operatorControlDelete = connection.prepareStatement("DELETE FROM bo_operator_control_states")
         ) {
             executionDelete.executeUpdate();
             postTradeDelete.executeUpdate();
@@ -292,6 +318,8 @@ public final class JdbcBusinessPackageStore {
             marginProjectionDelete.executeUpdate();
             scenarioHistoryDelete.executeUpdate();
             backtestHistoryDelete.executeUpdate();
+            accountHierarchyDelete.executeUpdate();
+            operatorControlDelete.executeUpdate();
         } catch (SQLException exception) {
             throw new IllegalStateException("failed_to_reset_business_packages", exception);
         }
@@ -493,6 +521,40 @@ public final class JdbcBusinessPackageStore {
         @Override
         public void upsert(BacktestHistoryView view) {
             store.upsertBacktestHistory(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record AccountHierarchyAdapter(JdbcBusinessPackageStore store) implements AccountHierarchyReadModel {
+        @Override
+        public Optional<AccountHierarchyView> findByAccountId(String accountId) {
+            return store.loadAccountHierarchy(accountId);
+        }
+
+        @Override
+        public void upsert(AccountHierarchyView view) {
+            store.upsertAccountHierarchy(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record OperatorControlStateAdapter(JdbcBusinessPackageStore store) implements OperatorControlStateReadModel {
+        @Override
+        public Optional<OperatorControlStateView> findByOrderId(String orderId) {
+            return store.loadOperatorControlState(orderId);
+        }
+
+        @Override
+        public void upsert(OperatorControlStateView view) {
+            store.upsertOperatorControlState(view);
         }
 
         @Override

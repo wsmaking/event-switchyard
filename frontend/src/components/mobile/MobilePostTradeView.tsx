@@ -155,6 +155,12 @@ export function MobilePostTradeView({ onNavigate }: MobilePostTradeViewProps) {
             <MetricCard label="exception" value={data.settlementExceptionWorkflow.exceptionType} />
             <MetricCard label="blocked stage" value={data.settlementExceptionWorkflow.blockedStage} />
             <MetricCard label="ageing" value={data.settlementExceptionWorkflow.ageingLabel} />
+            <MetricCard label="owner" value={data.settlementExceptionWorkflow.exceptionOwner} />
+            <MetricCard label="ETA" value={data.settlementExceptionWorkflow.resolutionEtaLabel} />
+            <MetricCard label="cash break" value={formatCurrency(data.settlementExceptionWorkflow.cashBreakAmount)} />
+            <MetricCard label="sec break" value={`${data.settlementExceptionWorkflow.securitiesBreakQuantity}`} />
+            <MetricCard label="fail bucket" value={data.settlementExceptionWorkflow.failAgingBucket} />
+            <MetricCard label="cancel/correct" value={data.settlementExceptionWorkflow.cancelCorrectRequired ? 'required' : 'not required'} />
           </div>
           <div className="mt-4 rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
             {data.settlementExceptionWorkflow.rootCause}
@@ -162,6 +168,7 @@ export function MobilePostTradeView({ onNavigate }: MobilePostTradeViewProps) {
           <div className="mt-3 rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
             next: {data.settlementExceptionWorkflow.nextAction}
           </div>
+          <SimpleListSection title="Break Details" items={data.settlementExceptionWorkflow.breakDetails} />
           <SimpleListSection title="Controls" items={data.settlementExceptionWorkflow.controls} />
           <SimpleListSection title="Operator Notes" items={data.settlementExceptionWorkflow.operatorNotes} />
         </section>
@@ -183,9 +190,43 @@ export function MobilePostTradeView({ onNavigate }: MobilePostTradeViewProps) {
             ledger impact: {data.corporateActionWorkflow.ledgerImpact}
           </div>
           <div className="mt-3 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+            books impact: {data.corporateActionWorkflow.booksRecordImpact}
+          </div>
+          <div className="mt-3 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+            continuity: {data.corporateActionWorkflow.ledgerContinuityCheck}
+          </div>
+          <div className="mt-3 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
             next: {data.corporateActionWorkflow.nextAction}
           </div>
           <SimpleListSection title="Workflow Controls" items={data.corporateActionWorkflow.controls} />
+        </section>
+      )}
+      {data.accountHierarchy && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">Entity / Book Context</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="client" value={data.accountHierarchy.clientName} />
+            <MetricCard label="entity" value={data.accountHierarchy.legalEntity} />
+            <MetricCard label="desk" value={data.accountHierarchy.desk} />
+            <MetricCard label="clearing" value={data.accountHierarchy.clearingBroker} />
+          </div>
+          <SimpleListSection title="Reporting Lines" items={data.accountHierarchy.reportingLines} />
+          <SimpleListSection title="Control Checks" items={data.accountHierarchy.controlChecks} />
+        </section>
+      )}
+      {data.operatorControlState && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">Release Control State</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="workflow" value={data.operatorControlState.workflowState} />
+            <MetricCard label="escalation" value={data.operatorControlState.escalationLevel} />
+          </div>
+          <SimpleListSection
+            title="Required Approvals"
+            items={data.operatorControlState.requiredApprovals.map((approval) => `${approval.role} / ${approval.name} / ${approval.state}: ${approval.nextAction}`)}
+          />
+          <SimpleListSection title="Blocked Actions" items={data.operatorControlState.blockedActions} />
+          <SimpleListSection title="Audit Trail" items={data.operatorControlState.auditTrail} />
         </section>
       )}
       <AnchorsSection anchors={data.implementationAnchors} />

@@ -352,6 +352,52 @@ export interface MobileInstitutionalFlow {
     }>;
     controls: string[];
   } | null;
+  accountHierarchy: {
+    clientName: string;
+    legalEntity: string;
+    region: string;
+    desk: string;
+    strategy: string;
+    clearingBroker: string;
+    custodian: string;
+    books: Array<{
+      fund: string;
+      book: string;
+      subAccount: string;
+      trader: string;
+      settlementLocation: string;
+      mandate: string;
+    }>;
+    permissions: Array<{
+      role: string;
+      scope: string;
+      actions: string[];
+      approvalRequired: boolean;
+      note: string;
+    }>;
+    reportingLines: string[];
+    controlChecks: string[];
+  } | null;
+  operatorControlState: {
+    workflowState: string;
+    escalationLevel: string;
+    requiredApprovals: Array<{
+      name: string;
+      role: string;
+      state: string;
+      reason: string;
+      nextAction: string;
+    }>;
+    acknowledgements: Array<{
+      actor: string;
+      action: string;
+      atLabel: string;
+      note: string;
+    }>;
+    permittedActions: string[];
+    blockedActions: string[];
+    auditTrail: string[];
+  } | null;
   operatorChecks: string[];
   implementationAnchors: MobileImplementationAnchor[];
 }
@@ -426,7 +472,14 @@ export interface MobilePostTradeGuide {
     blockedStage: string;
     ageingLabel: string;
     rootCause: string;
+    exceptionOwner: string;
+    resolutionEtaLabel: string;
+    cashBreakAmount: number;
+    securitiesBreakQuantity: number;
+    cancelCorrectRequired: boolean;
+    failAgingBucket: string;
     nextAction: string;
+    breakDetails: string[];
     controls: string[];
     operatorNotes: string[];
   } | null;
@@ -437,9 +490,13 @@ export interface MobilePostTradeGuide {
     effectiveDateLabel: string;
     customerImpact: string;
     ledgerImpact: string;
+    booksRecordImpact: string;
+    ledgerContinuityCheck: string;
     nextAction: string;
     controls: string[];
   } | null;
+  accountHierarchy: MobileInstitutionalFlow['accountHierarchy'];
+  operatorControlState: MobileInstitutionalFlow['operatorControlState'];
   implementationAnchors: MobileImplementationAnchor[];
 }
 
@@ -455,6 +512,13 @@ export interface MobileRiskDeepDive {
     weightPercent: number;
     note: string;
   }>;
+  factorExposures: Array<{
+    factor: string;
+    exposure: number;
+    limit: number;
+    utilizationPercent: number;
+    note: string;
+  }>;
   liquidity: Array<{
     symbol: string;
     symbolName: string;
@@ -463,6 +527,12 @@ export interface MobileRiskDeepDive {
     participationPercent: number;
     estimatedDaysToExit: number;
     note: string;
+  }>;
+  liquidityBuckets: Array<{
+    bucket: string;
+    grossExposure: number;
+    stressedExitDays: number;
+    action: string;
   }>;
   scenarioLibrary: Array<{
     id: string;
@@ -492,9 +562,14 @@ export interface MobileRiskDeepDive {
     breachedLimits: string[];
     requiredActions: string[];
     modelNotes: string[];
+    marginChangeDrivers: string[];
+    nextReviewWindowLabel: string;
   } | null;
   scenarioEvaluationHistory: {
     lastEvaluatedAtLabel: string;
+    governanceState: string;
+    modelVersion: string;
+    approvals: string[];
     evaluations: Array<{
       title: string;
       shock: string;
@@ -504,7 +579,9 @@ export interface MobileRiskDeepDive {
   } | null;
   backtestHistory: {
     windowLabel: string;
+    coverageLabel: string;
     breachRatePercent: number;
+    exceptions: string[];
     history: Array<{
       label: string;
       pnl: number;
@@ -517,6 +594,18 @@ export interface MobileRiskDeepDive {
     whyItMatters: string;
     whatIncluded: string;
     whatExcluded: string;
+  }>;
+  governanceChecks: Array<{
+    title: string;
+    state: string;
+    owner: string;
+    note: string;
+  }>;
+  limitBreaches: Array<{
+    limitName: string;
+    severity: string;
+    state: string;
+    nextAction: string;
   }>;
   implementationAnchors: MobileImplementationAnchor[];
 }

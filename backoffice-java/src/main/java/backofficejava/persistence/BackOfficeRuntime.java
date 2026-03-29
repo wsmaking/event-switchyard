@@ -21,6 +21,8 @@ import backofficejava.business.CorporateActionWorkflowReadModel;
 import backofficejava.business.MarginProjectionReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 
 public record BackOfficeRuntime(
     AccountOverviewReadModel accountOverviewReadModel,
@@ -40,6 +42,8 @@ public record BackOfficeRuntime(
     MarginProjectionReadModel marginProjectionReadModel,
     ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
     BacktestHistoryReadModel backtestHistoryReadModel,
+    AccountHierarchyReadModel accountHierarchyReadModel,
+    OperatorControlStateReadModel operatorControlStateReadModel,
     AuditOffsetStore auditOffsetStore,
     DeadLetterStore deadLetterStore,
     PendingOrphanStore pendingOrphanStore,

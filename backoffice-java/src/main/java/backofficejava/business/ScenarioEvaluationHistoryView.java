@@ -6,6 +6,9 @@ public record ScenarioEvaluationHistoryView(
     long generatedAt,
     String accountId,
     String lastEvaluatedAtLabel,
+    String governanceState,
+    String modelVersion,
+    List<String> approvals,
     List<ScenarioEvaluationEntryView> evaluations
 ) {
     public record ScenarioEvaluationEntryView(

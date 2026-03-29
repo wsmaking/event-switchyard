@@ -210,6 +210,91 @@ export function MobileInstitutionalFlowView({ onNavigate }: MobileInstitutionalF
         </section>
       )}
 
+      {data.accountHierarchy && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">Account / Book Hierarchy</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="client" value={data.accountHierarchy.clientName} />
+            <MetricCard label="entity" value={data.accountHierarchy.legalEntity} />
+            <MetricCard label="desk" value={data.accountHierarchy.desk} />
+            <MetricCard label="strategy" value={data.accountHierarchy.strategy} />
+            <MetricCard label="clearing" value={data.accountHierarchy.clearingBroker} />
+            <MetricCard label="custodian" value={data.accountHierarchy.custodian} />
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.accountHierarchy.books.map((book) => (
+              <div key={`${book.book}-${book.subAccount}`} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                <div className="text-sm font-semibold text-white">{book.book}</div>
+                <div className="mt-2 text-xs leading-5 text-slate-400">
+                  fund {book.fund} / sub-account {book.subAccount} / trader {book.trader}
+                </div>
+                <div className="mt-2 text-xs leading-5 text-slate-400">
+                  settlement {book.settlementLocation} / mandate {book.mandate}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.accountHierarchy.permissions.map((permission) => (
+              <div key={`${permission.role}-${permission.scope}`} className="rounded-[20px] border border-white/8 bg-black/20 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-white">{permission.role}</div>
+                  <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">
+                    {permission.scope}
+                  </div>
+                </div>
+                <div className="mt-3 text-xs leading-5 text-slate-400">{permission.note}</div>
+                <div className="mt-3 text-xs leading-5 text-slate-300">
+                  actions: {permission.actions.join(' / ')}
+                </div>
+                <div className="mt-1 text-xs leading-5 text-slate-400">
+                  approval: {permission.approvalRequired ? 'required' : 'not required'}
+                </div>
+              </div>
+            ))}
+          </div>
+          <ChecklistSection title="Hierarchy Reporting Lines" items={data.accountHierarchy.reportingLines} />
+          <ChecklistSection title="Hierarchy Control Checks" items={data.accountHierarchy.controlChecks} />
+        </section>
+      )}
+
+      {data.operatorControlState && (
+        <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+          <div className="text-sm font-semibold text-white">Operator Control State</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="workflow" value={data.operatorControlState.workflowState} />
+            <MetricCard label="escalation" value={data.operatorControlState.escalationLevel} />
+          </div>
+          <div className="mt-4 space-y-3">
+            {data.operatorControlState.requiredApprovals.map((approval) => (
+              <div key={`${approval.role}-${approval.name}`} className="rounded-[20px] border border-amber-300/15 bg-amber-500/10 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-amber-50">{approval.name}</div>
+                  <div className="rounded-full border border-amber-200/20 bg-black/20 px-3 py-1 text-[11px] text-amber-100">
+                    {approval.role} / {approval.state}
+                  </div>
+                </div>
+                <div className="mt-3 text-sm leading-6 text-amber-50/90">{approval.reason}</div>
+                <div className="mt-2 text-xs leading-5 text-amber-100/80">next: {approval.nextAction}</div>
+              </div>
+            ))}
+            {data.operatorControlState.acknowledgements.map((ack) => (
+              <div key={`${ack.actor}-${ack.action}-${ack.atLabel}`} className="rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-white">{ack.actor}</div>
+                  <div className="text-xs text-slate-400">{ack.atLabel}</div>
+                </div>
+                <div className="mt-2 text-sm leading-6 text-slate-300">{ack.action}</div>
+                <div className="mt-2 text-xs leading-5 text-slate-400">{ack.note}</div>
+              </div>
+            ))}
+          </div>
+          <ChecklistSection title="Permitted Actions" items={data.operatorControlState.permittedActions} />
+          <ChecklistSection title="Blocked Actions" items={data.operatorControlState.blockedActions} />
+          <ChecklistSection title="Audit Trail" items={data.operatorControlState.auditTrail} />
+        </section>
+      )}
+
       <ChecklistSection title="運用で確認すること" items={data.operatorChecks} />
       <AnchorsSection anchors={data.implementationAnchors} />
     </div>

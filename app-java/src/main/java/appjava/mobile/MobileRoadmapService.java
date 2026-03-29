@@ -47,8 +47,10 @@ public final class MobileRoadmapService {
             BackOfficeClient.ExecutionPackage executionPackage = backOfficeClient.fetchExecutionPackage(anchorOrder.id());
             BackOfficeClient.ParentExecutionState parentExecutionState = backOfficeClient.fetchParentExecutionState(anchorOrder.id());
             BackOfficeClient.AllocationState allocationState = backOfficeClient.fetchAllocationState(anchorOrder.id());
+            BackOfficeClient.AccountHierarchy accountHierarchy = backOfficeClient.fetchAccountHierarchy(accountId);
+            BackOfficeClient.OperatorControlState operatorControlState = backOfficeClient.fetchOperatorControlState(anchorOrder.id());
             if (executionPackage != null) {
-                return mapExecutionPackage(executionPackage, anchorOrder.id(), parentExecutionState, allocationState);
+                return mapExecutionPackage(executionPackage, anchorOrder.id(), parentExecutionState, allocationState, accountHierarchy, operatorControlState);
             }
         }
         String symbol = anchorOrder == null ? "7203" : anchorOrder.symbol();
@@ -129,6 +131,8 @@ public final class MobileRoadmapService {
             ),
             null,
             null,
+            fallbackAccountHierarchy(),
+            fallbackOperatorControlState(anchorOrder == null ? null : anchorOrder.id(), "CLEAR"),
             List.of(
                 "arrival benchmark を親注文単位で固定しているか",
                 "participation rate を market volume の変化に応じて上下させた理由を説明できるか",
@@ -147,13 +151,17 @@ public final class MobileRoadmapService {
             BackOfficeClient.StatementProjection statementProjection = backOfficeClient.fetchStatementProjection(anchorOrder.id());
             BackOfficeClient.SettlementExceptionWorkflow settlementExceptionWorkflow = backOfficeClient.fetchSettlementExceptionWorkflow(anchorOrder.id());
             BackOfficeClient.CorporateActionWorkflow corporateActionWorkflow = backOfficeClient.fetchCorporateActionWorkflow(anchorOrder.id());
+            BackOfficeClient.AccountHierarchy accountHierarchy = backOfficeClient.fetchAccountHierarchy(accountId);
+            BackOfficeClient.OperatorControlState operatorControlState = backOfficeClient.fetchOperatorControlState(anchorOrder.id());
             if (postTradePackage != null) {
                 return mapPostTradePackage(
                     postTradePackage,
                     settlementProjection,
                     statementProjection,
                     settlementExceptionWorkflow,
-                    corporateActionWorkflow
+                    corporateActionWorkflow,
+                    accountHierarchy,
+                    operatorControlState
                 );
             }
         }
@@ -223,6 +231,8 @@ public final class MobileRoadmapService {
             null,
             null,
             null,
+            fallbackAccountHierarchy(),
+            fallbackOperatorControlState(orderId, "CLEAR"),
             postTradeAnchors()
         );
     }
@@ -296,7 +306,17 @@ public final class MobileRoadmapService {
             round2(portfolioMarketValue),
             round2(overview.cashBalance()),
             concentrations,
+            List.of(
+                new FactorExposure("Japan beta", round2(portfolioMarketValue * 0.62), 2_800_000.0, round2(Math.abs(portfolioMarketValue * 0.62) / 2_800_000.0 * 100.0), "market beta へ落とした proxy"),
+                new FactorExposure("Sector factor", round2(portfolioMarketValue * 0.41), 2_000_000.0, round2(Math.abs(portfolioMarketValue * 0.41) / 2_000_000.0 * 100.0), "sector concentration が one-name と重なる"),
+                new FactorExposure("JPY sensitivity", round2(portfolioMarketValue * 0.18), 1_200_000.0, round2(Math.abs(portfolioMarketValue * 0.18) / 1_200_000.0 * 100.0), "輸出比率の高い銘柄では FX と equities が分離しない")
+            ),
             liquidity,
+            List.of(
+                new LiquidityBucket("same-session", round2(Math.abs(portfolioMarketValue) * 0.35), liquidity.stream().anyMatch(item -> item.participationPercent() > 120.0) ? 2.4 : 0.8, "top-of-book で閉じない数量は後場へ繰り延べる"),
+                new LiquidityBucket("multi-session", round2(Math.abs(portfolioMarketValue) * 0.45), liquidity.stream().anyMatch(item -> item.participationPercent() > 120.0) ? 4.8 : 1.6, "care / POV へ切り替えて footprint を抑える"),
+                new LiquidityBucket("event-driven", round2(Math.abs(portfolioMarketValue) * 0.20), 6.0, "決算 / halt 後は説明責任が増える")
+            ),
             scenarios,
             new BacktestingPreview(
                 backtestSamples.size(),
@@ -319,10 +339,18 @@ public final class MobileRoadmapService {
                     "reservation は order-level の拘束、margin は portfolio-level の許容度",
                     "清算機関モデルと相関は簡略化している",
                     "feed stale 時は valuation guard を優先する"
-                )
+                ),
+                List.of(
+                    concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "single-name concentration add-on" : "concentration add-on 軽微",
+                    liquidity.stream().anyMatch(item -> item.participationPercent() > 100.0) ? "liquidity bucket add-on" : "liquidity add-on 軽微"
+                ),
+                concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "next 15m" : "next 1h"
             ),
             new ScenarioEvaluationHistory(
                 "generated now",
+                "APPROVED",
+                "risk-sim-v2",
+                List.of("risk lead approval", "control note attached"),
                 scenarios.stream()
                     .limit(3)
                     .map(entry -> new ScenarioEvaluation(
@@ -335,7 +363,12 @@ public final class MobileRoadmapService {
             ),
             new BacktestHistory(
                 "直近 " + backtestSamples.size() + " tick",
+                "board top + replay fills",
                 round2(breachRate),
+                List.of(
+                    "holiday / auction session は除外",
+                    "venue fragmentation は未反映"
+                ),
                 backtestSamples.stream()
                     .map(sample -> new BacktestHistoryPoint(
                         sample.label(),
@@ -350,6 +383,15 @@ public final class MobileRoadmapService {
                 new ModelBoundary("Liquidity", "exit difficulty を直感で掴む入口", "top-of-book と position size", "真の market impact model、queue depletion、venue fragmentation"),
                 new ModelBoundary("Scenario Library", "何を shock するかを業務言語に変換", "single-name / market / spread widening", "stochastic correlation、vol surface"),
                 new ModelBoundary("Backtesting", "前提が外れた回数をざっくり把握", "簡易 breach count と tail loss", "regulatory backtesting や model governance")
+            ),
+            List.of(
+                new GovernanceCheck("scenario library freshness", "PASS", "risk", "主要シナリオは営業日単位で更新"),
+                new GovernanceCheck("backtesting breach review", breachRate > 20.0 ? "WATCH" : "PASS", "risk + control", breachRate > 20.0 ? "breach review を追加する" : "説明可能"),
+                new GovernanceCheck("valuation guard", liquidity.isEmpty() ? "PASS" : "WATCH", "finance", liquidity.isEmpty() ? "position なし" : "market data stale 時は statement を止める")
+            ),
+            List.of(
+                new LimitBreach("single-name concentration", concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "HIGH" : "LOW", concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "WATCH" : "WITHIN_LIMIT", concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "hedge または size down を優先する" : "継続監視"),
+                new LimitBreach("liquidity participation", liquidity.stream().anyMatch(item -> item.participationPercent() >= 100.0) ? "HIGH" : "MEDIUM", liquidity.stream().anyMatch(item -> item.participationPercent() >= 100.0) ? "WATCH" : "WITHIN_LIMIT", liquidity.stream().anyMatch(item -> item.participationPercent() >= 100.0) ? "execution style を care / POV へ変える" : "same-session で閉じられる")
             ),
             List.of(
                 new MobileLearningService.ImplementationAnchor(
@@ -388,6 +430,15 @@ public final class MobileRoadmapService {
                     metric.note()
                 ))
                 .toList(),
+            riskSnapshot.factorExposures().stream()
+                .map(metric -> new FactorExposure(
+                    metric.factor(),
+                    metric.exposure(),
+                    metric.limit(),
+                    metric.utilizationPercent(),
+                    metric.note()
+                ))
+                .toList(),
             riskSnapshot.liquidity().stream()
                 .map(metric -> new LiquidityMetric(
                     metric.symbol(),
@@ -397,6 +448,14 @@ public final class MobileRoadmapService {
                     metric.participationPercent(),
                     metric.estimatedDaysToExit(),
                     metric.note()
+                ))
+                .toList(),
+            riskSnapshot.liquidityBuckets().stream()
+                .map(bucket -> new LiquidityBucket(
+                    bucket.bucket(),
+                    bucket.grossExposure(),
+                    bucket.stressedExitDays(),
+                    bucket.action()
                 ))
                 .toList(),
             riskSnapshot.scenarioLibrary().stream()
@@ -426,17 +485,24 @@ public final class MobileRoadmapService {
                 marginProjection.breachStatus(),
                 marginProjection.breachedLimits(),
                 marginProjection.requiredActions(),
-                marginProjection.modelNotes()
+                marginProjection.modelNotes(),
+                marginProjection.marginChangeDrivers(),
+                marginProjection.nextReviewWindowLabel()
             ),
             scenarioEvaluationHistory == null ? null : new ScenarioEvaluationHistory(
                 scenarioEvaluationHistory.lastEvaluatedAtLabel(),
+                scenarioEvaluationHistory.governanceState(),
+                scenarioEvaluationHistory.modelVersion(),
+                scenarioEvaluationHistory.approvals(),
                 scenarioEvaluationHistory.evaluations().stream()
                     .map(entry -> new ScenarioEvaluation(entry.title(), entry.shock(), entry.pnlDelta(), entry.note()))
                     .toList()
             ),
             backtestHistory == null ? null : new BacktestHistory(
                 backtestHistory.windowLabel(),
+                backtestHistory.coverageLabel(),
                 backtestHistory.breachRatePercent(),
+                backtestHistory.exceptions(),
                 backtestHistory.history().stream()
                     .map(point -> new BacktestHistoryPoint(point.label(), point.pnl(), point.breached(), point.note()))
                     .toList()
@@ -448,6 +514,12 @@ public final class MobileRoadmapService {
                     boundary.whatIncluded(),
                     boundary.whatExcluded()
                 ))
+                .toList(),
+            riskSnapshot.governanceChecks().stream()
+                .map(check -> new GovernanceCheck(check.title(), check.state(), check.owner(), check.note()))
+                .toList(),
+            riskSnapshot.limitBreaches().stream()
+                .map(limit -> new LimitBreach(limit.limitName(), limit.severity(), limit.state(), limit.nextAction()))
                 .toList(),
             List.of(
                 new MobileLearningService.ImplementationAnchor(
@@ -765,7 +837,9 @@ public final class MobileRoadmapService {
         BackOfficeClient.ExecutionPackage executionPackage,
         String anchorOrderId,
         BackOfficeClient.ParentExecutionState parentExecutionState,
-        BackOfficeClient.AllocationState allocationState
+        BackOfficeClient.AllocationState allocationState,
+        BackOfficeClient.AccountHierarchy accountHierarchy,
+        BackOfficeClient.OperatorControlState operatorControlState
     ) {
         return new InstitutionalFlowResponse(
             executionPackage.generatedAt(),
@@ -859,6 +933,8 @@ public final class MobileRoadmapService {
                     .toList(),
                 allocationState.controls()
             ),
+            mapAccountHierarchy(accountHierarchy),
+            mapOperatorControlState(operatorControlState),
             executionPackage.operatorChecks(),
             institutionalFlowAnchors()
         );
@@ -869,7 +945,9 @@ public final class MobileRoadmapService {
         BackOfficeClient.SettlementProjection settlementProjection,
         BackOfficeClient.StatementProjection statementProjection,
         BackOfficeClient.SettlementExceptionWorkflow settlementExceptionWorkflow,
-        BackOfficeClient.CorporateActionWorkflow corporateActionWorkflow
+        BackOfficeClient.CorporateActionWorkflow corporateActionWorkflow,
+        BackOfficeClient.AccountHierarchy accountHierarchy,
+        BackOfficeClient.OperatorControlState operatorControlState
     ) {
         return new PostTradeGuideResponse(
             postTradePackage.generatedAt(),
@@ -937,7 +1015,14 @@ public final class MobileRoadmapService {
                 settlementExceptionWorkflow.blockedStage(),
                 settlementExceptionWorkflow.ageingLabel(),
                 settlementExceptionWorkflow.rootCause(),
+                settlementExceptionWorkflow.exceptionOwner(),
+                settlementExceptionWorkflow.resolutionEtaLabel(),
+                settlementExceptionWorkflow.cashBreakAmount(),
+                settlementExceptionWorkflow.securitiesBreakQuantity(),
+                settlementExceptionWorkflow.cancelCorrectRequired(),
+                settlementExceptionWorkflow.failAgingBucket(),
                 settlementExceptionWorkflow.nextAction(),
+                settlementExceptionWorkflow.breakDetails(),
                 settlementExceptionWorkflow.controls(),
                 settlementExceptionWorkflow.operatorNotes()
             ),
@@ -948,10 +1033,127 @@ public final class MobileRoadmapService {
                 corporateActionWorkflow.effectiveDateLabel(),
                 corporateActionWorkflow.customerImpact(),
                 corporateActionWorkflow.ledgerImpact(),
+                corporateActionWorkflow.booksRecordImpact(),
+                corporateActionWorkflow.ledgerContinuityCheck(),
                 corporateActionWorkflow.nextAction(),
                 corporateActionWorkflow.controls()
             ),
+            mapAccountHierarchy(accountHierarchy),
+            mapOperatorControlState(operatorControlState),
             postTradeAnchors()
+        );
+    }
+
+    private AccountHierarchy mapAccountHierarchy(BackOfficeClient.AccountHierarchy accountHierarchy) {
+        if (accountHierarchy == null) {
+            return null;
+        }
+        return new AccountHierarchy(
+            accountHierarchy.clientName(),
+            accountHierarchy.legalEntity(),
+            accountHierarchy.region(),
+            accountHierarchy.desk(),
+            accountHierarchy.strategy(),
+            accountHierarchy.clearingBroker(),
+            accountHierarchy.custodian(),
+            accountHierarchy.books().stream()
+                .map(book -> new BookHierarchy(
+                    book.fund(),
+                    book.book(),
+                    book.subAccount(),
+                    book.trader(),
+                    book.settlementLocation(),
+                    book.mandate()
+                ))
+                .toList(),
+            accountHierarchy.permissions().stream()
+                .map(permission -> new PermissionGrant(
+                    permission.role(),
+                    permission.scope(),
+                    permission.actions(),
+                    permission.approvalRequired(),
+                    permission.note()
+                ))
+                .toList(),
+            accountHierarchy.reportingLines(),
+            accountHierarchy.controlChecks()
+        );
+    }
+
+    private OperatorControlState mapOperatorControlState(BackOfficeClient.OperatorControlState operatorControlState) {
+        if (operatorControlState == null) {
+            return null;
+        }
+        return new OperatorControlState(
+            operatorControlState.workflowState(),
+            operatorControlState.escalationLevel(),
+            operatorControlState.requiredApprovals().stream()
+                .map(approval -> new ApprovalState(
+                    approval.name(),
+                    approval.role(),
+                    approval.state(),
+                    approval.reason(),
+                    approval.nextAction()
+                ))
+                .toList(),
+            operatorControlState.acknowledgements().stream()
+                .map(ack -> new OperatorAcknowledgement(
+                    ack.actor(),
+                    ack.action(),
+                    ack.atLabel(),
+                    ack.note()
+                ))
+                .toList(),
+            operatorControlState.permittedActions(),
+            operatorControlState.blockedActions(),
+            operatorControlState.auditTrail()
+        );
+    }
+
+    private AccountHierarchy fallbackAccountHierarchy() {
+        return new AccountHierarchy(
+            "switchyard client alpha",
+            "Switchyard Securities Japan",
+            "JP",
+            "cash-equities",
+            "benchmark-plus",
+            "demo-clearing-broker",
+            "demo-custodian",
+            List.of(
+                new BookHierarchy("Switchyard Japan Fund", "japan-long-only", "acct-jp-long-01", "desk-trader-a", "TSE/JASDEC", "benchmark tracking"),
+                new BookHierarchy("Switchyard Event Fund", "event-driven", "acct-event-02", "desk-trader-b", "TSE/JASDEC", "event capture"),
+                new BookHierarchy("Switchyard Multi Strategy", "multi-strat", "acct-ms-03", "desk-trader-c", "TSE/JASDEC", "liquidity recycling")
+            ),
+            List.of(
+                new PermissionGrant("trader", "order-entry", List.of("submit order", "cancel working order", "request care escalation"), false, "新規リスクを増やす行為は trader scope"),
+                new PermissionGrant("middle-office", "allocation-settlement", List.of("approve allocation", "ack settlement exception", "release statement"), true, "books and records を閉じる権限"),
+                new PermissionGrant("risk-control", "limit-override", List.of("reduce-only", "deny new risk", "force re-evaluate margin"), true, "override は承認必須")
+            ),
+            List.of(
+                "client -> legal entity -> desk -> fund -> book -> sub-account の順で辿る",
+                "allocation と statement は同じ hierarchy 上で説明できる必要がある"
+            ),
+            List.of(
+                "book hierarchy と allocation ratio の合計を一致させる",
+                "role ごとに permitted / blocked actions を audit trail に残す"
+            )
+        );
+    }
+
+    private OperatorControlState fallbackOperatorControlState(String orderId, String workflowState) {
+        return new OperatorControlState(
+            workflowState,
+            "LOW",
+            List.of(
+                new ApprovalState("allocation approval", "middle-office", "CLEAR", "配賦前に総数一致だけ確認する", "book allocation を確認する"),
+                new ApprovalState("books release", "back-office", "CLEAR", "statement / settlement を解放する前提確認", "books and records を閉じる")
+            ),
+            orderId == null ? List.of() : List.of(
+                new OperatorAcknowledgement("desk-trader-a", "arrival benchmark fixed", "T+0 09:00", "parent benchmark を固定")
+            ),
+            List.of("submit child order", "cancel remaining", "ack settlement workflow"),
+            List.of("release new risk"),
+            orderId == null ? List.of("anchor order 未生成") : List.of("workflow=" + workflowState, "orderId=" + orderId)
         );
     }
 
@@ -1089,6 +1291,8 @@ public final class MobileRoadmapService {
         AllocationPlan allocationPlan,
         ParentExecutionState parentExecutionState,
         AllocationState allocationState,
+        AccountHierarchy accountHierarchy,
+        OperatorControlState operatorControlState,
         List<String> operatorChecks,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
@@ -1191,6 +1395,68 @@ public final class MobileRoadmapService {
     ) {
     }
 
+    public record AccountHierarchy(
+        String clientName,
+        String legalEntity,
+        String region,
+        String desk,
+        String strategy,
+        String clearingBroker,
+        String custodian,
+        List<BookHierarchy> books,
+        List<PermissionGrant> permissions,
+        List<String> reportingLines,
+        List<String> controlChecks
+    ) {
+    }
+
+    public record BookHierarchy(
+        String fund,
+        String book,
+        String subAccount,
+        String trader,
+        String settlementLocation,
+        String mandate
+    ) {
+    }
+
+    public record PermissionGrant(
+        String role,
+        String scope,
+        List<String> actions,
+        boolean approvalRequired,
+        String note
+    ) {
+    }
+
+    public record OperatorControlState(
+        String workflowState,
+        String escalationLevel,
+        List<ApprovalState> requiredApprovals,
+        List<OperatorAcknowledgement> acknowledgements,
+        List<String> permittedActions,
+        List<String> blockedActions,
+        List<String> auditTrail
+    ) {
+    }
+
+    public record ApprovalState(
+        String name,
+        String role,
+        String state,
+        String reason,
+        String nextAction
+    ) {
+    }
+
+    public record OperatorAcknowledgement(
+        String actor,
+        String action,
+        String atLabel,
+        String note
+    ) {
+    }
+
     public record PostTradeGuideResponse(
         long generatedAt,
         String orderId,
@@ -1205,6 +1471,8 @@ public final class MobileRoadmapService {
         StatementProjection statementProjection,
         SettlementExceptionWorkflow settlementExceptionWorkflow,
         CorporateActionWorkflow corporateActionWorkflow,
+        AccountHierarchy accountHierarchy,
+        OperatorControlState operatorControlState,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
@@ -1291,7 +1559,14 @@ public final class MobileRoadmapService {
         String blockedStage,
         String ageingLabel,
         String rootCause,
+        String exceptionOwner,
+        String resolutionEtaLabel,
+        long cashBreakAmount,
+        long securitiesBreakQuantity,
+        boolean cancelCorrectRequired,
+        String failAgingBucket,
         String nextAction,
+        List<String> breakDetails,
         List<String> controls,
         List<String> operatorNotes
     ) {
@@ -1304,6 +1579,8 @@ public final class MobileRoadmapService {
         String effectiveDateLabel,
         String customerImpact,
         String ledgerImpact,
+        String booksRecordImpact,
+        String ledgerContinuityCheck,
         String nextAction,
         List<String> controls
     ) {
@@ -1315,13 +1592,17 @@ public final class MobileRoadmapService {
         double marketValue,
         double cashBalance,
         List<ConcentrationMetric> concentration,
+        List<FactorExposure> factorExposures,
         List<LiquidityMetric> liquidity,
+        List<LiquidityBucket> liquidityBuckets,
         List<ScenarioLibraryEntry> scenarioLibrary,
         BacktestingPreview backtesting,
         MarginProjection marginProjection,
         ScenarioEvaluationHistory scenarioEvaluationHistory,
         BacktestHistory backtestHistory,
         List<ModelBoundary> modelBoundaries,
+        List<GovernanceCheck> governanceChecks,
+        List<LimitBreach> limitBreaches,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
@@ -1343,6 +1624,23 @@ public final class MobileRoadmapService {
         double participationPercent,
         double estimatedDaysToExit,
         String note
+    ) {
+    }
+
+    public record FactorExposure(
+        String factor,
+        double exposure,
+        double limit,
+        double utilizationPercent,
+        String note
+    ) {
+    }
+
+    public record LiquidityBucket(
+        String bucket,
+        double grossExposure,
+        double stressedExitDays,
+        String action
     ) {
     }
 
@@ -1380,12 +1678,17 @@ public final class MobileRoadmapService {
         String breachStatus,
         List<String> breachedLimits,
         List<String> requiredActions,
-        List<String> modelNotes
+        List<String> modelNotes,
+        List<String> marginChangeDrivers,
+        String nextReviewWindowLabel
     ) {
     }
 
     public record ScenarioEvaluationHistory(
         String lastEvaluatedAtLabel,
+        String governanceState,
+        String modelVersion,
+        List<String> approvals,
         List<ScenarioEvaluation> evaluations
     ) {
     }
@@ -1400,7 +1703,9 @@ public final class MobileRoadmapService {
 
     public record BacktestHistory(
         String windowLabel,
+        String coverageLabel,
         double breachRatePercent,
+        List<String> exceptions,
         List<BacktestHistoryPoint> history
     ) {
     }
@@ -1418,6 +1723,22 @@ public final class MobileRoadmapService {
         String whyItMatters,
         String whatIncluded,
         String whatExcluded
+    ) {
+    }
+
+    public record GovernanceCheck(
+        String title,
+        String state,
+        String owner,
+        String note
+    ) {
+    }
+
+    public record LimitBreach(
+        String limitName,
+        String severity,
+        String state,
+        String nextAction
     ) {
     }
 
