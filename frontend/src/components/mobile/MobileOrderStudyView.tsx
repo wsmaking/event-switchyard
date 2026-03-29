@@ -156,12 +156,26 @@ function OrderStudyContent({
           <InfoMetric label="約定" value={`${formatNumber(finalOut.order.filledQuantity ?? 0)} 株`} />
           <InfoMetric label="配信" value={orderStreamState} />
         </div>
-        <button
-          onClick={() => onNavigate(`/mobile/market/${finalOut.order.symbol}`)}
-          className="mt-4 rounded-full border border-cyan-300/30 bg-cyan-500/10 px-4 py-2 text-xs font-medium text-cyan-100"
-        >
-          市場構造と執行品質へ
-        </button>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            onClick={() => onNavigate(`/mobile/market/${finalOut.order.symbol}`)}
+            className="rounded-full border border-cyan-300/30 bg-cyan-500/10 px-4 py-2 text-xs font-medium text-cyan-100"
+          >
+            市場構造と執行品質へ
+          </button>
+          <button
+            onClick={() => onNavigate('/mobile/institutional')}
+            className="rounded-full border border-sky-300/30 bg-sky-500/10 px-4 py-2 text-xs font-medium text-sky-100"
+          >
+            執行判断へ
+          </button>
+          <button
+            onClick={() => onNavigate('/mobile/posttrade')}
+            className="rounded-full border border-fuchsia-300/30 bg-fuchsia-500/10 px-4 py-2 text-xs font-medium text-fuchsia-100"
+          >
+            決済へ
+          </button>
+        </div>
         {orderStreamState === 'offline' && (
           <div className="mt-4 rounded-[18px] border border-teal-300/20 bg-teal-400/10 px-4 py-3 text-xs leading-6 text-teal-50/90">
             on-device pack で再生中。order stream は local storage の state を参照しています。

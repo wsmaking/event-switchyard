@@ -3,11 +3,15 @@ import { useMobileHome, useUpdateMobileProgress } from '../../hooks/useMobileLea
 import { useMobileOrders } from '../../hooks/useMobileStudy';
 import type { MobileRouteState } from '../../types/mobile';
 import { MobileArchitectureView } from './MobileArchitectureView';
+import { MobileAssetClassView } from './MobileAssetClassView';
 import { MobileCardsView } from './MobileCardsView';
 import { MobileDrillsView } from './MobileDrillsView';
 import { MobileHomeView } from './MobileHomeView';
+import { MobileInstitutionalFlowView } from './MobileInstitutionalFlowView';
 import { MobileMarketStructureView } from './MobileMarketStructureView';
+import { MobileOperationsView } from './MobileOperationsView';
 import { MobileOrderStudyView } from './MobileOrderStudyView';
+import { MobilePostTradeView } from './MobilePostTradeView';
 import { MobileRiskView } from './MobileRiskView';
 
 interface MobileLearningConsoleProps {
@@ -31,7 +35,12 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
       return;
     }
     const anchorOrderId =
-      route.section === 'orders' || route.section === 'ledger' || route.section === 'architecture' || route.section === 'market'
+      route.section === 'orders' ||
+      route.section === 'ledger' ||
+      route.section === 'architecture' ||
+      route.section === 'market' ||
+      route.section === 'institutional' ||
+      route.section === 'posttrade'
         ? activeOrderId
         : null;
     const signature = `${path}|${anchorOrderId ?? ''}|${route.cardId ?? ''}`;
@@ -94,22 +103,30 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
         {route.section === 'market' && (
           <MobileMarketStructureView symbol={activeSymbol} orderId={activeOrderId} onNavigate={onNavigate} />
         )}
+        {route.section === 'institutional' && <MobileInstitutionalFlowView onNavigate={onNavigate} />}
+        {route.section === 'posttrade' && <MobilePostTradeView onNavigate={onNavigate} />}
         {route.section === 'ledger' && (
           <MobileOrderStudyView focus="ledger" orderId={activeOrderId} onNavigate={onNavigate} />
         )}
         {route.section === 'architecture' && <MobileArchitectureView home={home} orderId={activeOrderId} />}
+        {route.section === 'assets' && <MobileAssetClassView />}
+        {route.section === 'operations' && <MobileOperationsView />}
         {route.section === 'cards' && <MobileCardsView cardId={route.cardId} onNavigate={onNavigate} />}
         {route.section === 'drills' && <MobileDrillsView drillId={route.drillId} onNavigate={onNavigate} />}
         {route.section === 'risk' && <MobileRiskView />}
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-slate-950/92 backdrop-blur">
-        <div className="mx-auto grid max-w-md grid-cols-4 gap-1 px-2 py-2">
+        <div className="mx-auto flex max-w-md gap-1 overflow-x-auto px-2 py-2">
           <NavButton label="ホーム" active={route.section === 'home'} onClick={() => onNavigate('/mobile')} />
           <NavButton label="注文" active={route.section === 'orders'} onClick={() => onNavigate(activeOrderId ? `/mobile/orders/${activeOrderId}` : '/mobile/orders')} />
           <NavButton label="市場" active={route.section === 'market'} onClick={() => onNavigate(`/mobile/market/${activeSymbol}`)} />
+          <NavButton label="執行" active={route.section === 'institutional'} onClick={() => onNavigate('/mobile/institutional')} />
+          <NavButton label="決済" active={route.section === 'posttrade'} onClick={() => onNavigate('/mobile/posttrade')} />
           <NavButton label="台帳" active={route.section === 'ledger'} onClick={() => onNavigate('/mobile/ledger')} />
           <NavButton label="構成" active={route.section === 'architecture'} onClick={() => onNavigate('/mobile/architecture')} />
+          <NavButton label="資産" active={route.section === 'assets'} onClick={() => onNavigate('/mobile/assets')} />
+          <NavButton label="運用" active={route.section === 'operations'} onClick={() => onNavigate('/mobile/operations')} />
           <NavButton label="判断" active={route.section === 'cards'} onClick={() => onNavigate('/mobile/cards')} />
           <NavButton label="反復" active={route.section === 'drills'} onClick={() => onNavigate('/mobile/drills')} />
           <NavButton label="リスク" active={route.section === 'risk'} onClick={() => onNavigate('/mobile/risk')} />
@@ -131,7 +148,7 @@ function NavButton({
   return (
     <button
       onClick={onClick}
-      className={`rounded-2xl px-2 py-3 text-[11px] font-medium transition ${active ? 'bg-emerald-500/15 text-emerald-100' : 'text-slate-400 hover:text-slate-100'}`}
+      className={`shrink-0 rounded-2xl px-3 py-3 text-[11px] font-medium transition ${active ? 'bg-emerald-500/15 text-emerald-100' : 'text-slate-400 hover:text-slate-100'}`}
     >
       {label}
     </button>
@@ -152,10 +169,18 @@ export function parseMobileRoute(path: string): MobileRouteState {
       return { section: 'orders', orderId: segments[2] ?? null, symbol: null, cardId: null, drillId: null };
     case 'market':
       return { section: 'market', orderId: null, symbol: segments[2] ?? null, cardId: null, drillId: null };
+    case 'institutional':
+      return { section: 'institutional', orderId: null, symbol: null, cardId: null, drillId: null };
+    case 'posttrade':
+      return { section: 'posttrade', orderId: null, symbol: null, cardId: null, drillId: null };
     case 'ledger':
       return { section: 'ledger', orderId: null, symbol: null, cardId: null, drillId: null };
     case 'architecture':
       return { section: 'architecture', orderId: null, symbol: null, cardId: null, drillId: null };
+    case 'assets':
+      return { section: 'assets', orderId: null, symbol: null, cardId: null, drillId: null };
+    case 'operations':
+      return { section: 'operations', orderId: null, symbol: null, cardId: null, drillId: null };
     case 'cards':
       return { section: 'cards', orderId: null, symbol: null, cardId: segments[2] ?? null, drillId: null };
     case 'drills':

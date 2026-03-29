@@ -27,6 +27,7 @@ public final class MobileLearningService {
     private final BackOfficeClient backOfficeClient;
     private final OmsClient omsClient;
     private final MobileProgressStore progressStore;
+    private final MobileRoadmapService roadmapService;
     private final List<LearningCard> cards;
     private final Map<String, LearningCard> cardIndex;
     private final List<ExplanationDrill> drills;
@@ -45,6 +46,7 @@ public final class MobileLearningService {
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
         this.progressStore = progressStore;
+        this.roadmapService = new MobileRoadmapService(accountId, marketDataService, backOfficeClient, omsClient);
         this.cards = buildCards();
         this.cardIndex = new LinkedHashMap<>();
         this.cards.forEach(card -> cardIndex.put(card.id(), card));
@@ -116,8 +118,12 @@ public final class MobileLearningService {
             List.of(
                 new QuickAction("注文フローを見る", recentOrders.isEmpty() ? "/mobile/orders" : "/mobile/orders/" + recentOrders.getFirst().id(), "注文"),
                 new QuickAction("市場構造を見る", marketRoute, "市場"),
+                new QuickAction("執行判断を見る", "/mobile/institutional", "執行"),
+                new QuickAction("決済を見る", "/mobile/posttrade", "決済"),
                 new QuickAction("台帳フローを見る", "/mobile/ledger", "台帳"),
                 new QuickAction("障害導線を見る", "/mobile/architecture", "運用"),
+                new QuickAction("資産別比較を見る", "/mobile/assets", "資産"),
+                new QuickAction("運用工学を見る", "/mobile/operations", "運用"),
                 new QuickAction("設計カードに入る", "/mobile/cards", "設計"),
                 new QuickAction("リスクを見る", "/mobile/risk", "リスク"),
                 new QuickAction("説明ドリルを開く", "/mobile/drills", "反復")
@@ -218,6 +224,26 @@ public final class MobileLearningService {
 
     public List<RiskScenario> listRiskScenarios() {
         return riskScenarios;
+    }
+
+    public MobileRoadmapService.InstitutionalFlowResponse buildInstitutionalFlow() {
+        return roadmapService.buildInstitutionalFlow();
+    }
+
+    public MobileRoadmapService.PostTradeGuideResponse buildPostTradeGuide() {
+        return roadmapService.buildPostTradeGuide();
+    }
+
+    public MobileRoadmapService.RiskDeepDiveResponse buildRiskDeepDive() {
+        return roadmapService.buildRiskDeepDive();
+    }
+
+    public MobileRoadmapService.AssetClassGuideResponse buildAssetClassGuide() {
+        return roadmapService.buildAssetClassGuide();
+    }
+
+    public MobileRoadmapService.OperationsEngineeringResponse buildOperationsEngineering() {
+        return roadmapService.buildOperationsEngineering();
     }
 
     public RiskEvaluationResponse evaluateRisk(RiskEvaluationRequest request) {
@@ -1357,6 +1383,46 @@ public final class MobileLearningService {
                 "submit 時点の benchmark を固定する理由と、average execution price / fill rate / directional slippage の意味を説明する。",
                 List.of("/mobile/market", "/mobile/orders"),
                 List.of("arrival benchmark", "fill rate", "slippage")
+            ),
+            new ExplanationDrill(
+                "drill-institutional-flow",
+                "parent / child と配賦を説明する",
+                "執行",
+                "parent order、child order、participation、allocation を一続きで説明する。",
+                List.of("/mobile/institutional", "/mobile/orders"),
+                List.of("parent-child", "participation", "allocation")
+            ),
+            new ExplanationDrill(
+                "drill-post-trade",
+                "execution 後の業務を説明する",
+                "決済",
+                "execution、allocation、clearing、settlement、books and records の違いを順に説明する。",
+                List.of("/mobile/posttrade", "/mobile/ledger"),
+                List.of("settlement", "clearing", "statement")
+            ),
+            new ExplanationDrill(
+                "drill-risk-depth",
+                "concentration と liquidity を説明する",
+                "リスク",
+                "single-name concentration、liquidity、scenario library、backtesting をまとめて説明する。",
+                List.of("/mobile/risk"),
+                List.of("concentration", "liquidity", "backtesting")
+            ),
+            new ExplanationDrill(
+                "drill-asset-class-boundary",
+                "資産別に何を共通化し、何を専用化するか説明する",
+                "資産",
+                "equities、options、FX、rates、credit、futures を比較して、どこを共通化しどこを分けるかを説明する。",
+                List.of("/mobile/assets", "/mobile/cards"),
+                List.of("multi-asset", "boundary", "valuation")
+            ),
+            new ExplanationDrill(
+                "drill-operations-incident",
+                "運用事故の最初の問いを説明する",
+                "運用",
+                "sequence gap、pending orphan、DLQ、schema mismatch、market data stale をどう切り分けるか説明する。",
+                List.of("/mobile/operations", "/mobile/architecture"),
+                List.of("incident", "pending orphan", "DLQ", "schema")
             )
         );
     }
