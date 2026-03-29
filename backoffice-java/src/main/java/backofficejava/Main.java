@@ -13,6 +13,7 @@ import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -36,6 +37,7 @@ public final class Main {
         AllocationStateReadModel allocationStateReadModel = runtime.allocationStateReadModel();
         SettlementProjectionReadModel settlementProjectionReadModel = runtime.settlementProjectionReadModel();
         StatementProjectionReadModel statementProjectionReadModel = runtime.statementProjectionReadModel();
+        RiskSnapshotReadModel riskSnapshotReadModel = runtime.riskSnapshotReadModel();
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -61,6 +63,7 @@ public final class Main {
             allocationStateReadModel,
             settlementProjectionReadModel,
             statementProjectionReadModel,
+            riskSnapshotReadModel,
             intakeService,
             busEventIntakeService
         );

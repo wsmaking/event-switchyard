@@ -22,6 +22,8 @@ import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.SettlementProjectionView;
 import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.StatementProjectionView;
+import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.RiskSnapshotView;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.List;
@@ -38,7 +40,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         ParentExecutionStateReadModel parentExecutionStateReadModel,
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
-        StatementProjectionReadModel statementProjectionReadModel
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -52,7 +55,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             parentExecutionStateReadModel,
             allocationStateReadModel,
             settlementProjectionReadModel,
-            statementProjectionReadModel
+            statementProjectionReadModel,
+            riskSnapshotReadModel
         ));
     }
 
@@ -68,7 +72,8 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         ParentExecutionStateReadModel parentExecutionStateReadModel,
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
-        StatementProjectionReadModel statementProjectionReadModel
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -127,6 +132,11 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             statementProjectionReadModel.upsert(request);
             return JsonResponse.ok(request);
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/risk-snapshot/upsert".equals(path)) {
+            RiskSnapshotView request = readJson(exchange, RiskSnapshotView.class);
+            riskSnapshotReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -139,6 +149,7 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             allocationStateReadModel.reset();
             settlementProjectionReadModel.reset();
             statementProjectionReadModel.reset();
+            riskSnapshotReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

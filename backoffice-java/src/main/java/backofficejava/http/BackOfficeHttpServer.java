@@ -13,6 +13,7 @@ import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -32,6 +33,7 @@ public final class BackOfficeHttpServer {
     private final AllocationStateReadModel allocationStateReadModel;
     private final SettlementProjectionReadModel settlementProjectionReadModel;
     private final StatementProjectionReadModel statementProjectionReadModel;
+    private final RiskSnapshotReadModel riskSnapshotReadModel;
     private final GatewayAuditIntakeService intakeService;
     private final BusEventIntakeService busEventIntakeService;
 
@@ -48,6 +50,7 @@ public final class BackOfficeHttpServer {
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
         StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel,
         GatewayAuditIntakeService intakeService,
         BusEventIntakeService busEventIntakeService
     ) {
@@ -63,6 +66,7 @@ public final class BackOfficeHttpServer {
         this.allocationStateReadModel = allocationStateReadModel;
         this.settlementProjectionReadModel = settlementProjectionReadModel;
         this.statementProjectionReadModel = statementProjectionReadModel;
+        this.riskSnapshotReadModel = riskSnapshotReadModel;
         this.intakeService = intakeService;
         this.busEventIntakeService = busEventIntakeService;
     }
@@ -86,6 +90,7 @@ public final class BackOfficeHttpServer {
         server.createContext("/business/allocation-state", new AllocationStateHttpHandler(allocationStateReadModel));
         server.createContext("/business/settlement-projection", new SettlementProjectionHttpHandler(settlementProjectionReadModel));
         server.createContext("/business/statement-projection", new StatementProjectionHttpHandler(statementProjectionReadModel));
+        server.createContext("/business/risk-snapshot", new RiskSnapshotHttpHandler(riskSnapshotReadModel));
         server.createContext(
             "/demo/reset",
             new DemoResetHttpHandler(
@@ -99,7 +104,8 @@ public final class BackOfficeHttpServer {
                 parentExecutionStateReadModel,
                 allocationStateReadModel,
                 settlementProjectionReadModel,
-                statementProjectionReadModel
+                statementProjectionReadModel,
+                riskSnapshotReadModel
             )
         );
         server.createContext(
@@ -115,7 +121,8 @@ public final class BackOfficeHttpServer {
                 parentExecutionStateReadModel,
                 allocationStateReadModel,
                 settlementProjectionReadModel,
-                statementProjectionReadModel
+                statementProjectionReadModel,
+                riskSnapshotReadModel
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));

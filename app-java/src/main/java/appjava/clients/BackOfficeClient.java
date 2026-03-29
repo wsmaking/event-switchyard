@@ -201,6 +201,25 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public RiskSnapshot fetchRiskSnapshot(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/risk-snapshot?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), RiskSnapshot.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -251,6 +270,10 @@ public final class BackOfficeClient {
 
     public void upsertStatementProjection(StatementProjection statementProjection) {
         postJson("/internal/business/statement-projection/upsert", statementProjection);
+    }
+
+    public void upsertRiskSnapshot(RiskSnapshot riskSnapshot) {
+        postJson("/internal/business/risk-snapshot/upsert", riskSnapshot);
     }
 
     public BackOfficeStats fetchStats() {
@@ -701,6 +724,74 @@ public final class BackOfficeClient {
         String label,
         String value,
         String note
+    ) {
+    }
+
+    public record RiskSnapshot(
+        long generatedAt,
+        String accountId,
+        double marketValue,
+        double cashBalance,
+        List<RiskConcentrationMetric> concentration,
+        List<RiskLiquidityMetric> liquidity,
+        List<RiskScenarioLibraryEntry> scenarioLibrary,
+        RiskBacktestingPreview backtesting,
+        List<RiskModelBoundary> modelBoundaries,
+        List<String> marginAlerts
+    ) {
+    }
+
+    public record RiskConcentrationMetric(
+        String symbol,
+        String symbolName,
+        double exposure,
+        double weightPercent,
+        String note
+    ) {
+    }
+
+    public record RiskLiquidityMetric(
+        String symbol,
+        String symbolName,
+        long positionQuantity,
+        long visibleTopOfBookQuantity,
+        double participationPercent,
+        double estimatedDaysToExit,
+        String note
+    ) {
+    }
+
+    public record RiskScenarioLibraryEntry(
+        String id,
+        String title,
+        String category,
+        String shock,
+        String rationale,
+        String focus
+    ) {
+    }
+
+    public record RiskBacktestingPreview(
+        int observationCount,
+        double breachRatePercent,
+        double averageTailLoss,
+        String note,
+        List<RiskBacktestSample> samples
+    ) {
+    }
+
+    public record RiskBacktestSample(
+        String label,
+        double pnl,
+        boolean breached
+    ) {
+    }
+
+    public record RiskModelBoundary(
+        String title,
+        String whyItMatters,
+        String whatIncluded,
+        String whatExcluded
     ) {
     }
 

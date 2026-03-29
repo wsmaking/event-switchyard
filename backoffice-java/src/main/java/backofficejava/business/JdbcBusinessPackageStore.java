@@ -46,6 +46,10 @@ public final class JdbcBusinessPackageStore {
         return new StatementProjectionAdapter(this);
     }
 
+    public RiskSnapshotReadModel riskSnapshotReadModel() {
+        return new RiskSnapshotAdapter(this);
+    }
+
     private Optional<ExecutionPackageView> loadExecutionPackage(String orderId) {
         return load(orderId, "bo_execution_packages", ExecutionPackageView.class);
     }
@@ -92,6 +96,46 @@ public final class JdbcBusinessPackageStore {
 
     private void upsertStatementProjection(StatementProjectionView view) {
         upsert("bo_statement_projections", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<RiskSnapshotView> loadRiskSnapshot(String accountId) {
+        String sql = "SELECT payload FROM bo_risk_snapshots WHERE account_id = ?";
+        try (
+            Connection connection = connectionFactory.openConnection();
+            PreparedStatement statement = connection.prepareStatement(sql)
+        ) {
+            statement.setString(1, accountId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(OBJECT_MAPPER.readValue(resultSet.getString("payload"), RiskSnapshotView.class));
+            }
+        } catch (Exception exception) {
+            throw new IllegalStateException("failed_to_load_risk_snapshot:" + accountId, exception);
+        }
+    }
+
+    private void upsertRiskSnapshot(RiskSnapshotView view) {
+        String sql = """
+            INSERT INTO bo_risk_snapshots (account_id, generated_at, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT (account_id)
+            DO UPDATE SET
+                generated_at = EXCLUDED.generated_at,
+                payload = EXCLUDED.payload
+            """;
+        try (
+            Connection connection = connectionFactory.openConnection();
+            PreparedStatement statement = connection.prepareStatement(sql)
+        ) {
+            statement.setString(1, view.accountId());
+            statement.setLong(2, view.generatedAt());
+            statement.setString(3, OBJECT_MAPPER.writeValueAsString(view));
+            statement.executeUpdate();
+        } catch (Exception exception) {
+            throw new IllegalStateException("failed_to_upsert_risk_snapshot:" + view.accountId(), exception);
+        }
     }
 
     private <T> Optional<T> load(String orderId, String tableName, Class<T> type) {
@@ -146,7 +190,8 @@ public final class JdbcBusinessPackageStore {
             PreparedStatement parentExecutionDelete = connection.prepareStatement("DELETE FROM bo_parent_execution_states");
             PreparedStatement allocationDelete = connection.prepareStatement("DELETE FROM bo_allocation_states");
             PreparedStatement settlementDelete = connection.prepareStatement("DELETE FROM bo_settlement_projections");
-            PreparedStatement statementDelete = connection.prepareStatement("DELETE FROM bo_statement_projections")
+            PreparedStatement statementDelete = connection.prepareStatement("DELETE FROM bo_statement_projections");
+            PreparedStatement riskDelete = connection.prepareStatement("DELETE FROM bo_risk_snapshots")
         ) {
             executionDelete.executeUpdate();
             postTradeDelete.executeUpdate();
@@ -154,6 +199,7 @@ public final class JdbcBusinessPackageStore {
             allocationDelete.executeUpdate();
             settlementDelete.executeUpdate();
             statementDelete.executeUpdate();
+            riskDelete.executeUpdate();
         } catch (SQLException exception) {
             throw new IllegalStateException("failed_to_reset_business_packages", exception);
         }
@@ -253,6 +299,23 @@ public final class JdbcBusinessPackageStore {
         @Override
         public void upsert(StatementProjectionView view) {
             store.upsertStatementProjection(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record RiskSnapshotAdapter(JdbcBusinessPackageStore store) implements RiskSnapshotReadModel {
+        @Override
+        public Optional<RiskSnapshotView> findByAccountId(String accountId) {
+            return store.loadRiskSnapshot(accountId);
+        }
+
+        @Override
+        public void upsert(RiskSnapshotView view) {
+            store.upsertRiskSnapshot(view);
         }
 
         @Override

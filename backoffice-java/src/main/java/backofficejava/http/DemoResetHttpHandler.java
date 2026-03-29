@@ -11,6 +11,7 @@ import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
 import com.sun.net.httpserver.HttpExchange;
 
 public final class DemoResetHttpHandler extends JsonHttpHandler {
@@ -25,7 +26,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         ParentExecutionStateReadModel parentExecutionStateReadModel,
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
-        StatementProjectionReadModel statementProjectionReadModel
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -39,7 +41,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
             parentExecutionStateReadModel,
             allocationStateReadModel,
             settlementProjectionReadModel,
-            statementProjectionReadModel
+            statementProjectionReadModel,
+            riskSnapshotReadModel
         ));
     }
 
@@ -55,7 +58,8 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         ParentExecutionStateReadModel parentExecutionStateReadModel,
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
-        StatementProjectionReadModel statementProjectionReadModel
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel
     ) {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             return new JsonResponse(204, new ResetResponse("OK"));
@@ -74,6 +78,7 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         allocationStateReadModel.reset();
         settlementProjectionReadModel.reset();
         statementProjectionReadModel.reset();
+        riskSnapshotReadModel.reset();
         return JsonResponse.ok(new ResetResponse("RESET"));
     }
 

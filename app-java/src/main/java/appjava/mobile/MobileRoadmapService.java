@@ -215,6 +215,10 @@ public final class MobileRoadmapService {
     }
 
     public RiskDeepDiveResponse buildRiskDeepDive() {
+        BackOfficeClient.RiskSnapshot riskSnapshot = backOfficeClient.fetchRiskSnapshot(accountId);
+        if (riskSnapshot != null) {
+            return mapRiskSnapshot(riskSnapshot);
+        }
         List<BackOfficePosition> positions = backOfficeClient.fetchPositions(accountId);
         AccountOverview overview = backOfficeClient.fetchOverview(accountId);
         double portfolioMarketValue = positions.stream()
@@ -302,6 +306,82 @@ public final class MobileRoadmapService {
                     "市場構造の利用",
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
                     "liquidity と spread widening を話す前提データ",
+                    null
+                )
+            )
+        );
+    }
+
+    private RiskDeepDiveResponse mapRiskSnapshot(BackOfficeClient.RiskSnapshot riskSnapshot) {
+        return new RiskDeepDiveResponse(
+            riskSnapshot.generatedAt(),
+            riskSnapshot.accountId(),
+            riskSnapshot.marketValue(),
+            riskSnapshot.cashBalance(),
+            riskSnapshot.concentration().stream()
+                .map(metric -> new ConcentrationMetric(
+                    metric.symbol(),
+                    metric.symbolName(),
+                    metric.exposure(),
+                    metric.weightPercent(),
+                    metric.note()
+                ))
+                .toList(),
+            riskSnapshot.liquidity().stream()
+                .map(metric -> new LiquidityMetric(
+                    metric.symbol(),
+                    metric.symbolName(),
+                    metric.positionQuantity(),
+                    metric.visibleTopOfBookQuantity(),
+                    metric.participationPercent(),
+                    metric.estimatedDaysToExit(),
+                    metric.note()
+                ))
+                .toList(),
+            riskSnapshot.scenarioLibrary().stream()
+                .map(entry -> new ScenarioLibraryEntry(
+                    entry.id(),
+                    entry.title(),
+                    entry.category(),
+                    entry.shock(),
+                    entry.rationale(),
+                    entry.focus()
+                ))
+                .toList(),
+            new BacktestingPreview(
+                riskSnapshot.backtesting().observationCount(),
+                riskSnapshot.backtesting().breachRatePercent(),
+                riskSnapshot.backtesting().averageTailLoss(),
+                riskSnapshot.backtesting().note(),
+                riskSnapshot.backtesting().samples().stream()
+                    .map(sample -> new BacktestSample(sample.label(), sample.pnl(), sample.breached()))
+                    .toList()
+            ),
+            riskSnapshot.modelBoundaries().stream()
+                .map(boundary -> new ModelBoundary(
+                    boundary.title(),
+                    boundary.whyItMatters(),
+                    boundary.whatIncluded(),
+                    boundary.whatExcluded()
+                ))
+                .toList(),
+            List.of(
+                new MobileLearningService.ImplementationAnchor(
+                    "risk snapshot 正本",
+                    "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/business/RiskSnapshotView.java",
+                    "concentration / liquidity / scenario / backtesting を account 単位で保持する projection",
+                    null
+                ),
+                new MobileLearningService.ImplementationAnchor(
+                    "risk snapshot 書き込み",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java",
+                    "replay scenario から risk snapshot を組み立てて backoffice-java へ書く入口",
+                    null
+                ),
+                new MobileLearningService.ImplementationAnchor(
+                    "risk snapshot 読み出し",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/clients/BackOfficeClient.java",
+                    "mobile risk 画面が backoffice-java 正本 snapshot を fetch する client",
                     null
                 )
             )

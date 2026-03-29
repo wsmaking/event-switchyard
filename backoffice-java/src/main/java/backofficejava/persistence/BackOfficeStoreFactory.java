@@ -31,11 +31,13 @@ import backofficejava.business.InMemoryParentExecutionStateReadModel;
 import backofficejava.business.InMemoryPostTradePackageReadModel;
 import backofficejava.business.InMemorySettlementProjectionReadModel;
 import backofficejava.business.InMemoryStatementProjectionReadModel;
+import backofficejava.business.InMemoryRiskSnapshotReadModel;
 import backofficejava.business.JdbcBusinessPackageStore;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,7 +57,8 @@ public final class BackOfficeStoreFactory {
                 "db/migration/V3__backoffice_aggregate_progress.sql",
                 "db/migration/V4__backoffice_business_packages.sql",
                 "db/migration/V5__backoffice_institutional_states.sql",
-                "db/migration/V6__backoffice_post_trade_projections.sql"
+                "db/migration/V6__backoffice_post_trade_projections.sql",
+                "db/migration/V7__backoffice_risk_snapshots.sql"
             );
             JdbcBackOfficeStore store = new JdbcBackOfficeStore(connectionFactory, accountId);
             JdbcBusinessPackageStore businessPackageStore = new JdbcBusinessPackageStore(connectionFactory);
@@ -75,6 +78,7 @@ public final class BackOfficeStoreFactory {
                 businessPackageStore.allocationStateReadModel(),
                 businessPackageStore.settlementProjectionReadModel(),
                 businessPackageStore.statementProjectionReadModel(),
+                businessPackageStore.riskSnapshotReadModel(),
                 offsetStore,
                 deadLetterStore,
                 pendingOrphanStore,
@@ -94,6 +98,7 @@ public final class BackOfficeStoreFactory {
         AllocationStateReadModel allocationStateReadModel = new InMemoryAllocationStateReadModel();
         SettlementProjectionReadModel settlementProjectionReadModel = new InMemorySettlementProjectionReadModel();
         StatementProjectionReadModel statementProjectionReadModel = new InMemoryStatementProjectionReadModel();
+        RiskSnapshotReadModel riskSnapshotReadModel = new InMemoryRiskSnapshotReadModel();
         Path offsetPath = resolvePath(
             System.getProperty(
                 "backoffice.gateway.audit.offset.path",
@@ -112,6 +117,7 @@ public final class BackOfficeStoreFactory {
             allocationStateReadModel,
             settlementProjectionReadModel,
             statementProjectionReadModel,
+            riskSnapshotReadModel,
             new FileAuditOffsetStore(offsetPath),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),

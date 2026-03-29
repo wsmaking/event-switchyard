@@ -1089,6 +1089,8 @@ repo に入れるべきもの:
 - [x] mobile risk に scenario library、concentration、liquidity、backtesting preview を追加
 - [x] risk 画面に model boundary を追加
 - [x] app-java に `risk/deep-dive` API を追加
+- [x] backoffice-java に risk snapshot 正本 read model を追加
+- [x] replay scenario から risk snapshot を upsert し、mobile が正本 snapshot を優先して読む形に変更
 
 追加すべき論点:
 
@@ -1112,12 +1114,18 @@ repo に入れるべきもの:
   - 何を省略しているか
   - どう誤るか
   を説明するカードを増やす
+- [x] account 単位の risk snapshot を `backoffice-java` の public/internal API で read/write できるようにする
+- [ ] margin utilization と limit breach を独立 projection にする
+- [ ] scenario evaluation 履歴を保存する
+- [ ] backtesting を時系列永続化する
 
 この優先度で増やすファイル:
 
 - `frontend/src/components/mobile/MobileRiskView.tsx` を拡張
 - `frontend/src/offline/mobileRoadmapOffline.ts`
 - `app-java/src/main/java/appjava/mobile/MobileRoadmapService.java`
+- `backoffice-java/src/main/java/backofficejava/business/RiskSnapshotView.java`
+- `backoffice-java/src/main/java/backofficejava/http/RiskSnapshotHttpHandler.java`
 
 ### 優先度 5: multi-asset 化
 

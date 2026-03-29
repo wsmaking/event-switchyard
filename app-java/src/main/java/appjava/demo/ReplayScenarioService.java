@@ -31,6 +31,13 @@ import appjava.clients.BackOfficeClient.CorporateActionHook;
 import appjava.clients.BackOfficeClient.FeeBreakdown;
 import appjava.clients.BackOfficeClient.ParentExecutionState;
 import appjava.clients.BackOfficeClient.PostTradeStage;
+import appjava.clients.BackOfficeClient.RiskBacktestSample;
+import appjava.clients.BackOfficeClient.RiskBacktestingPreview;
+import appjava.clients.BackOfficeClient.RiskConcentrationMetric;
+import appjava.clients.BackOfficeClient.RiskLiquidityMetric;
+import appjava.clients.BackOfficeClient.RiskModelBoundary;
+import appjava.clients.BackOfficeClient.RiskScenarioLibraryEntry;
+import appjava.clients.BackOfficeClient.RiskSnapshot;
 import appjava.clients.BackOfficeClient.SettlementProjection;
 import appjava.clients.BackOfficeClient.SettlementCheck;
 import appjava.clients.BackOfficeClient.StatementLine;
@@ -131,6 +138,7 @@ public final class ReplayScenarioService {
         PostTradePackage postTradePackage = buildPostTradePackage(order, snapshot, fills, marketStructure);
         SettlementProjection settlementProjection = buildSettlementProjection(order, snapshot, postTradePackage);
         StatementProjection statementProjection = buildStatementProjection(order, snapshot, postTradePackage);
+        RiskSnapshot riskSnapshot = buildRiskSnapshot(snapshot);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
             symbol,
@@ -158,6 +166,7 @@ public final class ReplayScenarioService {
         backOfficeClient.upsertPostTradePackage(postTradePackage);
         backOfficeClient.upsertSettlementProjection(settlementProjection);
         backOfficeClient.upsertStatementProjection(statementProjection);
+        backOfficeClient.upsertRiskSnapshot(riskSnapshot);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -768,6 +777,123 @@ public final class ReplayScenarioService {
                 "顧客向け表現と raw event ref を混在させない"
             )
         );
+    }
+
+    private RiskSnapshot buildRiskSnapshot(ScenarioSnapshot snapshot) {
+        double marketValue = snapshot.positions().stream()
+            .mapToDouble(position -> marketDataService.getCurrentPrice(position.symbol()) * position.netQty())
+            .sum();
+
+        List<RiskConcentrationMetric> concentration = snapshot.positions().stream()
+            .filter(position -> position.netQty() != 0L)
+            .map(position -> {
+                double currentPrice = marketDataService.getCurrentPrice(position.symbol());
+                double exposure = currentPrice * position.netQty();
+                double weight = marketValue == 0.0 ? 0.0 : (exposure / marketValue) * 100.0;
+                String note = Math.abs(weight) >= 45.0
+                    ? "single-name 依存が強く stress と liquidity を同時に見る領域"
+                    : Math.abs(weight) >= 25.0
+                    ? "portfolio の主因。削減や hedge の優先候補"
+                    : "補助的寄与。相関と scenario で読む";
+                return new RiskConcentrationMetric(position.symbol(), marketDataService.getStockInfo(position.symbol()).name(), round2(exposure), round2(weight), note);
+            })
+            .toList();
+
+        List<RiskLiquidityMetric> liquidity = snapshot.positions().stream()
+            .filter(position -> position.netQty() != 0L)
+            .map(position -> {
+                MarketStructureSnapshot structure = marketDataService.getMarketStructure(position.symbol());
+                long visibleTop = structure.bidQuantity() + structure.askQuantity();
+                double participation = visibleTop == 0 ? 0.0 : ((double) Math.abs(position.netQty()) / visibleTop) * 100.0;
+                double daysToExit = visibleTop == 0 ? 0.0 : Math.max(0.5, Math.abs(position.netQty()) / Math.max(visibleTop * 6.0, 1.0));
+                String note = participation > 150.0
+                    ? "top-of-book に対して大きく複数セッション前提"
+                    : participation > 60.0
+                    ? "POV や care order が欲しい水準"
+                    : "通常の participation 範囲で説明しやすい";
+                return new RiskLiquidityMetric(
+                    position.symbol(),
+                    marketDataService.getStockInfo(position.symbol()).name(),
+                    position.netQty(),
+                    visibleTop,
+                    round2(participation),
+                    round2(daysToExit),
+                    note
+                );
+            })
+            .toList();
+
+        List<RiskScenarioLibraryEntry> scenarios = List.of(
+            new RiskScenarioLibraryEntry("single-name-gap", "単一銘柄ギャップダウン", "concentration", "-12%", "材料イベントで one-name risk が顕在化", "single-name exposure と liquidity を同時に確認"),
+            new RiskScenarioLibraryEntry("market-beta-down", "市場全体の beta shock", "portfolio", "-5%", "beta の高い book で同方向リスクが顕在化", "gross / net を一緒に説明"),
+            new RiskScenarioLibraryEntry("spread-widening", "流動性悪化と spread 拡大", "liquidity", "+40% spread", "価格より execution cost が悪化", "arrival benchmark と fill quality を再評価"),
+            new RiskScenarioLibraryEntry("basis-break", "ヘッジ不一致", "hedge", "相関崩れ", "ヘッジ対象と実ポジションの基礎関係が崩れる", "hedge ratio だけで安心しない")
+        );
+
+        List<RiskBacktestSample> samples = buildRiskBacktestSamples(snapshot.positions());
+        long breachCount = samples.stream().filter(RiskBacktestSample::breached).count();
+        double breachRate = samples.isEmpty() ? 0.0 : (breachCount * 100.0) / samples.size();
+        double averageTailLoss = samples.stream()
+            .mapToDouble(RiskBacktestSample::pnl)
+            .filter(value -> value < 0.0)
+            .map(Math::abs)
+            .average()
+            .orElse(0.0);
+
+        return new RiskSnapshot(
+            System.currentTimeMillis(),
+            accountId,
+            round2(marketValue),
+            round2(snapshot.cashBalance()),
+            concentration,
+            liquidity,
+            scenarios,
+            new RiskBacktestingPreview(
+                samples.size(),
+                round2(breachRate),
+                round2(averageTailLoss),
+                "教育用 backtest。直近 tick を使い、stress breach を単純判定している。",
+                samples
+            ),
+            List.of(
+                new RiskModelBoundary("Concentration", "gross / net と weight を見る入口", "current price と保有数量", "相関と beta decomposition"),
+                new RiskModelBoundary("Liquidity", "exit difficulty を直感で掴む入口", "top-of-book と position size", "真の market impact model、queue depletion"),
+                new RiskModelBoundary("Scenario Library", "何を shock するかを業務言語に変換", "single-name / market / spread widening", "stochastic correlation、vol surface"),
+                new RiskModelBoundary("Backtesting", "前提が外れた回数をざっくり把握", "簡易 breach count と tail loss", "regulatory backtesting や model governance")
+            ),
+            List.of(
+                concentration.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0)
+                    ? "single-name concentration が高く、liquidity と stress を同時に見る必要あり"
+                    : "concentration は分散されているが、相関 shock を別で確認する",
+                liquidity.stream().anyMatch(metric -> metric.participationPercent() >= 100.0)
+                    ? "visible top-of-book に対して position が大きく、exit 設計が必要"
+                    : "liquidity 余地はあるが spread widening scenario を別途確認する"
+            )
+        );
+    }
+
+    private List<RiskBacktestSample> buildRiskBacktestSamples(List<BackOfficePosition> positions) {
+        java.util.ArrayList<RiskBacktestSample> samples = new java.util.ArrayList<>();
+        if (positions.isEmpty()) {
+            return List.of();
+        }
+        int sampleCount = 8;
+        for (int index = 0; index < sampleCount; index++) {
+            double pnl = 0.0;
+            for (BackOfficePosition position : positions) {
+                List<appjava.market.PricePoint> history = marketDataService.getPriceHistory(position.symbol(), 60);
+                if (history.size() < index + 2) {
+                    continue;
+                }
+                int currentIndex = history.size() - 1 - index;
+                double previous = history.get(currentIndex - 1).price();
+                double current = history.get(currentIndex).price();
+                pnl += (current - previous) * position.netQty();
+            }
+            double rounded = round2(pnl);
+            samples.add(new RiskBacktestSample("tick-" + (sampleCount - index), rounded, rounded < -80_000.0));
+        }
+        return List.copyOf(samples);
     }
 
     private List<LedgerEntry> buildLedgerEntries(OrderView order, ScenarioSnapshot snapshot) {
