@@ -142,8 +142,16 @@ public final class MobileRoadmapService {
             BackOfficeClient.PostTradePackage postTradePackage = backOfficeClient.fetchPostTradePackage(anchorOrder.id());
             BackOfficeClient.SettlementProjection settlementProjection = backOfficeClient.fetchSettlementProjection(anchorOrder.id());
             BackOfficeClient.StatementProjection statementProjection = backOfficeClient.fetchStatementProjection(anchorOrder.id());
+            BackOfficeClient.SettlementExceptionWorkflow settlementExceptionWorkflow = backOfficeClient.fetchSettlementExceptionWorkflow(anchorOrder.id());
+            BackOfficeClient.CorporateActionWorkflow corporateActionWorkflow = backOfficeClient.fetchCorporateActionWorkflow(anchorOrder.id());
             if (postTradePackage != null) {
-                return mapPostTradePackage(postTradePackage, settlementProjection, statementProjection);
+                return mapPostTradePackage(
+                    postTradePackage,
+                    settlementProjection,
+                    statementProjection,
+                    settlementExceptionWorkflow,
+                    corporateActionWorkflow
+                );
             }
         }
         String orderId = anchorOrder == null ? null : anchorOrder.id();
@@ -210,14 +218,19 @@ public final class MobileRoadmapService {
             ),
             null,
             null,
+            null,
+            null,
             postTradeAnchors()
         );
     }
 
     public RiskDeepDiveResponse buildRiskDeepDive() {
         BackOfficeClient.RiskSnapshot riskSnapshot = backOfficeClient.fetchRiskSnapshot(accountId);
+        BackOfficeClient.MarginProjection marginProjection = backOfficeClient.fetchMarginProjection(accountId);
+        BackOfficeClient.ScenarioEvaluationHistory scenarioEvaluationHistory = backOfficeClient.fetchScenarioEvaluationHistory(accountId);
+        BackOfficeClient.BacktestHistory backtestHistory = backOfficeClient.fetchBacktestHistory(accountId);
         if (riskSnapshot != null) {
-            return mapRiskSnapshot(riskSnapshot);
+            return mapRiskSnapshot(riskSnapshot, marginProjection, scenarioEvaluationHistory, backtestHistory);
         }
         List<BackOfficePosition> positions = backOfficeClient.fetchPositions(accountId);
         AccountOverview overview = backOfficeClient.fetchOverview(accountId);
@@ -289,6 +302,46 @@ public final class MobileRoadmapService {
                 "教育用 backtest。観測窓は market data の直近 tick を使い、stress breach を単純判定している。",
                 backtestSamples
             ),
+            new MarginProjection(
+                "educational portfolio margin proxy",
+                round2(Math.max(1_500_000.0, overview.availableBuyingPower() + overview.reservedBuyingPower() + 750_000.0)),
+                round2((Math.abs(portfolioMarketValue) * 0.18) + concentrations.stream().mapToDouble(metric -> Math.abs(metric.weightPercent()) >= 25.0 ? 90_000.0 : 30_000.0).sum()),
+                round2((Math.abs(portfolioMarketValue) * 0.18) / Math.max(1_500_000.0, overview.availableBuyingPower() + overview.reservedBuyingPower() + 750_000.0) * 100.0),
+                concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? "WATCH" : "WITHIN_LIMIT",
+                concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0) ? List.of("single-name concentration alert") : List.of(),
+                concentrations.stream().anyMatch(metric -> Math.abs(metric.weightPercent()) >= 45.0)
+                    ? List.of("headroom を再確認し、scenario stress を追加する")
+                    : List.of("margin headroom は維持されている"),
+                List.of(
+                    "reservation は order-level の拘束、margin は portfolio-level の許容度",
+                    "清算機関モデルと相関は簡略化している",
+                    "feed stale 時は valuation guard を優先する"
+                )
+            ),
+            new ScenarioEvaluationHistory(
+                "generated now",
+                scenarios.stream()
+                    .limit(3)
+                    .map(entry -> new ScenarioEvaluation(
+                        entry.title(),
+                        entry.shock(),
+                        round2(-Math.abs(portfolioMarketValue) * ("liquidity".equals(entry.category()) ? 0.008 : "portfolio".equals(entry.category()) ? 0.05 : 0.12)),
+                        entry.focus()
+                    ))
+                    .toList()
+            ),
+            new BacktestHistory(
+                "直近 " + backtestSamples.size() + " tick",
+                round2(breachRate),
+                backtestSamples.stream()
+                    .map(sample -> new BacktestHistoryPoint(
+                        sample.label(),
+                        sample.pnl(),
+                        sample.breached(),
+                        sample.breached() ? "loss limit を超えたサンプル" : "想定範囲内"
+                    ))
+                    .toList()
+            ),
             List.of(
                 new ModelBoundary("Concentration", "gross / net と weight を見る入口", "current price と保有数量", "相関と beta decomposition"),
                 new ModelBoundary("Liquidity", "exit difficulty を直感で掴む入口", "top-of-book と position size", "真の market impact model、queue depletion、venue fragmentation"),
@@ -312,7 +365,12 @@ public final class MobileRoadmapService {
         );
     }
 
-    private RiskDeepDiveResponse mapRiskSnapshot(BackOfficeClient.RiskSnapshot riskSnapshot) {
+    private RiskDeepDiveResponse mapRiskSnapshot(
+        BackOfficeClient.RiskSnapshot riskSnapshot,
+        BackOfficeClient.MarginProjection marginProjection,
+        BackOfficeClient.ScenarioEvaluationHistory scenarioEvaluationHistory,
+        BackOfficeClient.BacktestHistory backtestHistory
+    ) {
         return new RiskDeepDiveResponse(
             riskSnapshot.generatedAt(),
             riskSnapshot.accountId(),
@@ -355,6 +413,29 @@ public final class MobileRoadmapService {
                 riskSnapshot.backtesting().note(),
                 riskSnapshot.backtesting().samples().stream()
                     .map(sample -> new BacktestSample(sample.label(), sample.pnl(), sample.breached()))
+                    .toList()
+            ),
+            marginProjection == null ? null : new MarginProjection(
+                marginProjection.methodology(),
+                marginProjection.marginLimit(),
+                marginProjection.marginUsed(),
+                marginProjection.utilizationPercent(),
+                marginProjection.breachStatus(),
+                marginProjection.breachedLimits(),
+                marginProjection.requiredActions(),
+                marginProjection.modelNotes()
+            ),
+            scenarioEvaluationHistory == null ? null : new ScenarioEvaluationHistory(
+                scenarioEvaluationHistory.lastEvaluatedAtLabel(),
+                scenarioEvaluationHistory.evaluations().stream()
+                    .map(entry -> new ScenarioEvaluation(entry.title(), entry.shock(), entry.pnlDelta(), entry.note()))
+                    .toList()
+            ),
+            backtestHistory == null ? null : new BacktestHistory(
+                backtestHistory.windowLabel(),
+                backtestHistory.breachRatePercent(),
+                backtestHistory.history().stream()
+                    .map(point -> new BacktestHistoryPoint(point.label(), point.pnl(), point.breached(), point.note()))
                     .toList()
             ),
             riskSnapshot.modelBoundaries().stream()
@@ -773,7 +854,9 @@ public final class MobileRoadmapService {
     private PostTradeGuideResponse mapPostTradePackage(
         BackOfficeClient.PostTradePackage postTradePackage,
         BackOfficeClient.SettlementProjection settlementProjection,
-        BackOfficeClient.StatementProjection statementProjection
+        BackOfficeClient.StatementProjection statementProjection,
+        BackOfficeClient.SettlementExceptionWorkflow settlementExceptionWorkflow,
+        BackOfficeClient.CorporateActionWorkflow corporateActionWorkflow
     ) {
         return new PostTradeGuideResponse(
             postTradePackage.generatedAt(),
@@ -834,6 +917,26 @@ public final class MobileRoadmapService {
                     .map(line -> new StatementLine(line.label(), line.value(), line.note()))
                     .toList(),
                 statementProjection.controls()
+            ),
+            settlementExceptionWorkflow == null ? null : new SettlementExceptionWorkflow(
+                settlementExceptionWorkflow.workflowStatus(),
+                settlementExceptionWorkflow.exceptionType(),
+                settlementExceptionWorkflow.blockedStage(),
+                settlementExceptionWorkflow.ageingLabel(),
+                settlementExceptionWorkflow.rootCause(),
+                settlementExceptionWorkflow.nextAction(),
+                settlementExceptionWorkflow.controls(),
+                settlementExceptionWorkflow.operatorNotes()
+            ),
+            corporateActionWorkflow == null ? null : new CorporateActionWorkflow(
+                corporateActionWorkflow.eventName(),
+                corporateActionWorkflow.workflowStatus(),
+                corporateActionWorkflow.recordDateLabel(),
+                corporateActionWorkflow.effectiveDateLabel(),
+                corporateActionWorkflow.customerImpact(),
+                corporateActionWorkflow.ledgerImpact(),
+                corporateActionWorkflow.nextAction(),
+                corporateActionWorkflow.controls()
             ),
             postTradeAnchors()
         );
@@ -1087,6 +1190,8 @@ public final class MobileRoadmapService {
         List<CorporateActionHook> corporateActionHooks,
         SettlementProjection settlementProjection,
         StatementProjection statementProjection,
+        SettlementExceptionWorkflow settlementExceptionWorkflow,
+        CorporateActionWorkflow corporateActionWorkflow,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
@@ -1167,6 +1272,30 @@ public final class MobileRoadmapService {
     ) {
     }
 
+    public record SettlementExceptionWorkflow(
+        String workflowStatus,
+        String exceptionType,
+        String blockedStage,
+        String ageingLabel,
+        String rootCause,
+        String nextAction,
+        List<String> controls,
+        List<String> operatorNotes
+    ) {
+    }
+
+    public record CorporateActionWorkflow(
+        String eventName,
+        String workflowStatus,
+        String recordDateLabel,
+        String effectiveDateLabel,
+        String customerImpact,
+        String ledgerImpact,
+        String nextAction,
+        List<String> controls
+    ) {
+    }
+
     public record RiskDeepDiveResponse(
         long generatedAt,
         String accountId,
@@ -1176,6 +1305,9 @@ public final class MobileRoadmapService {
         List<LiquidityMetric> liquidity,
         List<ScenarioLibraryEntry> scenarioLibrary,
         BacktestingPreview backtesting,
+        MarginProjection marginProjection,
+        ScenarioEvaluationHistory scenarioEvaluationHistory,
+        BacktestHistory backtestHistory,
         List<ModelBoundary> modelBoundaries,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
@@ -1224,6 +1356,47 @@ public final class MobileRoadmapService {
         String label,
         double pnl,
         boolean breached
+    ) {
+    }
+
+    public record MarginProjection(
+        String methodology,
+        double marginLimit,
+        double marginUsed,
+        double utilizationPercent,
+        String breachStatus,
+        List<String> breachedLimits,
+        List<String> requiredActions,
+        List<String> modelNotes
+    ) {
+    }
+
+    public record ScenarioEvaluationHistory(
+        String lastEvaluatedAtLabel,
+        List<ScenarioEvaluation> evaluations
+    ) {
+    }
+
+    public record ScenarioEvaluation(
+        String title,
+        String shock,
+        double pnlDelta,
+        String note
+    ) {
+    }
+
+    public record BacktestHistory(
+        String windowLabel,
+        double breachRatePercent,
+        List<BacktestHistoryPoint> history
+    ) {
+    }
+
+    public record BacktestHistoryPoint(
+        String label,
+        double pnl,
+        boolean breached,
+        String note
     ) {
     }
 

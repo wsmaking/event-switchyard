@@ -38,11 +38,18 @@ import appjava.clients.BackOfficeClient.RiskLiquidityMetric;
 import appjava.clients.BackOfficeClient.RiskModelBoundary;
 import appjava.clients.BackOfficeClient.RiskScenarioLibraryEntry;
 import appjava.clients.BackOfficeClient.RiskSnapshot;
+import appjava.clients.BackOfficeClient.SettlementExceptionWorkflow;
 import appjava.clients.BackOfficeClient.SettlementProjection;
 import appjava.clients.BackOfficeClient.SettlementCheck;
 import appjava.clients.BackOfficeClient.StatementLine;
 import appjava.clients.BackOfficeClient.StatementProjection;
 import appjava.clients.BackOfficeClient.StatementPreview;
+import appjava.clients.BackOfficeClient.CorporateActionWorkflow;
+import appjava.clients.BackOfficeClient.MarginProjection;
+import appjava.clients.BackOfficeClient.ScenarioEvaluationHistory;
+import appjava.clients.BackOfficeClient.ScenarioEvaluationEntry;
+import appjava.clients.BackOfficeClient.BacktestHistory;
+import appjava.clients.BackOfficeClient.BacktestHistoryPoint;
 
 import java.time.Instant;
 import java.util.List;
@@ -139,6 +146,11 @@ public final class ReplayScenarioService {
         SettlementProjection settlementProjection = buildSettlementProjection(order, snapshot, postTradePackage);
         StatementProjection statementProjection = buildStatementProjection(order, snapshot, postTradePackage);
         RiskSnapshot riskSnapshot = buildRiskSnapshot(snapshot);
+        SettlementExceptionWorkflow settlementExceptionWorkflow = buildSettlementExceptionWorkflow(order, snapshot);
+        CorporateActionWorkflow corporateActionWorkflow = buildCorporateActionWorkflow(order, snapshot);
+        MarginProjection marginProjection = buildMarginProjection(snapshot, riskSnapshot);
+        ScenarioEvaluationHistory scenarioEvaluationHistory = buildScenarioEvaluationHistory(snapshot);
+        BacktestHistory backtestHistory = buildBacktestHistory(riskSnapshot);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
             symbol,
@@ -167,6 +179,11 @@ public final class ReplayScenarioService {
         backOfficeClient.upsertSettlementProjection(settlementProjection);
         backOfficeClient.upsertStatementProjection(statementProjection);
         backOfficeClient.upsertRiskSnapshot(riskSnapshot);
+        backOfficeClient.upsertSettlementExceptionWorkflow(settlementExceptionWorkflow);
+        backOfficeClient.upsertCorporateActionWorkflow(corporateActionWorkflow);
+        backOfficeClient.upsertMarginProjection(marginProjection);
+        backOfficeClient.upsertScenarioEvaluationHistory(scenarioEvaluationHistory);
+        backOfficeClient.upsertBacktestHistory(backtestHistory);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -869,6 +886,165 @@ public final class ReplayScenarioService {
                     ? "visible top-of-book に対して position が大きく、exit 設計が必要"
                     : "liquidity 余地はあるが spread widening scenario を別途確認する"
             )
+        );
+    }
+
+    private SettlementExceptionWorkflow buildSettlementExceptionWorkflow(OrderView order, ScenarioSnapshot snapshot) {
+        String workflowStatus = switch (snapshot.status()) {
+            case FILLED -> "CLEAR";
+            case PARTIALLY_FILLED -> "WATCH";
+            case REJECTED -> "NOT_APPLICABLE";
+            case CANCELED, EXPIRED -> "RELEASED";
+            default -> "PENDING_FILL";
+        };
+        String exceptionType = switch (snapshot.status()) {
+            case PARTIALLY_FILLED -> "PARTIAL_EXECUTION";
+            case CANCELED -> "MANUAL_RELEASE";
+            case EXPIRED -> "TIME_IN_FORCE";
+            case REJECTED -> "PRE_TRADE_REJECT";
+            default -> "NONE";
+        };
+        String blockedStage = switch (snapshot.status()) {
+            case PARTIALLY_FILLED -> "allocation";
+            case CANCELED, EXPIRED -> "settlement";
+            case REJECTED -> "execution";
+            default -> "none";
+        };
+        String nextAction = switch (snapshot.status()) {
+            case PARTIALLY_FILLED -> "残数量の allocation / statement 出し分けを確認する";
+            case CANCELED, EXPIRED -> "拘束解放と顧客向け説明が一致しているか確認する";
+            case REJECTED -> "risk reject と post-trade 入口が混ざっていないか確認する";
+            default -> "例外ワークフローは閉じている";
+        };
+        return new SettlementExceptionWorkflow(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            workflowStatus,
+            exceptionType,
+            blockedStage,
+            snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "T+0 監視中" : "T+0 問題なし",
+            switch (snapshot.status()) {
+                case PARTIALLY_FILLED -> "親注文がまだ working で fill / statement 数量が分かれる";
+                case CANCELED -> "reservation 解放は済んでも fill 不在のまま order は終了";
+                case EXPIRED -> "time-in-force 失効で settlement 不要になった";
+                case REJECTED -> "execution 前 reject で post-trade workflow は起動しない";
+                default -> "追加例外なし";
+            },
+            nextAction,
+            List.of(
+                "fill quantity と settlement quantity を同一視しない",
+                "statement draft を final-out 完了より先に確定しない",
+                "fail / exception は order status ではなく post-trade workflow で扱う"
+            ),
+            List.of(
+                snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "middle office に partial allocation の確認を依頼" : "operator escalation 不要",
+                "ledger と statement を同じ event ref で説明できるように残す"
+            )
+        );
+    }
+
+    private CorporateActionWorkflow buildCorporateActionWorkflow(OrderView order, ScenarioSnapshot snapshot) {
+        String eventName = switch (order.symbol()) {
+            case "7203" -> "Cash Dividend";
+            case "6758" -> "Stock Split";
+            default -> "Ticker Change";
+        };
+        return new CorporateActionWorkflow(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            eventName,
+            snapshot.filledQuantity() > 0L ? "WATCH" : "STANDBY",
+            "record date pending",
+            "effective date pending",
+            snapshot.filledQuantity() > 0L
+                ? "保有数量と平均単価の説明に corporate action を織り込む必要がある"
+                : "保有残が無いので顧客向け影響は限定的",
+            eventName + " が発生すると statement line と position quantity の見え方が変わる",
+            snapshot.filledQuantity() > 0L ? "asset master と statement 文面を同時に更新する" : "watch list のみ更新する",
+            List.of(
+                "order history は変えず position / statement 側で変換する",
+                "record date / effective date / payment date を別欄で持つ",
+                "corporate action 前後で ledger continuity を維持する"
+            )
+        );
+    }
+
+    private MarginProjection buildMarginProjection(ScenarioSnapshot snapshot, RiskSnapshot riskSnapshot) {
+        double marketValue = Math.abs(riskSnapshot.marketValue());
+        double liquidityBuffer = riskSnapshot.liquidity().stream()
+            .mapToDouble(metric -> metric.participationPercent() >= 100.0 ? 120_000.0 : metric.participationPercent() >= 60.0 ? 60_000.0 : 25_000.0)
+            .sum();
+        double concentrationBuffer = riskSnapshot.concentration().stream()
+            .mapToDouble(metric -> Math.abs(metric.weightPercent()) >= 45.0 ? 180_000.0 : Math.abs(metric.weightPercent()) >= 25.0 ? 90_000.0 : 30_000.0)
+            .sum();
+        double marginUsed = round2((marketValue * 0.18) + liquidityBuffer + concentrationBuffer);
+        double marginLimit = Math.max(1_500_000.0, round2(snapshot.availableBuyingPower() + snapshot.reservedBuyingPower() + 750_000.0));
+        double utilization = marginLimit == 0.0 ? 0.0 : round2((marginUsed / marginLimit) * 100.0);
+        String breachStatus = utilization >= 95.0
+            ? "BREACH"
+            : utilization >= 80.0
+            ? "WATCH"
+            : "WITHIN_LIMIT";
+        List<String> breachedLimits = new java.util.ArrayList<>();
+        if (utilization >= 80.0) {
+            breachedLimits.add("portfolio margin utilization " + utilization + "%");
+        }
+        if (riskSnapshot.marginAlerts().stream().anyMatch(alert -> alert.contains("single-name"))) {
+            breachedLimits.add("single-name concentration alert");
+        }
+        return new MarginProjection(
+            System.currentTimeMillis(),
+            accountId,
+            "educational portfolio margin proxy",
+            marginLimit,
+            marginUsed,
+            utilization,
+            breachStatus,
+            breachedLimits,
+            breachStatus.equals("BREACH")
+                ? List.of("new order を抑制し、削減 / hedge を優先する", "liquidity stress と concentration explanation を更新する")
+                : breachStatus.equals("WATCH")
+                ? List.of("headroom を毎注文で再確認する", "scenario stress を追加で回す")
+                : List.of("現在は margin headroom あり"),
+            List.of(
+                "reservation は order-level の拘束、margin は portfolio-level の許容度",
+                "資産相関と清算機関ルールは簡略化している",
+                "feed stale 時は valuation と margin の両方を guard 対象にする"
+            )
+        );
+    }
+
+    private ScenarioEvaluationHistory buildScenarioEvaluationHistory(ScenarioSnapshot snapshot) {
+        return new ScenarioEvaluationHistory(
+            System.currentTimeMillis(),
+            accountId,
+            "latest replay at " + new java.util.Date(snapshot.statusEventAt() != null ? snapshot.statusEventAt() : System.currentTimeMillis()),
+            List.of(
+                new ScenarioEvaluationEntry("single-name gap", "-12%", round2(-snapshot.fillNotional() * 0.12), "one-name shock の最初の説明軸"),
+                new ScenarioEvaluationEntry("market beta down", "-5%", round2(-snapshot.fillNotional() * 0.05), "gross / net の影響を見る軸"),
+                new ScenarioEvaluationEntry("spread widening", "+40% spread", round2(-Math.abs(snapshot.fillNotional()) * 0.008), "execution quality と liquidity を同時に見る軸")
+            )
+        );
+    }
+
+    private BacktestHistory buildBacktestHistory(RiskSnapshot riskSnapshot) {
+        return new BacktestHistory(
+            System.currentTimeMillis(),
+            accountId,
+            "直近 8 tick",
+            riskSnapshot.backtesting().breachRatePercent(),
+            riskSnapshot.backtesting().samples().stream()
+                .map(sample -> new BacktestHistoryPoint(
+                    sample.label(),
+                    sample.pnl(),
+                    sample.breached(),
+                    sample.breached() ? "loss limit を超えたサンプル" : "想定範囲内"
+                ))
+                .toList()
         );
     }
 

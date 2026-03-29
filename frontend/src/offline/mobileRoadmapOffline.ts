@@ -217,6 +217,8 @@ export function getOfflineMobilePostTradeGuide(): MobilePostTradeGuide {
     ],
     settlementProjection: null,
     statementProjection: null,
+    settlementExceptionWorkflow: null,
+    corporateActionWorkflow: null,
     implementationAnchors: [
       anchor('fills / ledger client', '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/clients/BackOfficeClient.java', 'post-trade 説明のために fills と ledger を引く入口'),
       anchor('BackOffice ledger', '/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger', 'cash / position / realized PnL の正本'),
@@ -263,6 +265,9 @@ export function getOfflineMobileRiskDeepDive(): MobileRiskDeepDive {
         { label: 'tick-1', pnl: -31000, breached: false },
       ],
     },
+    marginProjection: null,
+    scenarioEvaluationHistory: null,
+    backtestHistory: null,
     modelBoundaries: [
       { title: 'Concentration', whyItMatters: 'gross / net と weight を見る入口', whatIncluded: 'current price と保有数量', whatExcluded: '相関と beta decomposition' },
       { title: 'Liquidity', whyItMatters: 'exit difficulty を直感で掴む入口', whatIncluded: 'top-of-book と position size', whatExcluded: 'market impact model、queue depletion、venue fragmentation' },

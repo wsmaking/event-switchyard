@@ -16,6 +16,11 @@ import backofficejava.business.AllocationStateReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
 
 public record BackOfficeRuntime(
     AccountOverviewReadModel accountOverviewReadModel,
@@ -30,6 +35,11 @@ public record BackOfficeRuntime(
     SettlementProjectionReadModel settlementProjectionReadModel,
     StatementProjectionReadModel statementProjectionReadModel,
     RiskSnapshotReadModel riskSnapshotReadModel,
+    SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+    CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+    MarginProjectionReadModel marginProjectionReadModel,
+    ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+    BacktestHistoryReadModel backtestHistoryReadModel,
     AuditOffsetStore auditOffsetStore,
     DeadLetterStore deadLetterStore,
     PendingOrphanStore pendingOrphanStore,

@@ -14,6 +14,11 @@ import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -34,6 +39,11 @@ public final class BackOfficeHttpServer {
     private final SettlementProjectionReadModel settlementProjectionReadModel;
     private final StatementProjectionReadModel statementProjectionReadModel;
     private final RiskSnapshotReadModel riskSnapshotReadModel;
+    private final SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel;
+    private final CorporateActionWorkflowReadModel corporateActionWorkflowReadModel;
+    private final MarginProjectionReadModel marginProjectionReadModel;
+    private final ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel;
+    private final BacktestHistoryReadModel backtestHistoryReadModel;
     private final GatewayAuditIntakeService intakeService;
     private final BusEventIntakeService busEventIntakeService;
 
@@ -51,6 +61,11 @@ public final class BackOfficeHttpServer {
         SettlementProjectionReadModel settlementProjectionReadModel,
         StatementProjectionReadModel statementProjectionReadModel,
         RiskSnapshotReadModel riskSnapshotReadModel,
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+        MarginProjectionReadModel marginProjectionReadModel,
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+        BacktestHistoryReadModel backtestHistoryReadModel,
         GatewayAuditIntakeService intakeService,
         BusEventIntakeService busEventIntakeService
     ) {
@@ -67,6 +82,11 @@ public final class BackOfficeHttpServer {
         this.settlementProjectionReadModel = settlementProjectionReadModel;
         this.statementProjectionReadModel = statementProjectionReadModel;
         this.riskSnapshotReadModel = riskSnapshotReadModel;
+        this.settlementExceptionWorkflowReadModel = settlementExceptionWorkflowReadModel;
+        this.corporateActionWorkflowReadModel = corporateActionWorkflowReadModel;
+        this.marginProjectionReadModel = marginProjectionReadModel;
+        this.scenarioEvaluationHistoryReadModel = scenarioEvaluationHistoryReadModel;
+        this.backtestHistoryReadModel = backtestHistoryReadModel;
         this.intakeService = intakeService;
         this.busEventIntakeService = busEventIntakeService;
     }
@@ -91,6 +111,11 @@ public final class BackOfficeHttpServer {
         server.createContext("/business/settlement-projection", new SettlementProjectionHttpHandler(settlementProjectionReadModel));
         server.createContext("/business/statement-projection", new StatementProjectionHttpHandler(statementProjectionReadModel));
         server.createContext("/business/risk-snapshot", new RiskSnapshotHttpHandler(riskSnapshotReadModel));
+        server.createContext("/business/settlement-exception-workflow", new SettlementExceptionWorkflowHttpHandler(settlementExceptionWorkflowReadModel));
+        server.createContext("/business/corporate-action-workflow", new CorporateActionWorkflowHttpHandler(corporateActionWorkflowReadModel));
+        server.createContext("/business/margin-projection", new MarginProjectionHttpHandler(marginProjectionReadModel));
+        server.createContext("/business/scenario-evaluation-history", new ScenarioEvaluationHistoryHttpHandler(scenarioEvaluationHistoryReadModel));
+        server.createContext("/business/backtest-history", new BacktestHistoryHttpHandler(backtestHistoryReadModel));
         server.createContext(
             "/demo/reset",
             new DemoResetHttpHandler(
@@ -105,7 +130,12 @@ public final class BackOfficeHttpServer {
                 allocationStateReadModel,
                 settlementProjectionReadModel,
                 statementProjectionReadModel,
-                riskSnapshotReadModel
+                riskSnapshotReadModel,
+                settlementExceptionWorkflowReadModel,
+                corporateActionWorkflowReadModel,
+                marginProjectionReadModel,
+                scenarioEvaluationHistoryReadModel,
+                backtestHistoryReadModel
             )
         );
         server.createContext(
@@ -122,7 +152,12 @@ public final class BackOfficeHttpServer {
                 allocationStateReadModel,
                 settlementProjectionReadModel,
                 statementProjectionReadModel,
-                riskSnapshotReadModel
+                riskSnapshotReadModel,
+                settlementExceptionWorkflowReadModel,
+                corporateActionWorkflowReadModel,
+                marginProjectionReadModel,
+                scenarioEvaluationHistoryReadModel,
+                backtestHistoryReadModel
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));

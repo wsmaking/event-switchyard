@@ -298,6 +298,77 @@ export function MobileRiskView() {
                   ))}
                 </div>
               </section>
+
+              {deepDive.marginProjection && (
+                <section className="rounded-[24px] border border-amber-300/20 bg-amber-500/10 p-4">
+                  <div className="text-sm font-semibold text-amber-50">Margin Utilization</div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <RiskMetric label="Method" value={deepDive.marginProjection.methodology} />
+                    <RiskMetric label="Status" value={deepDive.marginProjection.breachStatus} />
+                    <RiskMetric label="Limit" value={formatCurrency(deepDive.marginProjection.marginLimit)} />
+                    <RiskMetric label="Used" value={formatCurrency(deepDive.marginProjection.marginUsed)} />
+                    <RiskMetric label="Utilization" value={formatPercent(deepDive.marginProjection.utilizationPercent, 1)} />
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {deepDive.marginProjection.breachedLimits.map((item) => (
+                      <div key={item} className="rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
+                        {item}
+                      </div>
+                    ))}
+                    {deepDive.marginProjection.requiredActions.map((item) => (
+                      <div key={item} className="rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3 text-sm leading-6 text-slate-300">
+                        {item}
+                      </div>
+                    ))}
+                    {deepDive.marginProjection.modelNotes.map((item) => (
+                      <div key={item} className="rounded-2xl border border-white/8 bg-black/20 px-3 py-3 text-sm leading-6 text-slate-400">
+                        {item}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {deepDive.scenarioEvaluationHistory && (
+                <section className="rounded-[24px] border border-cyan-300/20 bg-cyan-500/10 p-4">
+                  <div className="text-sm font-semibold text-cyan-50">Scenario Evaluation History</div>
+                  <div className="mt-2 text-xs leading-5 text-cyan-100/80">{deepDive.scenarioEvaluationHistory.lastEvaluatedAtLabel}</div>
+                  <div className="mt-4 space-y-3">
+                    {deepDive.scenarioEvaluationHistory.evaluations.map((item) => (
+                      <div key={`${item.title}-${item.shock}`} className="rounded-[20px] border border-cyan-200/20 bg-black/20 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-white">{item.title}</div>
+                          <div className="rounded-full border border-cyan-200/20 bg-cyan-400/10 px-3 py-1 text-[11px] text-cyan-50">{item.shock}</div>
+                        </div>
+                        <div className="mt-3 text-sm text-cyan-50">{formatSignedCurrency(item.pnlDelta)}</div>
+                        <div className="mt-2 text-xs leading-5 text-slate-300">{item.note}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {deepDive.backtestHistory && (
+                <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+                  <div className="text-sm font-semibold text-white">Backtest Timeline</div>
+                  <div className="mt-2 text-xs leading-5 text-slate-400">
+                    {deepDive.backtestHistory.windowLabel} / breach {formatPercent(deepDive.backtestHistory.breachRatePercent, 1)}
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {deepDive.backtestHistory.history.map((point) => (
+                      <div key={`${point.label}-${point.pnl}`} className="rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3 text-sm">
+                          <div className="text-slate-300">{point.label}</div>
+                          <div className={point.breached ? 'text-rose-200' : 'text-emerald-100'}>
+                            {formatSignedCurrency(point.pnl)}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs leading-5 text-slate-400">{point.note}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
             </>
           )}
         </>

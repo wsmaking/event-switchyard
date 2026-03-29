@@ -24,6 +24,16 @@ import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.StatementProjectionView;
 import backofficejava.business.RiskSnapshotReadModel;
 import backofficejava.business.RiskSnapshotView;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.SettlementExceptionWorkflowView;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowView;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.MarginProjectionView;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryView;
+import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.BacktestHistoryView;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.List;
@@ -41,7 +51,12 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
         StatementProjectionReadModel statementProjectionReadModel,
-        RiskSnapshotReadModel riskSnapshotReadModel
+        RiskSnapshotReadModel riskSnapshotReadModel,
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+        MarginProjectionReadModel marginProjectionReadModel,
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+        BacktestHistoryReadModel backtestHistoryReadModel
     ) {
         super(exchange -> route(
             exchange,
@@ -56,7 +71,12 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             allocationStateReadModel,
             settlementProjectionReadModel,
             statementProjectionReadModel,
-            riskSnapshotReadModel
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel
         ));
     }
 
@@ -73,7 +93,12 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         AllocationStateReadModel allocationStateReadModel,
         SettlementProjectionReadModel settlementProjectionReadModel,
         StatementProjectionReadModel statementProjectionReadModel,
-        RiskSnapshotReadModel riskSnapshotReadModel
+        RiskSnapshotReadModel riskSnapshotReadModel,
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+        MarginProjectionReadModel marginProjectionReadModel,
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+        BacktestHistoryReadModel backtestHistoryReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -137,6 +162,31 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             riskSnapshotReadModel.upsert(request);
             return JsonResponse.ok(request);
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/settlement-exception-workflow/upsert".equals(path)) {
+            SettlementExceptionWorkflowView request = readJson(exchange, SettlementExceptionWorkflowView.class);
+            settlementExceptionWorkflowReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/corporate-action-workflow/upsert".equals(path)) {
+            CorporateActionWorkflowView request = readJson(exchange, CorporateActionWorkflowView.class);
+            corporateActionWorkflowReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/margin-projection/upsert".equals(path)) {
+            MarginProjectionView request = readJson(exchange, MarginProjectionView.class);
+            marginProjectionReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/scenario-evaluation-history/upsert".equals(path)) {
+            ScenarioEvaluationHistoryView request = readJson(exchange, ScenarioEvaluationHistoryView.class);
+            scenarioEvaluationHistoryReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/backtest-history/upsert".equals(path)) {
+            BacktestHistoryView request = readJson(exchange, BacktestHistoryView.class);
+            backtestHistoryReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
@@ -150,6 +200,11 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             settlementProjectionReadModel.reset();
             statementProjectionReadModel.reset();
             riskSnapshotReadModel.reset();
+            settlementExceptionWorkflowReadModel.reset();
+            corporateActionWorkflowReadModel.reset();
+            marginProjectionReadModel.reset();
+            scenarioEvaluationHistoryReadModel.reset();
+            backtestHistoryReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

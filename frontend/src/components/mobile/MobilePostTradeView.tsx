@@ -147,7 +147,47 @@ export function MobilePostTradeView({ onNavigate }: MobilePostTradeViewProps) {
           </div>
         </section>
       )}
+      {data.settlementExceptionWorkflow && (
+        <section className="rounded-[24px] border border-amber-300/20 bg-amber-500/10 p-4">
+          <div className="text-sm font-semibold text-amber-50">Settlement Exception Workflow</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="workflow" value={data.settlementExceptionWorkflow.workflowStatus} />
+            <MetricCard label="exception" value={data.settlementExceptionWorkflow.exceptionType} />
+            <MetricCard label="blocked stage" value={data.settlementExceptionWorkflow.blockedStage} />
+            <MetricCard label="ageing" value={data.settlementExceptionWorkflow.ageingLabel} />
+          </div>
+          <div className="mt-4 rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
+            {data.settlementExceptionWorkflow.rootCause}
+          </div>
+          <div className="mt-3 rounded-2xl border border-amber-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-amber-50/90">
+            next: {data.settlementExceptionWorkflow.nextAction}
+          </div>
+          <SimpleListSection title="Controls" items={data.settlementExceptionWorkflow.controls} />
+          <SimpleListSection title="Operator Notes" items={data.settlementExceptionWorkflow.operatorNotes} />
+        </section>
+      )}
       <SimpleListSection title="Corporate Action 入口" items={data.corporateActionHooks.map((hook) => `${hook.name}: ${hook.businessImpact} / ${hook.systemImpact}`)} />
+      {data.corporateActionWorkflow && (
+        <section className="rounded-[24px] border border-cyan-300/20 bg-cyan-500/10 p-4">
+          <div className="text-sm font-semibold text-cyan-50">Corporate Action Workflow</div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MetricCard label="event" value={data.corporateActionWorkflow.eventName} />
+            <MetricCard label="workflow" value={data.corporateActionWorkflow.workflowStatus} />
+            <MetricCard label="record date" value={data.corporateActionWorkflow.recordDateLabel} />
+            <MetricCard label="effective date" value={data.corporateActionWorkflow.effectiveDateLabel} />
+          </div>
+          <div className="mt-4 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+            customer impact: {data.corporateActionWorkflow.customerImpact}
+          </div>
+          <div className="mt-3 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+            ledger impact: {data.corporateActionWorkflow.ledgerImpact}
+          </div>
+          <div className="mt-3 rounded-2xl border border-cyan-200/20 bg-black/20 px-3 py-3 text-sm leading-6 text-cyan-50/90">
+            next: {data.corporateActionWorkflow.nextAction}
+          </div>
+          <SimpleListSection title="Workflow Controls" items={data.corporateActionWorkflow.controls} />
+        </section>
+      )}
       <AnchorsSection anchors={data.implementationAnchors} />
     </div>
   );

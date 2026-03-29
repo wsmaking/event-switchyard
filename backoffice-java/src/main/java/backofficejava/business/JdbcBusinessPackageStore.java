@@ -50,6 +50,26 @@ public final class JdbcBusinessPackageStore {
         return new RiskSnapshotAdapter(this);
     }
 
+    public SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel() {
+        return new SettlementExceptionWorkflowAdapter(this);
+    }
+
+    public CorporateActionWorkflowReadModel corporateActionWorkflowReadModel() {
+        return new CorporateActionWorkflowAdapter(this);
+    }
+
+    public MarginProjectionReadModel marginProjectionReadModel() {
+        return new MarginProjectionAdapter(this);
+    }
+
+    public ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel() {
+        return new ScenarioEvaluationHistoryAdapter(this);
+    }
+
+    public BacktestHistoryReadModel backtestHistoryReadModel() {
+        return new BacktestHistoryAdapter(this);
+    }
+
     private Optional<ExecutionPackageView> loadExecutionPackage(String orderId) {
         return load(orderId, "bo_execution_packages", ExecutionPackageView.class);
     }
@@ -117,24 +137,64 @@ public final class JdbcBusinessPackageStore {
     }
 
     private void upsertRiskSnapshot(RiskSnapshotView view) {
-        String sql = """
-            INSERT INTO bo_risk_snapshots (account_id, generated_at, payload)
-            VALUES (?, ?, ?)
-            ON CONFLICT (account_id)
-            DO UPDATE SET
-                generated_at = EXCLUDED.generated_at,
-                payload = EXCLUDED.payload
-            """;
+        upsertByAccountId("bo_risk_snapshots", view.accountId(), view.generatedAt(), view);
+    }
+
+    private Optional<SettlementExceptionWorkflowView> loadSettlementExceptionWorkflow(String orderId) {
+        return load(orderId, "bo_settlement_exception_workflows", SettlementExceptionWorkflowView.class);
+    }
+
+    private void upsertSettlementExceptionWorkflow(SettlementExceptionWorkflowView view) {
+        upsert("bo_settlement_exception_workflows", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<CorporateActionWorkflowView> loadCorporateActionWorkflow(String orderId) {
+        return load(orderId, "bo_corporate_action_workflows", CorporateActionWorkflowView.class);
+    }
+
+    private void upsertCorporateActionWorkflow(CorporateActionWorkflowView view) {
+        upsert("bo_corporate_action_workflows", view.orderId(), view.accountId(), view.symbol(), view.generatedAt(), view);
+    }
+
+    private Optional<MarginProjectionView> loadMarginProjection(String accountId) {
+        return loadByAccountId(accountId, "bo_margin_projections", MarginProjectionView.class);
+    }
+
+    private void upsertMarginProjection(MarginProjectionView view) {
+        upsertByAccountId("bo_margin_projections", view.accountId(), view.generatedAt(), view);
+    }
+
+    private Optional<ScenarioEvaluationHistoryView> loadScenarioEvaluationHistory(String accountId) {
+        return loadByAccountId(accountId, "bo_scenario_evaluation_histories", ScenarioEvaluationHistoryView.class);
+    }
+
+    private void upsertScenarioEvaluationHistory(ScenarioEvaluationHistoryView view) {
+        upsertByAccountId("bo_scenario_evaluation_histories", view.accountId(), view.generatedAt(), view);
+    }
+
+    private Optional<BacktestHistoryView> loadBacktestHistory(String accountId) {
+        return loadByAccountId(accountId, "bo_backtest_histories", BacktestHistoryView.class);
+    }
+
+    private void upsertBacktestHistory(BacktestHistoryView view) {
+        upsertByAccountId("bo_backtest_histories", view.accountId(), view.generatedAt(), view);
+    }
+
+    private <T> Optional<T> loadByAccountId(String accountId, String tableName, Class<T> type) {
+        String sql = "SELECT payload FROM " + tableName + " WHERE account_id = ?";
         try (
             Connection connection = connectionFactory.openConnection();
             PreparedStatement statement = connection.prepareStatement(sql)
         ) {
-            statement.setString(1, view.accountId());
-            statement.setLong(2, view.generatedAt());
-            statement.setString(3, OBJECT_MAPPER.writeValueAsString(view));
-            statement.executeUpdate();
+            statement.setString(1, accountId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(OBJECT_MAPPER.readValue(resultSet.getString("payload"), type));
+            }
         } catch (Exception exception) {
-            throw new IllegalStateException("failed_to_upsert_risk_snapshot:" + view.accountId(), exception);
+            throw new IllegalStateException("failed_to_load_business_package:" + tableName + ":" + accountId, exception);
         }
     }
 
@@ -182,6 +242,28 @@ public final class JdbcBusinessPackageStore {
         }
     }
 
+    private void upsertByAccountId(String tableName, String accountId, long generatedAt, Object payload) {
+        String sql = """
+            INSERT INTO %s (account_id, generated_at, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT (account_id)
+            DO UPDATE SET
+                generated_at = EXCLUDED.generated_at,
+                payload = EXCLUDED.payload
+            """.formatted(tableName);
+        try (
+            Connection connection = connectionFactory.openConnection();
+            PreparedStatement statement = connection.prepareStatement(sql)
+        ) {
+            statement.setString(1, accountId);
+            statement.setLong(2, generatedAt);
+            statement.setString(3, OBJECT_MAPPER.writeValueAsString(payload));
+            statement.executeUpdate();
+        } catch (Exception exception) {
+            throw new IllegalStateException("failed_to_upsert_business_package:" + tableName + ":" + accountId, exception);
+        }
+    }
+
     private void reset() {
         try (
             Connection connection = connectionFactory.openConnection();
@@ -191,7 +273,12 @@ public final class JdbcBusinessPackageStore {
             PreparedStatement allocationDelete = connection.prepareStatement("DELETE FROM bo_allocation_states");
             PreparedStatement settlementDelete = connection.prepareStatement("DELETE FROM bo_settlement_projections");
             PreparedStatement statementDelete = connection.prepareStatement("DELETE FROM bo_statement_projections");
-            PreparedStatement riskDelete = connection.prepareStatement("DELETE FROM bo_risk_snapshots")
+            PreparedStatement riskDelete = connection.prepareStatement("DELETE FROM bo_risk_snapshots");
+            PreparedStatement settlementExceptionDelete = connection.prepareStatement("DELETE FROM bo_settlement_exception_workflows");
+            PreparedStatement corporateActionDelete = connection.prepareStatement("DELETE FROM bo_corporate_action_workflows");
+            PreparedStatement marginProjectionDelete = connection.prepareStatement("DELETE FROM bo_margin_projections");
+            PreparedStatement scenarioHistoryDelete = connection.prepareStatement("DELETE FROM bo_scenario_evaluation_histories");
+            PreparedStatement backtestHistoryDelete = connection.prepareStatement("DELETE FROM bo_backtest_histories")
         ) {
             executionDelete.executeUpdate();
             postTradeDelete.executeUpdate();
@@ -200,6 +287,11 @@ public final class JdbcBusinessPackageStore {
             settlementDelete.executeUpdate();
             statementDelete.executeUpdate();
             riskDelete.executeUpdate();
+            settlementExceptionDelete.executeUpdate();
+            corporateActionDelete.executeUpdate();
+            marginProjectionDelete.executeUpdate();
+            scenarioHistoryDelete.executeUpdate();
+            backtestHistoryDelete.executeUpdate();
         } catch (SQLException exception) {
             throw new IllegalStateException("failed_to_reset_business_packages", exception);
         }
@@ -316,6 +408,91 @@ public final class JdbcBusinessPackageStore {
         @Override
         public void upsert(RiskSnapshotView view) {
             store.upsertRiskSnapshot(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record SettlementExceptionWorkflowAdapter(JdbcBusinessPackageStore store) implements SettlementExceptionWorkflowReadModel {
+        @Override
+        public Optional<SettlementExceptionWorkflowView> findByOrderId(String orderId) {
+            return store.loadSettlementExceptionWorkflow(orderId);
+        }
+
+        @Override
+        public void upsert(SettlementExceptionWorkflowView view) {
+            store.upsertSettlementExceptionWorkflow(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record CorporateActionWorkflowAdapter(JdbcBusinessPackageStore store) implements CorporateActionWorkflowReadModel {
+        @Override
+        public Optional<CorporateActionWorkflowView> findByOrderId(String orderId) {
+            return store.loadCorporateActionWorkflow(orderId);
+        }
+
+        @Override
+        public void upsert(CorporateActionWorkflowView view) {
+            store.upsertCorporateActionWorkflow(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record MarginProjectionAdapter(JdbcBusinessPackageStore store) implements MarginProjectionReadModel {
+        @Override
+        public Optional<MarginProjectionView> findByAccountId(String accountId) {
+            return store.loadMarginProjection(accountId);
+        }
+
+        @Override
+        public void upsert(MarginProjectionView view) {
+            store.upsertMarginProjection(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record ScenarioEvaluationHistoryAdapter(JdbcBusinessPackageStore store) implements ScenarioEvaluationHistoryReadModel {
+        @Override
+        public Optional<ScenarioEvaluationHistoryView> findByAccountId(String accountId) {
+            return store.loadScenarioEvaluationHistory(accountId);
+        }
+
+        @Override
+        public void upsert(ScenarioEvaluationHistoryView view) {
+            store.upsertScenarioEvaluationHistory(view);
+        }
+
+        @Override
+        public void reset() {
+            store.reset();
+        }
+    }
+
+    private record BacktestHistoryAdapter(JdbcBusinessPackageStore store) implements BacktestHistoryReadModel {
+        @Override
+        public Optional<BacktestHistoryView> findByAccountId(String accountId) {
+            return store.loadBacktestHistory(accountId);
+        }
+
+        @Override
+        public void upsert(BacktestHistoryView view) {
+            store.upsertBacktestHistory(view);
         }
 
         @Override

@@ -220,6 +220,101 @@ public final class BackOfficeClient {
         return null;
     }
 
+    public SettlementExceptionWorkflow fetchSettlementExceptionWorkflow(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/settlement-exception-workflow?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), SettlementExceptionWorkflow.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public CorporateActionWorkflow fetchCorporateActionWorkflow(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/corporate-action-workflow?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), CorporateActionWorkflow.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public MarginProjection fetchMarginProjection(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/margin-projection?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), MarginProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public ScenarioEvaluationHistory fetchScenarioEvaluationHistory(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/scenario-evaluation-history?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ScenarioEvaluationHistory.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public BacktestHistory fetchBacktestHistory(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/backtest-history?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), BacktestHistory.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -274,6 +369,26 @@ public final class BackOfficeClient {
 
     public void upsertRiskSnapshot(RiskSnapshot riskSnapshot) {
         postJson("/internal/business/risk-snapshot/upsert", riskSnapshot);
+    }
+
+    public void upsertSettlementExceptionWorkflow(SettlementExceptionWorkflow workflow) {
+        postJson("/internal/business/settlement-exception-workflow/upsert", workflow);
+    }
+
+    public void upsertCorporateActionWorkflow(CorporateActionWorkflow workflow) {
+        postJson("/internal/business/corporate-action-workflow/upsert", workflow);
+    }
+
+    public void upsertMarginProjection(MarginProjection projection) {
+        postJson("/internal/business/margin-projection/upsert", projection);
+    }
+
+    public void upsertScenarioEvaluationHistory(ScenarioEvaluationHistory history) {
+        postJson("/internal/business/scenario-evaluation-history/upsert", history);
+    }
+
+    public void upsertBacktestHistory(BacktestHistory history) {
+        postJson("/internal/business/backtest-history/upsert", history);
     }
 
     public BackOfficeStats fetchStats() {
@@ -792,6 +907,85 @@ public final class BackOfficeClient {
         String whyItMatters,
         String whatIncluded,
         String whatExcluded
+    ) {
+    }
+
+    public record SettlementExceptionWorkflow(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String workflowStatus,
+        String exceptionType,
+        String blockedStage,
+        String ageingLabel,
+        String rootCause,
+        String nextAction,
+        List<String> controls,
+        List<String> operatorNotes
+    ) {
+    }
+
+    public record CorporateActionWorkflow(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String eventName,
+        String workflowStatus,
+        String recordDateLabel,
+        String effectiveDateLabel,
+        String customerImpact,
+        String ledgerImpact,
+        String nextAction,
+        List<String> controls
+    ) {
+    }
+
+    public record MarginProjection(
+        long generatedAt,
+        String accountId,
+        String methodology,
+        double marginLimit,
+        double marginUsed,
+        double utilizationPercent,
+        String breachStatus,
+        List<String> breachedLimits,
+        List<String> requiredActions,
+        List<String> modelNotes
+    ) {
+    }
+
+    public record ScenarioEvaluationHistory(
+        long generatedAt,
+        String accountId,
+        String lastEvaluatedAtLabel,
+        List<ScenarioEvaluationEntry> evaluations
+    ) {
+    }
+
+    public record ScenarioEvaluationEntry(
+        String title,
+        String shock,
+        double pnlDelta,
+        String note
+    ) {
+    }
+
+    public record BacktestHistory(
+        long generatedAt,
+        String accountId,
+        String windowLabel,
+        double breachRatePercent,
+        List<BacktestHistoryPoint> history
+    ) {
+    }
+
+    public record BacktestHistoryPoint(
+        String label,
+        double pnl,
+        boolean breached,
+        String note
     ) {
     }
 

@@ -32,12 +32,22 @@ import backofficejava.business.InMemoryPostTradePackageReadModel;
 import backofficejava.business.InMemorySettlementProjectionReadModel;
 import backofficejava.business.InMemoryStatementProjectionReadModel;
 import backofficejava.business.InMemoryRiskSnapshotReadModel;
+import backofficejava.business.InMemorySettlementExceptionWorkflowReadModel;
+import backofficejava.business.InMemoryCorporateActionWorkflowReadModel;
+import backofficejava.business.InMemoryMarginProjectionReadModel;
+import backofficejava.business.InMemoryScenarioEvaluationHistoryReadModel;
+import backofficejava.business.InMemoryBacktestHistoryReadModel;
 import backofficejava.business.JdbcBusinessPackageStore;
 import backofficejava.business.ParentExecutionStateReadModel;
 import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -58,7 +68,8 @@ public final class BackOfficeStoreFactory {
                 "db/migration/V4__backoffice_business_packages.sql",
                 "db/migration/V5__backoffice_institutional_states.sql",
                 "db/migration/V6__backoffice_post_trade_projections.sql",
-                "db/migration/V7__backoffice_risk_snapshots.sql"
+                "db/migration/V7__backoffice_risk_snapshots.sql",
+                "db/migration/V8__backoffice_business_workflows.sql"
             );
             JdbcBackOfficeStore store = new JdbcBackOfficeStore(connectionFactory, accountId);
             JdbcBusinessPackageStore businessPackageStore = new JdbcBusinessPackageStore(connectionFactory);
@@ -79,6 +90,11 @@ public final class BackOfficeStoreFactory {
                 businessPackageStore.settlementProjectionReadModel(),
                 businessPackageStore.statementProjectionReadModel(),
                 businessPackageStore.riskSnapshotReadModel(),
+                businessPackageStore.settlementExceptionWorkflowReadModel(),
+                businessPackageStore.corporateActionWorkflowReadModel(),
+                businessPackageStore.marginProjectionReadModel(),
+                businessPackageStore.scenarioEvaluationHistoryReadModel(),
+                businessPackageStore.backtestHistoryReadModel(),
                 offsetStore,
                 deadLetterStore,
                 pendingOrphanStore,
@@ -99,6 +115,11 @@ public final class BackOfficeStoreFactory {
         SettlementProjectionReadModel settlementProjectionReadModel = new InMemorySettlementProjectionReadModel();
         StatementProjectionReadModel statementProjectionReadModel = new InMemoryStatementProjectionReadModel();
         RiskSnapshotReadModel riskSnapshotReadModel = new InMemoryRiskSnapshotReadModel();
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel = new InMemorySettlementExceptionWorkflowReadModel();
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel = new InMemoryCorporateActionWorkflowReadModel();
+        MarginProjectionReadModel marginProjectionReadModel = new InMemoryMarginProjectionReadModel();
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel = new InMemoryScenarioEvaluationHistoryReadModel();
+        BacktestHistoryReadModel backtestHistoryReadModel = new InMemoryBacktestHistoryReadModel();
         Path offsetPath = resolvePath(
             System.getProperty(
                 "backoffice.gateway.audit.offset.path",
@@ -118,6 +139,11 @@ public final class BackOfficeStoreFactory {
             settlementProjectionReadModel,
             statementProjectionReadModel,
             riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
             new FileAuditOffsetStore(offsetPath),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),

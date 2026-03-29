@@ -14,6 +14,11 @@ import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.business.SettlementProjectionReadModel;
 import backofficejava.business.StatementProjectionReadModel;
 import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -38,6 +43,11 @@ public final class Main {
         SettlementProjectionReadModel settlementProjectionReadModel = runtime.settlementProjectionReadModel();
         StatementProjectionReadModel statementProjectionReadModel = runtime.statementProjectionReadModel();
         RiskSnapshotReadModel riskSnapshotReadModel = runtime.riskSnapshotReadModel();
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel = runtime.settlementExceptionWorkflowReadModel();
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel = runtime.corporateActionWorkflowReadModel();
+        MarginProjectionReadModel marginProjectionReadModel = runtime.marginProjectionReadModel();
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel = runtime.scenarioEvaluationHistoryReadModel();
+        BacktestHistoryReadModel backtestHistoryReadModel = runtime.backtestHistoryReadModel();
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -64,6 +74,11 @@ public final class Main {
             settlementProjectionReadModel,
             statementProjectionReadModel,
             riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
             intakeService,
             busEventIntakeService
         );

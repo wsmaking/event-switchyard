@@ -420,6 +420,26 @@ export interface MobilePostTradeGuide {
     }>;
     controls: string[];
   } | null;
+  settlementExceptionWorkflow: {
+    workflowStatus: string;
+    exceptionType: string;
+    blockedStage: string;
+    ageingLabel: string;
+    rootCause: string;
+    nextAction: string;
+    controls: string[];
+    operatorNotes: string[];
+  } | null;
+  corporateActionWorkflow: {
+    eventName: string;
+    workflowStatus: string;
+    recordDateLabel: string;
+    effectiveDateLabel: string;
+    customerImpact: string;
+    ledgerImpact: string;
+    nextAction: string;
+    controls: string[];
+  } | null;
   implementationAnchors: MobileImplementationAnchor[];
 }
 
@@ -463,6 +483,35 @@ export interface MobileRiskDeepDive {
       breached: boolean;
     }>;
   };
+  marginProjection: {
+    methodology: string;
+    marginLimit: number;
+    marginUsed: number;
+    utilizationPercent: number;
+    breachStatus: string;
+    breachedLimits: string[];
+    requiredActions: string[];
+    modelNotes: string[];
+  } | null;
+  scenarioEvaluationHistory: {
+    lastEvaluatedAtLabel: string;
+    evaluations: Array<{
+      title: string;
+      shock: string;
+      pnlDelta: number;
+      note: string;
+    }>;
+  } | null;
+  backtestHistory: {
+    windowLabel: string;
+    breachRatePercent: number;
+    history: Array<{
+      label: string;
+      pnl: number;
+      breached: boolean;
+      note: string;
+    }>;
+  } | null;
   modelBoundaries: Array<{
     title: string;
     whyItMatters: string;
