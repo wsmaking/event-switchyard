@@ -18,7 +18,7 @@ Kafka / PostgreSQL / TCP venue simulator 付きで動かすための最小運用
 - Java 21
 - Node.js 20 系
 - Rust toolchain
-- port `8080` `8081` `18081` `18082` `9092` `5432` `9901` が空いている
+- port `8080` `8081` `18081` `18082` `9092` `5432` `9901` `9902` が空いている
 
 ## 起動
 
@@ -32,6 +32,8 @@ scripts/ops/run_business_mainline_stack.sh
 - `gateway-rust`: `http://localhost:8081`
 - `oms-java`: `http://localhost:18081`
 - `backoffice-java`: `http://localhost:18082`
+- `tcp-exchange-sim`: `127.0.0.1:9901`
+- `sim-admin`: `http://localhost:9902`
 
 UI を見る場合:
 
@@ -54,6 +56,12 @@ scripts/ops/smoke_business_mainline_stack.sh
 scripts/ops/check_business_mainline_ops.sh
 ```
 
+さらに go / no-go を単独確認する場合:
+
+```bash
+scripts/ops/check_business_go_no_go.sh
+```
+
 正常時の期待:
 
 - `omsStats.state = RUNNING`
@@ -64,6 +72,9 @@ scripts/ops/check_business_mainline_ops.sh
 - `deadLetterCount = 0`
 - `sequenceGaps = 0`
 - reconcile `issues = []`
+- `goNoGo.state = GO`
+- `venueSessions` に `drop copy equivalent = DIVERGED` が出ていない
+- `rolloutState.state = READY`
 
 ## 注文から最終 Out まで
 
@@ -134,6 +145,28 @@ scripts/ops/drill_business_mainline_projection_recovery.sh
 この drill は `app-java` `oms-java` `backoffice-java` を停止してから再起動し、
 ops gate が再び通ることを確認する。
 
+incident matrix drill:
+
+```bash
+scripts/ops/drill_business_incident_matrix.sh
+```
+
+この drill は simulator control plane を使って次を順に再現する。
+
+- session flap
+- drop-copy divergence
+- throttle
+- reject-all
+- halt / auction only
+
+local soak:
+
+```bash
+scripts/ops/run_business_soak_local.sh
+```
+
+これは go / no-go と ops overview を一定間隔で引き、steady-state の説明可能性を確認する。
+
 ## 停止
 
 ```bash
@@ -145,3 +178,5 @@ scripts/ops/stop_business_mainline_stack.sh
 - `gateway-rust` hot path はこの runbook では変更しない
 - OMS / BackOffice の順序制御は `aggregateSeq` ベース
 - bus event の pending / DLQ 再投入でも、raw bus payload を再解釈して順序制御を維持する
+- venue / drop copy / entitlement / throttling は `sim-admin` と `/api/ops/venue-sessions` の語を一致させて読む
+- rollout readiness は `/api/ops/rollout-state` と `/api/ops/go-no-go` を同時に確認する

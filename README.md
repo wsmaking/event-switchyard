@@ -243,6 +243,7 @@ scripts/ops/run_business_replay_stack.sh
 - `app-java`: `http://localhost:8080`
 - `oms-java`: `http://localhost:18081`
 - `backoffice-java`: `http://localhost:18082`
+- `sim-admin`: `http://localhost:9902`
 
 既定では `JWT_HS256_SECRET=secret123` で `gateway-rust` と `app-java` を揃えて起動します。
 `app-java` は `/api/order-stream` `/api/ops/audit/replay` `/api/ops/orphans/requeue` `/api/ops/dlq/requeue` を持ち、UI の live 更新と運用再投入に使います。
@@ -302,13 +303,31 @@ scripts/ops/smoke_business_mainline_stack.sh
 scripts/ops/check_business_mainline_ops.sh
 ```
 
-### 4. projection recovery drill
+### 4. go / no-go
+
+```bash
+scripts/ops/check_business_go_no_go.sh
+```
+
+### 5. projection recovery drill
 
 ```bash
 scripts/ops/drill_business_mainline_projection_recovery.sh
 ```
 
-### 5. stop
+### 6. incident matrix drill
+
+```bash
+scripts/ops/drill_business_incident_matrix.sh
+```
+
+### 7. local soak
+
+```bash
+scripts/ops/run_business_soak_local.sh
+```
+
+### 8. stop
 
 ```bash
 scripts/ops/stop_business_mainline_stack.sh

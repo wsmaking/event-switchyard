@@ -1020,7 +1020,7 @@ repo に入れるべきもの:
 - [x] execution package を `backoffice-java` の public/internal API で read/write できるようにする
 - [x] parent order の working state、child slice 実行状態、participation 実測を OMS / BackOffice 正本で持つ
 - [x] allocation を package 内プレビューではなく独立した正本状態として持つ
-- [ ] replay だけでなく live order から execution package を組み立てる
+- [x] replay だけでなく live order から execution package を組み立てる
 
 この優先度で増やすファイル:
 
@@ -1071,7 +1071,7 @@ repo に入れるべきもの:
 - [x] post-trade package を `backoffice-java` の public/internal API で read/write できるようにする
 - [x] settlement state を package ではなく独立した正本 projection にする
 - [x] confirm / statement を独立 read model として持つ
-- [ ] fail / exception / corporate action workflow を BackOffice 本体へ落とす
+- [x] fail / exception / corporate action workflow を BackOffice 本体へ落とす
 
 この優先度で増やすファイル:
 
@@ -1118,9 +1118,9 @@ repo に入れるべきもの:
   - どう誤るか
   を説明するカードを増やす
 - [x] account 単位の risk snapshot を `backoffice-java` の public/internal API で read/write できるようにする
-- [ ] margin utilization と limit breach を独立 projection にする
-- [ ] scenario evaluation 履歴を保存する
-- [ ] backtesting を時系列永続化する
+- [x] margin utilization と limit breach を独立 projection にする
+- [x] scenario evaluation 履歴を保存する
+- [x] backtesting を時系列永続化する
 
 この優先度で増やすファイル:
 
@@ -1312,6 +1312,16 @@ Done 条件:
 - risk の snapshot / margin / scenario history / backtest history
 - multi-asset catalog
 - production engineering の live runtime / venue session / rollout gate / operator sequence
+- simulator control plane の session / auction / drop-copy divergence / throttle / entitlement
+- go / no-go gate、incident matrix drill、local soak script
+
+repo 内で live order から自然に育つもの:
+
+- `backoffice-java` の audit / bus intake から execution package を更新する
+- parent execution state / allocation state を live fill に追従させる
+- settlement / statement / exception / corporate action workflow を live order から更新する
+- account hierarchy / operator control state を live order に紐付けて保持する
+- risk snapshot / margin / scenario history / backtest history を account 状態から更新する
 
 この repo で意図的にやらないもの:
 

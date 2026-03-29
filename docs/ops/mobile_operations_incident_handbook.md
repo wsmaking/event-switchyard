@@ -27,6 +27,9 @@ mobile で運用工学を学ぶときに、単なる用語暗記ではなく、
 
 - OMS state
 - BackOffice state
+- venue session
+- drop copy equivalent
+- go / no-go
 - sequence gap
 - pending orphan
 - dead letter
@@ -58,6 +61,14 @@ mobile で運用工学を学ぶときに、単なる用語暗記ではなく、
 - raw payload
 
 最後に、画面表示の根拠を確認する。
+
+### 5. control plane
+
+- `GET /api/ops/venue-sessions`
+- `GET /api/ops/rollout-state`
+- `GET /api/ops/go-no-go`
+
+ここでは、projection 以前に「いま trade flow を進めてよいか」を固定する。
 
 ## 典型シナリオ
 
@@ -121,6 +132,26 @@ mobile で運用工学を学ぶときに、単なる用語暗記ではなく、
 - risk / execution を保守モードで読む
 - current price で past execution を塗り替えない
 
+### venue session / drop copy divergence
+
+症状:
+
+- execution session が `RUNNING` ではない
+- `drop copy equivalent` が `DIVERGED`
+- `go / no-go` が `NO_GO`
+
+最初の問い:
+
+- session 断なのか、projection 断なのか
+- post-trade 側だけ遅れていないか
+- statement release を止めるべきか
+
+やること:
+
+- `/api/ops/venue-sessions` を先に見る
+- `drop copy equivalent` が `DIVERGED` なら books release を止める
+- `rollout-state` と `go-no-go` を同時に確認する
+
 ## schema 変更時の原則
 
 - 新規項目は additive を原則とする
@@ -144,6 +175,8 @@ mobile で運用工学を学ぶときに、単なる用語暗記ではなく、
 - `/mobile/architecture` で責務境界と runbook の順番を読む
 - `/mobile/orders/:id` で final-out と raw event を読む
 - `/mobile/posttrade` で ledger と statement の違いを読む
+- `incident matrix drill` で session / divergence / throttle / halt を反復する
+- `local soak` で steady-state 観測を継続する
 
 ## 実装アンカー
 
@@ -151,3 +184,5 @@ mobile で運用工学を学ぶときに、単なる用語暗記ではなく、
 - `oms-java/src/main/java/oms/audit/GatewayAuditIntakeService.java`
 - `backoffice-java/src/main/java/backofficejava/audit/GatewayAuditIntakeService.java`
 - `scripts/ops/drill_business_mainline_projection_recovery.sh`
+- `scripts/ops/drill_business_incident_matrix.sh`
+- `scripts/ops/run_business_soak_local.sh`
