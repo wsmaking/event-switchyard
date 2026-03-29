@@ -8,6 +8,9 @@ import appjava.clients.BackOfficeClient.LedgerEntry;
 import appjava.clients.OmsClient;
 import appjava.http.JsonHttpHandler;
 import appjava.market.MarketDataService;
+import appjava.market.MarketStructureSnapshot;
+import appjava.order.ExecutionBenchmark;
+import appjava.order.ExecutionBenchmarkStore;
 import appjava.order.FillView;
 import appjava.order.OrderEventView;
 import appjava.order.OrderRequest;
@@ -27,17 +30,20 @@ public final class ReplayScenarioService {
     private final MarketDataService marketDataService;
     private final BackOfficeClient backOfficeClient;
     private final OmsClient omsClient;
+    private final ExecutionBenchmarkStore executionBenchmarkStore;
 
     public ReplayScenarioService(
         String accountId,
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
-        OmsClient omsClient
+        OmsClient omsClient,
+        ExecutionBenchmarkStore executionBenchmarkStore
     ) {
         this.accountId = accountId;
         this.marketDataService = marketDataService;
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
+        this.executionBenchmarkStore = executionBenchmarkStore;
     }
 
     public OrderView runScenario(String scenarioName, OrderRequest request) {
@@ -54,6 +60,7 @@ public final class ReplayScenarioService {
         String type = request.type().toUpperCase(Locale.ROOT);
         int quantity = request.quantity();
         double workingPrice = request.price() != null ? request.price() : marketDataService.getCurrentPrice(symbol);
+        MarketStructureSnapshot marketStructure = marketDataService.getMarketStructure(symbol);
 
         ScenarioSnapshot snapshot = switch (scenario) {
             case "accepted" -> acceptedSnapshot(request, submittedAt, workingPrice);
@@ -99,6 +106,18 @@ public final class ReplayScenarioService {
         List<FillView> fills = buildFills(order, snapshot, workingPrice);
         BackOfficeOrderState orderState = buildOrderState(order, snapshot, workingPrice);
         List<LedgerEntry> ledgerEntries = buildLedgerEntries(order, snapshot);
+        executionBenchmarkStore.put(new ExecutionBenchmark(
+            order.id(),
+            symbol,
+            submittedAt,
+            marketStructure.lastPrice(),
+            marketStructure.bidPrice(),
+            marketStructure.askPrice(),
+            marketStructure.midPrice(),
+            marketStructure.spreadBps(),
+            marketStructure.venueState(),
+            "arrival-mid"
+        ));
 
         omsClient.upsertOrder(order);
         omsClient.replaceOrderEvents(order.id(), events);

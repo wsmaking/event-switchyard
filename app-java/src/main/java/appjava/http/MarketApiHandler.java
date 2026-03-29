@@ -18,6 +18,9 @@ public final class MarketApiHandler extends JsonHttpHandler {
             if (segments.length == 4) {
                 return JsonResponse.ok(marketDataService.getStockInfo(symbol));
             }
+            if (segments.length == 5 && "structure".equals(segments[4])) {
+                return JsonResponse.ok(marketDataService.getMarketStructure(symbol));
+            }
             if (segments.length == 5 && "history".equals(segments[4])) {
                 int limit = Integer.parseInt(parseQuery(exchange.getRequestURI().getRawQuery()).getOrDefault("limit", "120"));
                 return JsonResponse.ok(marketDataService.getPriceHistory(symbol, limit));
