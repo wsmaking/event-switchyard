@@ -976,6 +976,12 @@ repo に入れるべきもの:
 
 次に入れるべきは、注文を「個人のワンタップ」から「執行判断」へ広げる層である。
 
+現状:
+
+- [x] mobile に執行判断画面を追加
+- [x] parent / child order、participation、care / DMA、allocation の教育用モデルを追加
+- [x] app-java に live / on-device 両対応の `institutional-flow` API を追加
+
 追加すべき論点:
 
 - parent / child order
@@ -995,14 +1001,21 @@ repo に入れるべきもの:
 
 この優先度で増やすファイル:
 
-- `frontend/src/components/mobile/MobileExecutionView.tsx` を新設
-- `frontend/src/offline/mobileOfflineStore.ts` に parent / child drill を追加
-- `gateway-rust` の strategy runtime 実装を読む導線を handbook と mobile に追加
+- `frontend/src/components/mobile/MobileInstitutionalFlowView.tsx`
+- `frontend/src/offline/mobileRoadmapOffline.ts`
+- `app-java/src/main/java/appjava/mobile/MobileRoadmapService.java`
 
 ### 優先度 3: post-trade とファイナンス
 
 注文と約定だけでは不十分で、業務ではその後も続く。  
 ここを押さえると「システムは約定したのに、なぜまだ仕事が終わらないのか」が理解しやすくなる。
+
+現状:
+
+- [x] mobile に post-trade 画面を追加
+- [x] execution / allocation / clearing / settlement / books and records の教育用 timeline を追加
+- [x] fee / tax / statement preview / corporate action hook を追加
+- [x] app-java に `post-trade` API を追加
 
 追加すべき論点:
 
@@ -1028,12 +1041,18 @@ repo に入れるべきもの:
 この優先度で増やすファイル:
 
 - `frontend/src/components/mobile/MobilePostTradeView.tsx` を新設
-- `backoffice-java` に教育用 settlement projection を追加
-- `app-java` に confirm / statement 向け read API を追加
+- `app-java/src/main/java/appjava/mobile/MobileRoadmapService.java`
+- `frontend/src/offline/mobileRoadmapOffline.ts`
 
 ### 優先度 4: risk の厚み
 
 今の risk は入口としては良いが、数字の前提を深く語るにはまだ足りない。
+
+現状:
+
+- [x] mobile risk に scenario library、concentration、liquidity、backtesting preview を追加
+- [x] risk 画面に model boundary を追加
+- [x] app-java に `risk/deep-dive` API を追加
 
 追加すべき論点:
 
@@ -1061,13 +1080,19 @@ repo に入れるべきもの:
 この優先度で増やすファイル:
 
 - `frontend/src/components/mobile/MobileRiskView.tsx` を拡張
-- `frontend/src/offline/mobileOfflineStore.ts` に risk governance cards / drills を追加
-- `app-java/src/main/java/appjava/mobile/MobileLearningService.java` の risk story を拡張
+- `frontend/src/offline/mobileRoadmapOffline.ts`
+- `app-java/src/main/java/appjava/mobile/MobileRoadmapService.java`
 
 ### 優先度 5: multi-asset 化
 
 この repo は現時点で equities に強い。  
 次は「何が共通で、何が asset class ごとに変わるか」を扱う。
+
+現状:
+
+- [x] mobile に asset class 比較画面を追加
+- [x] equities / options / FX / rates / credit / futures の比較モデルを追加
+- [x] app-java に `asset-classes` API を追加
 
 追加すべき論点:
 
@@ -1087,12 +1112,18 @@ repo に入れるべきもの:
 この優先度で増やすファイル:
 
 - `frontend/src/components/mobile/MobileAssetClassView.tsx` を新設
-- `frontend/src/offline/mobileOfflineStore.ts` に cross-asset cards を拡張
+- `frontend/src/offline/mobileRoadmapOffline.ts`
 - handbook に asset class 別章を追加
 
 ### 優先度 6: 本番運用工学
 
 最後に必要なのは、業務知識と実装知識を production engineering に繋ぐ層である。
+
+現状:
+
+- [x] mobile に運用工学画面を追加
+- [x] session monitor、incident drill、schema control、capacity control を追加
+- [x] app-java に `operations` API を追加
 
 追加すべき論点:
 
@@ -1114,7 +1145,8 @@ repo に入れるべきもの:
 
 この優先度で増やすファイル:
 
-- `frontend/src/components/mobile/MobileOpsIncidentView.tsx` を新設
+- `frontend/src/components/mobile/MobileOperationsView.tsx`
+- `frontend/src/offline/mobileRoadmapOffline.ts`
 - `docs/ops` に session / incident handbook を追加
 - `scripts/ops` に incident replay drill を追加
 
