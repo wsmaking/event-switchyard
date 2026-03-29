@@ -56,6 +56,9 @@ public final class OpsApiHandler extends JsonHttpHandler {
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/rollout-state".equals(path)) {
             return JsonResponse.ok(productionEngineeringService.buildSnapshot().rollout());
         }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/go-no-go".equals(path)) {
+            return JsonResponse.ok(productionEngineeringService.buildSnapshot().goNoGo());
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/audit/replay".equals(path)) {
             ReplayRequest request = exchange.getRequestBody().available() > 0
                 ? readJson(exchange, ReplayRequest.class)

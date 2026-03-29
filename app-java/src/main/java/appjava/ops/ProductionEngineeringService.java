@@ -1,6 +1,7 @@
 package appjava.ops;
 
 import appjava.clients.BackOfficeClient;
+import appjava.clients.ExchangeSimulatorClient;
 import appjava.clients.GatewayClient;
 import appjava.clients.OmsClient;
 import appjava.market.MarketDataService;
@@ -20,6 +21,7 @@ public final class ProductionEngineeringService {
 
     private final String accountId;
     private final GatewayClient gatewayClient;
+    private final ExchangeSimulatorClient exchangeSimulatorClient;
     private final MarketDataService marketDataService;
     private final OmsClient omsClient;
     private final BackOfficeClient backOfficeClient;
@@ -27,12 +29,14 @@ public final class ProductionEngineeringService {
     public ProductionEngineeringService(
         String accountId,
         GatewayClient gatewayClient,
+        ExchangeSimulatorClient exchangeSimulatorClient,
         MarketDataService marketDataService,
         OmsClient omsClient,
         BackOfficeClient backOfficeClient
     ) {
         this.accountId = accountId;
         this.gatewayClient = gatewayClient;
+        this.exchangeSimulatorClient = exchangeSimulatorClient;
         this.marketDataService = marketDataService;
         this.omsClient = omsClient;
         this.backOfficeClient = backOfficeClient;
@@ -41,6 +45,7 @@ public final class ProductionEngineeringService {
     public ProductionEngineeringSnapshot buildSnapshot() {
         long generatedAt = System.currentTimeMillis();
         GatewayClient.GatewayHealth gatewayHealth = gatewayClient.fetchHealth().orElse(null);
+        ExchangeSimulatorClient.ExchangeSimulatorStatus simulatorStatus = exchangeSimulatorClient.fetchStatus().orElse(null);
         OmsClient.OmsStats omsStats = omsClient.fetchStats();
         OmsClient.OmsBusStats omsBusStats = omsClient.fetchBusStats();
         OmsClient.OmsReconcile omsReconcile = omsClient.fetchReconcile(accountId);
@@ -55,10 +60,11 @@ public final class ProductionEngineeringService {
         MarketDataRuntime marketDataRuntime = buildMarketDataRuntime(marketRuntime);
         SchemaRuntime schemaRuntime = buildSchemaRuntime(omsBusStats, backOfficeBusStats);
         CapacityRuntime capacityRuntime = buildCapacityRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
-        VenueSessionsRuntime venueSessionsRuntime = buildVenueSessionsRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
-        RolloutRuntime rolloutRuntime = buildRolloutRuntime(schemaRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
+        VenueSessionsRuntime venueSessionsRuntime = buildVenueSessionsRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime, simulatorStatus);
+        RolloutRuntime rolloutRuntime = buildRolloutRuntime(schemaRuntime, omsProjection, backOfficeProjection, marketDataRuntime, simulatorStatus);
         BooksRuntime booksRuntime = buildBooksRuntime(marketDataRuntime);
-        List<IncidentSignal> incidents = buildIncidents(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime, schemaRuntime, capacityRuntime);
+        List<IncidentSignal> incidents = buildIncidents(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime, schemaRuntime, capacityRuntime, simulatorStatus);
+        GoNoGoRuntime goNoGoRuntime = buildGoNoGoRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime, schemaRuntime, venueSessionsRuntime, booksRuntime, simulatorStatus);
 
         return new ProductionEngineeringSnapshot(
             generatedAt,
@@ -71,6 +77,7 @@ public final class ProductionEngineeringService {
             venueSessionsRuntime,
             rolloutRuntime,
             booksRuntime,
+            goNoGoRuntime,
             incidents,
             buildOperatorSequence(incidents)
         );
@@ -276,37 +283,62 @@ public final class ProductionEngineeringService {
         GatewayRuntime gatewayRuntime,
         ProjectionRuntime omsProjection,
         ProjectionRuntime backOfficeProjection,
-        MarketDataRuntime marketDataRuntime
+        MarketDataRuntime marketDataRuntime,
+        ExchangeSimulatorClient.ExchangeSimulatorStatus simulatorStatus
     ) {
-        String dropCopyState = backOfficeProjection.deadLetters() > 0 || backOfficeProjection.pendingOrphans() > 0
+        String dropCopyState = simulatorStatus != null && simulatorStatus.dropCopyDivergence()
+            ? "DIVERGED"
+            : backOfficeProjection.deadLetters() > 0 || backOfficeProjection.pendingOrphans() > 0
             ? "LAGGING"
             : backOfficeProjection.lastEventAgeMs() > EVENT_STALE_WARNING_MS
             ? "WATCH"
             : "RUNNING";
-        String throttleState = gatewayRuntime.queueLength() >= GATEWAY_QUEUE_CRITICAL || gatewayRuntime.latencyP99Ns() >= GATEWAY_P99_CRITICAL_NS
+        String throttleState = simulatorStatus != null && !"OPEN".equals(simulatorStatus.throttleState())
+            ? simulatorStatus.throttleState()
+            : gatewayRuntime.queueLength() >= GATEWAY_QUEUE_CRITICAL || gatewayRuntime.latencyP99Ns() >= GATEWAY_P99_CRITICAL_NS
             ? "HARD_LIMIT"
             : gatewayRuntime.queueLength() >= GATEWAY_QUEUE_WARNING || gatewayRuntime.latencyP99Ns() >= GATEWAY_P99_WARNING_NS
             ? "SOFT_LIMIT"
             : "OPEN";
-        String entitlementState = ("CRITICAL".equals(dropCopyState) || "STALE".equals(marketDataRuntime.state()))
+        String entitlementState = simulatorStatus != null && !"FULL_ACCESS".equals(simulatorStatus.entitlementState())
+            ? simulatorStatus.entitlementState()
+            : ("CRITICAL".equals(dropCopyState) || "STALE".equals(marketDataRuntime.state()))
             ? "REDUCE_ONLY"
             : "FULL_ACCESS";
         List<VenueSession> sessions = List.of(
             new VenueSession(
                 "Execution session",
-                gatewayRuntime.state(),
-                gatewayRuntime.healthStatus(),
-                Math.max(0L, gatewayRuntime.queueLength()),
-                "queue=" + gatewayRuntime.queueLength() + " / p99=" + formatMicros(gatewayRuntime.latencyP99Ns()),
-                List.of("gateway health", "venue heartbeat explanation", "cancel response lag")
+                simulatorStatus == null ? gatewayRuntime.state() : simulatorStatus.sessionState(),
+                simulatorStatus == null ? gatewayRuntime.healthStatus() : dropCopyState,
+                simulatorStatus == null ? Math.max(0L, gatewayRuntime.queueLength()) : Math.max(0L, simulatorStatus.lastActivityAgeMs()),
+                simulatorStatus == null
+                    ? "queue=" + gatewayRuntime.queueLength() + " / p99=" + formatMicros(gatewayRuntime.latencyP99Ns())
+                    : "mode=" + simulatorStatus.mode()
+                    + " / working=" + simulatorStatus.workingOrders()
+                    + " / lastActivity=" + simulatorStatus.lastActivityAgeMs() + "ms",
+                simulatorStatus == null
+                    ? List.of("gateway health", "venue heartbeat explanation", "cancel response lag")
+                    : List.of(
+                        "session=" + simulatorStatus.sessionState(),
+                        "auction=" + simulatorStatus.auctionState(),
+                        "submitted=" + simulatorStatus.submittedOrders(),
+                        "rejected=" + simulatorStatus.rejectedOrders()
+                    )
             ),
             new VenueSession(
                 "Drop copy equivalent",
                 dropCopyState,
                 dropCopyState,
-                Math.max(0L, backOfficeProjection.lastEventAgeMs()),
-                "pending=" + backOfficeProjection.pendingOrphans() + " / DLQ=" + backOfficeProjection.deadLetters(),
-                List.of("fills と ledger の同期", "dead letter", "pending orphan")
+                simulatorStatus == null ? Math.max(0L, backOfficeProjection.lastEventAgeMs()) : Math.max(0L, simulatorStatus.lastActivityAgeMs()),
+                "pending=" + backOfficeProjection.pendingOrphans()
+                    + " / DLQ=" + backOfficeProjection.deadLetters()
+                    + (simulatorStatus != null ? " / divergence=" + simulatorStatus.dropCopyDivergence() : ""),
+                simulatorStatus == null
+                    ? List.of("fills と ledger の同期", "dead letter", "pending orphan")
+                    : mergeNotes(
+                        List.of("fills と ledger の同期", "dead letter", "pending orphan"),
+                        simulatorStatus.activeIncidents().isEmpty() ? List.of("simulator incident なし") : simulatorStatus.activeIncidents()
+                    )
             )
         );
         return new VenueSessionsRuntime(sessions, throttleState, entitlementState);
@@ -316,20 +348,29 @@ public final class ProductionEngineeringService {
         SchemaRuntime schemaRuntime,
         ProjectionRuntime omsProjection,
         ProjectionRuntime backOfficeProjection,
-        MarketDataRuntime marketDataRuntime
+        MarketDataRuntime marketDataRuntime,
+        ExchangeSimulatorClient.ExchangeSimulatorStatus simulatorStatus
     ) {
         boolean replayReady = omsProjection.pendingOrphans() == 0
             && omsProjection.deadLetters() == 0
             && backOfficeProjection.pendingOrphans() == 0
             && backOfficeProjection.deadLetters() == 0;
         boolean consumerCompatible = !"MISMATCH_RISK".equals(schemaRuntime.state());
-        String state = replayReady && consumerCompatible ? "READY" : consumerCompatible ? "WATCH" : "BLOCKED";
+        boolean simulatorReady = simulatorStatus == null
+            || ("RUNNING".equals(simulatorStatus.sessionState())
+            && !simulatorStatus.dropCopyDivergence()
+            && "FULL_ACCESS".equals(simulatorStatus.entitlementState()));
+        String state = replayReady && consumerCompatible && simulatorReady ? "READY" : consumerCompatible ? "WATCH" : "BLOCKED";
         List<String> checks = new ArrayList<>();
         checks.add("contract=" + schemaRuntime.contractVersion());
         checks.add("consumer compatible=" + consumerCompatible);
         checks.add("replay ready=" + replayReady);
+        checks.add("simulator ready=" + simulatorReady);
         if ("STALE".equals(marketDataRuntime.state())) {
             checks.add("feed stale 中は valuation guard を広げる");
+        }
+        if (simulatorStatus != null) {
+            checks.add("sim mode=" + simulatorStatus.mode() + " / session=" + simulatorStatus.sessionState());
         }
         return new RolloutRuntime(
             state,
@@ -374,7 +415,8 @@ public final class ProductionEngineeringService {
         ProjectionRuntime backOfficeProjection,
         MarketDataRuntime marketDataRuntime,
         SchemaRuntime schemaRuntime,
-        CapacityRuntime capacityRuntime
+        CapacityRuntime capacityRuntime,
+        ExchangeSimulatorClient.ExchangeSimulatorStatus simulatorStatus
     ) {
         List<IncidentSignal> incidents = new ArrayList<>();
         if ("UNREACHABLE".equals(gatewayRuntime.state()) || "CRITICAL".equals(gatewayRuntime.state())) {
@@ -431,6 +473,33 @@ public final class ProductionEngineeringService {
                 "queue と backlog を一緒に見て、offset 単独の正常判定をやめる。"
             ));
         }
+        if (simulatorStatus != null && !"RUNNING".equals(simulatorStatus.sessionState())) {
+            incidents.add(new IncidentSignal(
+                "venue-session",
+                "P1",
+                "venue session 異常",
+                "execution simulator の session が RUNNING ではない。新規受注や cancel 応答の意味が変わる。",
+                "session state、auction state、entitlement を同時に確認する。"
+            ));
+        }
+        if (simulatorStatus != null && simulatorStatus.dropCopyDivergence()) {
+            incidents.add(new IncidentSignal(
+                "drop-copy-divergence",
+                "P1",
+                "drop copy equivalent divergence",
+                "執行経路と post-trade 経路の説明がずれている可能性がある。",
+                "fills / ledger / divergence flag を突き合わせ、statement release を止める。"
+            ));
+        }
+        if (simulatorStatus != null && "HALTED".equals(simulatorStatus.auctionState())) {
+            incidents.add(new IncidentSignal(
+                "auction-halt",
+                "P2",
+                "auction / halt mode",
+                "板は見えても continuous trading ではない。arrival benchmark と fill quality の意味が変わる。",
+                "auction/halt 表示を前面に出し、通常時 benchmark と混ぜない。"
+            ));
+        }
         if (incidents.isEmpty()) {
             incidents.add(new IncidentSignal(
                 "steady-state",
@@ -441,6 +510,74 @@ public final class ProductionEngineeringService {
             ));
         }
         return incidents;
+    }
+
+    private GoNoGoRuntime buildGoNoGoRuntime(
+        GatewayRuntime gatewayRuntime,
+        ProjectionRuntime omsProjection,
+        ProjectionRuntime backOfficeProjection,
+        MarketDataRuntime marketDataRuntime,
+        SchemaRuntime schemaRuntime,
+        VenueSessionsRuntime venueSessionsRuntime,
+        BooksRuntime booksRuntime,
+        ExchangeSimulatorClient.ExchangeSimulatorStatus simulatorStatus
+    ) {
+        List<String> blockedReasons = new ArrayList<>();
+        List<String> requiredDrills = new ArrayList<>();
+
+        if ("UNREACHABLE".equals(gatewayRuntime.state()) || "CRITICAL".equals(gatewayRuntime.state())) {
+            blockedReasons.add("gateway ingress が不安定");
+            requiredDrills.add("gateway queue / latency drill");
+        }
+        if (omsProjection.sequenceGaps() > 0 || omsProjection.pendingOrphans() > 0 || omsProjection.deadLetters() > 0) {
+            blockedReasons.add("OMS projection 未収束");
+            requiredDrills.add("projection replay drill");
+        }
+        if (backOfficeProjection.pendingOrphans() > 0 || backOfficeProjection.deadLetters() > 0) {
+            blockedReasons.add("BackOffice ledger 未収束");
+            requiredDrills.add("ledger reconcile drill");
+        }
+        if ("STALE".equals(marketDataRuntime.state())) {
+            blockedReasons.add("market data stale");
+            requiredDrills.add("feed stale drill");
+        }
+        if ("MISMATCH_RISK".equals(schemaRuntime.state())) {
+            blockedReasons.add("schema compatibility risk");
+            requiredDrills.add("schema rollout drill");
+        }
+        if (!"FULL_ACCESS".equals(venueSessionsRuntime.entitlementState())) {
+            blockedReasons.add("entitlement / reduce-only 制約");
+        }
+        if ("HARD_LIMIT".equals(venueSessionsRuntime.throttleState())) {
+            blockedReasons.add("throttle hard limit");
+            requiredDrills.add("capacity pressure drill");
+        }
+        if (simulatorStatus != null && (simulatorStatus.dropCopyDivergence() || !"RUNNING".equals(simulatorStatus.sessionState()))) {
+            blockedReasons.add("venue / drop-copy control plane 異常");
+            requiredDrills.add("incident matrix drill");
+        }
+        if (!"READY".equals(booksRuntime.settlementState()) && !"SETTLED".equals(booksRuntime.settlementState()) && !"NO_TRADE".equals(booksRuntime.settlementState())) {
+            blockedReasons.add("settlement projection 未完了");
+        }
+        if (!"READY".equals(booksRuntime.statementState()) && !"RELEASED".equals(booksRuntime.statementState()) && !"NO_TRADE".equals(booksRuntime.statementState())) {
+            blockedReasons.add("statement projection 未完了");
+        }
+
+        String state = blockedReasons.isEmpty()
+            ? "GO"
+            : blockedReasons.size() <= 2
+            ? "CAUTION"
+            : "NO_GO";
+        List<String> rationale = blockedReasons.isEmpty()
+            ? List.of("ingress / projection / feed / schema / books が大きく崩れていない")
+            : blockedReasons;
+        return new GoNoGoRuntime(state, rationale, requiredDrills.isEmpty() ? List.of("steady-state observation") : requiredDrills.stream().distinct().toList());
+    }
+
+    private static List<String> mergeNotes(List<String> left, List<String> right) {
+        List<String> merged = new ArrayList<>(left);
+        merged.addAll(right);
+        return merged;
     }
 
     private List<String> buildOperatorSequence(List<IncidentSignal> incidents) {
@@ -494,6 +631,7 @@ public final class ProductionEngineeringService {
         VenueSessionsRuntime venueSessions,
         RolloutRuntime rollout,
         BooksRuntime books,
+        GoNoGoRuntime goNoGo,
         List<IncidentSignal> incidents,
         List<String> operatorSequence
     ) {
@@ -598,6 +736,13 @@ public final class ProductionEngineeringService {
         String booksAndRecordsState,
         String valuationGuard,
         List<String> notes
+    ) {
+    }
+
+    public record GoNoGoRuntime(
+        String state,
+        List<String> blockedReasons,
+        List<String> requiredDrills
     ) {
     }
 

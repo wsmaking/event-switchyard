@@ -10,6 +10,7 @@ APP_PORT="${APP_PORT:-8080}"
 OMS_PORT="${OMS_PORT:-18081}"
 BACKOFFICE_PORT="${BACKOFFICE_PORT:-18082}"
 EXCHANGE_TCP_PORT="${EXCHANGE_TCP_PORT:-9901}"
+EXCHANGE_SIM_ADMIN_PORT="${EXCHANGE_SIM_ADMIN_PORT:-9902}"
 KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
 KAFKA_TOPIC="${KAFKA_TOPIC:-events}"
 JWT_HS256_SECRET="${JWT_HS256_SECRET:-secret123}"
@@ -104,6 +105,7 @@ start_gradle_service \
   "tcp-exchange-sim" \
   ":gateway:run" \
   EXCHANGE_TCP_PORT="${EXCHANGE_TCP_PORT}" \
+  EXCHANGE_SIM_ADMIN_PORT="${EXCHANGE_SIM_ADMIN_PORT}" \
   EXCHANGE_SIM_PARTIAL_STEPS=3 \
   EXCHANGE_SIM_DELAY_MS=150 \
   ORG_GRADLE_PROJECT_mainClass=gateway.exchange.TcpExchangeSimulatorMain
@@ -112,6 +114,7 @@ start_gradle_service \
   "oms-java-mainline" \
   ":oms-java:run" \
   ACCOUNT_ID="${ACCOUNT_ID}" \
+  EXCHANGE_SIM_ADMIN_URL="http://localhost:${EXCHANGE_SIM_ADMIN_PORT}" \
   OMS_STORE_MODE=postgres \
   OMS_DB_URL="${MAINLINE_DB_URL}" \
   OMS_DB_USER="${MAINLINE_DB_USER}" \
@@ -155,6 +158,7 @@ start_gradle_service \
   ACCOUNT_ID="${ACCOUNT_ID}" \
   JWT_HS256_SECRET="${JWT_HS256_SECRET}" \
   GATEWAY_BASE_URL="http://localhost:${GATEWAY_PORT}" \
+  EXCHANGE_SIM_ADMIN_URL="http://localhost:${EXCHANGE_SIM_ADMIN_PORT}" \
   OMS_JAVA_BASE_URL="http://localhost:${OMS_PORT}" \
   BACKOFFICE_JAVA_BASE_URL="http://localhost:${BACKOFFICE_PORT}"
 
@@ -169,6 +173,7 @@ cat <<EOF
   gateway-rust   : http://localhost:${GATEWAY_PORT}
   oms-java       : http://localhost:${OMS_PORT}
   backoffice-java: http://localhost:${BACKOFFICE_PORT}
+  sim-admin      : http://localhost:${EXCHANGE_SIM_ADMIN_PORT}
   kafka          : ${KAFKA_BOOTSTRAP_SERVERS}
   postgres       : ${MAINLINE_DB_URL}
   run dir        : ${RUN_DIR}

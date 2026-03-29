@@ -56,6 +56,25 @@ export function MobileAssetClassView() {
               rightTitle="専用化すべきもの"
               rightItems={assetClass.whatMustSpecialize}
             />
+            <div className="mt-4 rounded-[22px] border border-white/10 bg-black/20 p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">数値例と lifecycle breakpoint</div>
+              <div className="mt-3 space-y-3">
+                {assetClass.sampleMetrics.map((metric) => (
+                  <div key={`${assetClass.assetClass}-${metric.label}`} className="rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-slate-500">{metric.label}</div>
+                    <div className="mt-2 text-sm font-medium text-white">{metric.value}</div>
+                    <div className="mt-2 text-xs leading-5 text-slate-400">{metric.note}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 space-y-2">
+                {assetClass.lifecycleBreakpoints.map((item) => (
+                  <div key={`${assetClass.assetClass}-${item}`} className="text-sm leading-6 text-slate-300">
+                    ・{item}
+                  </div>
+                ))}
+              </div>
+            </div>
             <TripleList
               leftTitle="帳票 / 台帳への影響"
               leftItems={assetClass.booksAndRecordsImplications}

@@ -559,6 +559,10 @@ public final class MobileRoadmapService {
                     assetClass.operatorWatchpoints(),
                     assetClass.whatStaysCommon(),
                     assetClass.whatMustSpecialize(),
+                    assetClass.sampleMetrics().stream()
+                        .map(metric -> new AssetMetric(metric.label(), metric.value(), metric.note()))
+                        .toList(),
+                    assetClass.lifecycleBreakpoints(),
                     assetClass.booksAndRecordsImplications(),
                     assetClass.failureModes()
                 ))
@@ -791,6 +795,11 @@ public final class MobileRoadmapService {
                     session.notes()
                 ))
                 .toList(),
+            new GoNoGoGate(
+                snapshot.goNoGo().state(),
+                snapshot.goNoGo().blockedReasons(),
+                snapshot.goNoGo().requiredDrills()
+            ),
             new RolloutState(
                 snapshot.rollout().state(),
                 snapshot.rollout().contractVersion(),
@@ -1760,8 +1769,17 @@ public final class MobileRoadmapService {
         List<String> operatorWatchpoints,
         List<String> whatStaysCommon,
         List<String> whatMustSpecialize,
+        List<AssetMetric> sampleMetrics,
+        List<String> lifecycleBreakpoints,
         List<String> booksAndRecordsImplications,
         List<String> failureModes
+    ) {
+    }
+
+    public record AssetMetric(
+        String label,
+        String value,
+        String note
     ) {
     }
 
@@ -1773,6 +1791,7 @@ public final class MobileRoadmapService {
         List<SchemaControl> schemaControls,
         List<CapacityControl> capacityControls,
         List<VenueSession> venueSessions,
+        GoNoGoGate goNoGo,
         RolloutState rolloutState,
         List<String> operatorSequence,
         List<String> guidedSteps,
@@ -1844,6 +1863,13 @@ public final class MobileRoadmapService {
         long heartbeatAgeMs,
         String currentValue,
         List<String> notes
+    ) {
+    }
+
+    public record GoNoGoGate(
+        String state,
+        List<String> blockedReasons,
+        List<String> requiredDrills
     ) {
     }
 

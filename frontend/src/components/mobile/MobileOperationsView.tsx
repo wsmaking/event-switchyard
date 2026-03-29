@@ -129,9 +129,14 @@ export function MobileOperationsView() {
       <Section title="Rollout Gate">
         <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
           <div className="grid grid-cols-2 gap-3">
+            <Metric label="Go / No-Go" value={data.goNoGo.state} />
+            <Metric label="Replay" value={data.rolloutState.replayReadiness} />
+          </div>
+          <SubList title="Blocked Reasons" items={data.goNoGo.blockedReasons} />
+          <SubList title="Required Drills" items={data.goNoGo.requiredDrills} />
+          <div className="grid grid-cols-2 gap-3">
             <Metric label="State" value={data.rolloutState.state} />
             <Metric label="Contract" value={data.rolloutState.contractVersion} />
-            <Metric label="Replay" value={data.rolloutState.replayReadiness} />
             <Metric label="Consumer" value={data.rolloutState.consumerCompatibility} />
           </div>
           <SubList title="Checks" items={data.rolloutState.checks} />

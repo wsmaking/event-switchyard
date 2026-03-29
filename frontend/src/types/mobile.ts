@@ -622,6 +622,12 @@ export interface MobileAssetClassGuide {
     operatorWatchpoints: string[];
     whatStaysCommon: string[];
     whatMustSpecialize: string[];
+    sampleMetrics: Array<{
+      label: string;
+      value: string;
+      note: string;
+    }>;
+    lifecycleBreakpoints: string[];
     booksAndRecordsImplications: string[];
     failureModes: string[];
   }>;
@@ -686,6 +692,11 @@ export interface MobileOperationsGuide {
     currentValue: string;
     notes: string[];
   }>;
+  goNoGo: {
+    state: string;
+    blockedReasons: string[];
+    requiredDrills: string[];
+  };
   rolloutState: {
     state: string;
     contractVersion: string;

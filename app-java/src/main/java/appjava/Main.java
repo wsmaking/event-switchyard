@@ -2,6 +2,7 @@ package appjava;
 
 import appjava.auth.JwtSigner;
 import appjava.clients.BackOfficeClient;
+import appjava.clients.ExchangeSimulatorClient;
 import appjava.clients.GatewayClient;
 import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
@@ -33,12 +34,14 @@ public final class Main {
         MarketDataService marketDataService = new MarketDataService();
         BackOfficeClient backOfficeClient = new BackOfficeClient(accountId);
         GatewayClient gatewayClient = new GatewayClient(accountId, JwtSigner.fromEnv());
+        ExchangeSimulatorClient exchangeSimulatorClient = new ExchangeSimulatorClient();
         OmsClient omsClient = new OmsClient();
         ExecutionBenchmarkStore executionBenchmarkStore = new ExecutionBenchmarkStore();
         OrderService orderService = new OrderService(accountId, gatewayClient, omsClient, marketDataService, executionBenchmarkStore);
         ProductionEngineeringService productionEngineeringService = new ProductionEngineeringService(
             accountId,
             gatewayClient,
+            exchangeSimulatorClient,
             marketDataService,
             omsClient,
             backOfficeClient
