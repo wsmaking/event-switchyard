@@ -6,6 +6,7 @@ import { MobileArchitectureView } from './MobileArchitectureView';
 import { MobileCardsView } from './MobileCardsView';
 import { MobileDrillsView } from './MobileDrillsView';
 import { MobileHomeView } from './MobileHomeView';
+import { MobileMarketStructureView } from './MobileMarketStructureView';
 import { MobileOrderStudyView } from './MobileOrderStudyView';
 import { MobileRiskView } from './MobileRiskView';
 
@@ -23,13 +24,14 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
   const lastAnchorRef = useRef<string | null>(null);
 
   const activeOrderId = route.orderId ?? home?.continueLearning.orderId ?? orders?.[0]?.id ?? null;
+  const activeSymbol = route.symbol ?? orders?.find((order) => order.id === activeOrderId)?.symbol ?? orders?.[0]?.symbol ?? '7203';
 
   useEffect(() => {
     if (route.section === 'home') {
       return;
     }
     const anchorOrderId =
-      route.section === 'orders' || route.section === 'ledger' || route.section === 'architecture'
+      route.section === 'orders' || route.section === 'ledger' || route.section === 'architecture' || route.section === 'market'
         ? activeOrderId
         : null;
     const signature = `${path}|${anchorOrderId ?? ''}|${route.cardId ?? ''}`;
@@ -89,6 +91,9 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
         {route.section === 'orders' && (
           <MobileOrderStudyView focus="lifecycle" orderId={activeOrderId} onNavigate={onNavigate} />
         )}
+        {route.section === 'market' && (
+          <MobileMarketStructureView symbol={activeSymbol} orderId={activeOrderId} onNavigate={onNavigate} />
+        )}
         {route.section === 'ledger' && (
           <MobileOrderStudyView focus="ledger" orderId={activeOrderId} onNavigate={onNavigate} />
         )}
@@ -99,9 +104,10 @@ export function MobileLearningConsole({ path, onNavigate, onExit }: MobileLearni
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-slate-950/92 backdrop-blur">
-        <div className="mx-auto grid max-w-md grid-cols-7 gap-1 px-2 py-2">
+        <div className="mx-auto grid max-w-md grid-cols-4 gap-1 px-2 py-2">
           <NavButton label="ホーム" active={route.section === 'home'} onClick={() => onNavigate('/mobile')} />
           <NavButton label="注文" active={route.section === 'orders'} onClick={() => onNavigate(activeOrderId ? `/mobile/orders/${activeOrderId}` : '/mobile/orders')} />
+          <NavButton label="市場" active={route.section === 'market'} onClick={() => onNavigate(`/mobile/market/${activeSymbol}`)} />
           <NavButton label="台帳" active={route.section === 'ledger'} onClick={() => onNavigate('/mobile/ledger')} />
           <NavButton label="構成" active={route.section === 'architecture'} onClick={() => onNavigate('/mobile/architecture')} />
           <NavButton label="判断" active={route.section === 'cards'} onClick={() => onNavigate('/mobile/cards')} />
@@ -136,25 +142,27 @@ export function parseMobileRoute(path: string): MobileRouteState {
   const normalized = path.split('?')[0].replace(/\/+$/, '') || '/';
   const segments = normalized.split('/').filter(Boolean);
   if (segments[0] !== 'mobile' || segments.length === 0) {
-    return { section: 'home', orderId: null, cardId: null, drillId: null };
+    return { section: 'home', orderId: null, symbol: null, cardId: null, drillId: null };
   }
   if (segments.length === 1) {
-    return { section: 'home', orderId: null, cardId: null, drillId: null };
+    return { section: 'home', orderId: null, symbol: null, cardId: null, drillId: null };
   }
   switch (segments[1]) {
     case 'orders':
-      return { section: 'orders', orderId: segments[2] ?? null, cardId: null, drillId: null };
+      return { section: 'orders', orderId: segments[2] ?? null, symbol: null, cardId: null, drillId: null };
+    case 'market':
+      return { section: 'market', orderId: null, symbol: segments[2] ?? null, cardId: null, drillId: null };
     case 'ledger':
-      return { section: 'ledger', orderId: null, cardId: null, drillId: null };
+      return { section: 'ledger', orderId: null, symbol: null, cardId: null, drillId: null };
     case 'architecture':
-      return { section: 'architecture', orderId: null, cardId: null, drillId: null };
+      return { section: 'architecture', orderId: null, symbol: null, cardId: null, drillId: null };
     case 'cards':
-      return { section: 'cards', orderId: null, cardId: segments[2] ?? null, drillId: null };
+      return { section: 'cards', orderId: null, symbol: null, cardId: segments[2] ?? null, drillId: null };
     case 'drills':
-      return { section: 'drills', orderId: null, cardId: null, drillId: segments[2] ?? null };
+      return { section: 'drills', orderId: null, symbol: null, cardId: null, drillId: segments[2] ?? null };
     case 'risk':
-      return { section: 'risk', orderId: null, cardId: null, drillId: null };
+      return { section: 'risk', orderId: null, symbol: null, cardId: null, drillId: null };
     default:
-      return { section: 'home', orderId: null, cardId: null, drillId: null };
+      return { section: 'home', orderId: null, symbol: null, cardId: null, drillId: null };
   }
 }

@@ -8,7 +8,7 @@ import {
 } from '../../hooks/useMobileStudy';
 import { OrderSide, OrderType, TimeInForce } from '../../types/trading';
 import type { OpsOverview, OrderFinalOut, OrderRequest } from '../../types/trading';
-import { formatCurrency, formatDateTime, formatNumber, formatSignedCurrency, statusLabel, statusTone } from './mobileUtils';
+import { formatCurrency, formatDateTime, formatNumber, formatPercent, formatSignedCurrency, statusLabel, statusTone } from './mobileUtils';
 
 interface MobileOrderStudyViewProps {
   focus: 'lifecycle' | 'ledger';
@@ -156,6 +156,12 @@ function OrderStudyContent({
           <InfoMetric label="約定" value={`${formatNumber(finalOut.order.filledQuantity ?? 0)} 株`} />
           <InfoMetric label="配信" value={orderStreamState} />
         </div>
+        <button
+          onClick={() => onNavigate(`/mobile/market/${finalOut.order.symbol}`)}
+          className="mt-4 rounded-full border border-cyan-300/30 bg-cyan-500/10 px-4 py-2 text-xs font-medium text-cyan-100"
+        >
+          市場構造と執行品質へ
+        </button>
         {orderStreamState === 'offline' && (
           <div className="mt-4 rounded-[18px] border border-teal-300/20 bg-teal-400/10 px-4 py-3 text-xs leading-6 text-teal-50/90">
             on-device pack で再生中。order stream は local storage の state を参照しています。
@@ -192,6 +198,8 @@ function OrderStudyContent({
         <div className="text-base font-semibold text-white">意図的に取らなかった設計</div>
         <BulletStack items={brief.rejectedDesign} tone="amber" />
       </section>
+
+      <ExecutionQualityCard finalOut={finalOut} onNavigate={onNavigate} />
 
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
         <div className="text-base font-semibold text-white">運用でまず確認すること</div>
@@ -586,6 +594,47 @@ function NarrativeCard({ title, body }: { title: string; body: string }) {
       <div className="text-sm font-semibold text-white">{title}</div>
       <div className="mt-2 text-sm leading-6 text-slate-300">{body}</div>
     </div>
+  );
+}
+
+function ExecutionQualityCard({
+  finalOut,
+  onNavigate,
+}: {
+  finalOut: OrderFinalOut;
+  onNavigate: (path: string) => void;
+}) {
+  const executionQuality = finalOut.executionQuality;
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-base font-semibold text-white">市場構造と執行品質</div>
+        <button onClick={() => onNavigate(`/mobile/market/${finalOut.order.symbol}`)} className="text-xs font-medium text-cyan-200">
+          市場画面へ
+        </button>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <ImpactMetric label="到着時 bid / ask" value={`${formatCurrency(executionQuality.arrivalBidPrice)} / ${formatCurrency(executionQuality.arrivalAskPrice)}`} />
+        <ImpactMetric label="到着時ミッド" value={formatCurrency(executionQuality.arrivalMidPrice)} />
+        <ImpactMetric label="到着時 spread" value={formatPercent(executionQuality.arrivalSpreadBps, 2)} />
+        <ImpactMetric label="約定率" value={formatPercent(executionQuality.fillRatePercent, 1)} />
+        <ImpactMetric label="平均約定" value={executionQuality.averageExecutionPrice == null ? '未約定' : formatCurrency(executionQuality.averageExecutionPrice)} />
+        <ImpactMetric
+          label="不利約定"
+          value={
+            executionQuality.slippageBps == null
+              ? '未算出'
+              : `${formatPercent(executionQuality.slippageBps, 2)} / ${formatSignedCurrency(executionQuality.slippageAmount)}`
+          }
+        />
+      </div>
+      <div className="mt-4 rounded-[20px] border border-white/8 bg-slate-950/55 px-4 py-4 text-sm leading-6 text-slate-300">
+        {executionQuality.note}
+      </div>
+      <div className="mt-3 rounded-[20px] border border-cyan-300/15 bg-cyan-500/10 px-4 py-4 text-xs leading-6 text-cyan-50/90">
+        送信時点の到着時基準を固定しているので、あとから現在価格が変わっても説明軸はぶれません。
+      </div>
+    </section>
   );
 }
 
