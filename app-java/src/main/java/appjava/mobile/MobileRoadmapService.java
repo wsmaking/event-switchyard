@@ -3,15 +3,12 @@ package appjava.mobile;
 import appjava.account.AccountOverview;
 import appjava.clients.BackOfficeClient;
 import appjava.clients.BackOfficeClient.BackOfficePosition;
-import appjava.clients.BackOfficeClient.BackOfficeReconcile;
-import appjava.clients.BackOfficeClient.BackOfficeStats;
 import appjava.clients.BackOfficeClient.LedgerEntry;
 import appjava.clients.OmsClient;
-import appjava.clients.OmsClient.OmsReconcile;
-import appjava.clients.OmsClient.OmsStats;
 import appjava.market.MarketDataService;
 import appjava.market.MarketStructureSnapshot;
 import appjava.market.StockInfo;
+import appjava.ops.ProductionEngineeringService;
 import appjava.order.FillView;
 import appjava.order.OrderView;
 
@@ -25,17 +22,20 @@ public final class MobileRoadmapService {
     private final MarketDataService marketDataService;
     private final BackOfficeClient backOfficeClient;
     private final OmsClient omsClient;
+    private final ProductionEngineeringService productionEngineeringService;
 
     public MobileRoadmapService(
         String accountId,
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
-        OmsClient omsClient
+        OmsClient omsClient,
+        ProductionEngineeringService productionEngineeringService
     ) {
         this.accountId = accountId;
         this.marketDataService = marketDataService;
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
+        this.productionEngineeringService = productionEngineeringService;
     }
 
     public InstitutionalFlowResponse buildInstitutionalFlow() {
@@ -420,71 +420,185 @@ public final class MobileRoadmapService {
     }
 
     public OperationsEngineeringResponse buildOperationsEngineering() {
-        OmsStats omsStats = omsClient.fetchStats();
-        BackOfficeStats backOfficeStats = backOfficeClient.fetchStats();
-        OmsReconcile omsReconcile = omsClient.fetchReconcile(accountId);
-        BackOfficeReconcile backOfficeReconcile = backOfficeClient.fetchReconcile(accountId);
-        int sequenceGaps = (int) ((omsStats == null ? 0 : omsStats.sequenceGaps()) + (backOfficeStats == null ? 0 : backOfficeStats.sequenceGaps()));
-        int pending = (omsStats == null ? 0 : omsStats.pendingOrphanCount()) + (backOfficeStats == null ? 0 : backOfficeStats.pendingOrphanCount());
-        int dlq = (omsStats == null ? 0 : omsStats.deadLetterCount()) + (backOfficeStats == null ? 0 : backOfficeStats.deadLetterCount());
-        List<String> reconcileIssues = new ArrayList<>();
-        if (omsReconcile != null && omsReconcile.issues() != null) {
-            reconcileIssues.addAll(omsReconcile.issues());
-        }
-        if (backOfficeReconcile != null && backOfficeReconcile.issues() != null) {
-            reconcileIssues.addAll(backOfficeReconcile.issues());
-        }
+        ProductionEngineeringService.ProductionEngineeringSnapshot snapshot = productionEngineeringService.buildSnapshot();
+        List<String> reconcileNotes = new ArrayList<>();
+        reconcileNotes.addAll(snapshot.omsProjection().notes());
+        reconcileNotes.addAll(snapshot.backOfficeProjection().notes());
+        List<String> activeIncidentTitles = snapshot.incidents().stream()
+            .filter(incident -> !"OK".equals(incident.severity()))
+            .map(incident -> incident.severity() + " " + incident.title())
+            .limit(4)
+            .toList();
+        int activeIncidentCount = (int) snapshot.incidents().stream()
+            .filter(incident -> !"OK".equals(incident.severity()))
+            .count();
+        String liveCompletenessLabel = activeIncidentTitles.isEmpty()
+            ? "fills / reservation / ledger / reconcile OK"
+            : "incident " + activeIncidentTitles.size() + " 件あり";
 
         return new OperationsEngineeringResponse(
-            System.currentTimeMillis(),
+            snapshot.generatedAt(),
             new LiveStateSummary(
-                safeState(omsStats == null ? null : omsStats.state()),
-                safeState(backOfficeStats == null ? null : backOfficeStats.state()),
-                sequenceGaps,
-                pending,
-                dlq,
-                reconcileIssues.isEmpty() ? List.of("reconcile issue なし") : reconcileIssues.stream().limit(4).toList()
+                snapshot.gateway().state(),
+                snapshot.omsProjection().state(),
+                snapshot.backOfficeProjection().state(),
+                snapshot.marketData().state(),
+                snapshot.schema().state(),
+                snapshot.capacity().state(),
+                (int) (snapshot.omsProjection().sequenceGaps() + snapshot.backOfficeProjection().sequenceGaps()),
+                snapshot.omsProjection().pendingOrphans() + snapshot.backOfficeProjection().pendingOrphans(),
+                snapshot.omsProjection().deadLetters() + snapshot.backOfficeProjection().deadLetters(),
+                activeIncidentCount,
+                activeIncidentTitles.isEmpty() ? List.of("active incident なし") : activeIncidentTitles,
+                reconcileNotes.isEmpty() ? List.of("reconcile issue なし") : reconcileNotes.stream().limit(6).toList()
             ),
             List.of(
-                new SessionMonitor("Gateway / Venue session", "RUNNING", "受注は続いても venue state が悪いと execution explanation が崩れる", List.of("heartbeat", "cancel ack latency", "venue state explanation")),
-                new SessionMonitor("OMS projection", safeState(omsStats == null ? null : omsStats.state()), "accepted / cancel / fill の順序が崩れると最初に疑う場所", List.of("aggregate progress", "pending orphan", "DLQ")),
-                new SessionMonitor("BackOffice projection", safeState(backOfficeStats == null ? null : backOfficeStats.state()), "ledger truth と cash / position を守る最後の壁", List.of("fill count", "ledger entries", "reconcile issues")),
-                new SessionMonitor("Market data freshness", "SIMULATED", "価格と spread が stale だと execution quality と risk の両方が薄くなる", List.of("tick freshness", "venue state", "price gap reason"))
+                new SessionMonitor(
+                    "Gateway / Venue session",
+                    snapshot.gateway().state(),
+                    "受注は続いても gateway queue と latency が悪化すると venue 説明と cancel 応答が一緒に崩れる。",
+                    "queue=" + snapshot.gateway().queueLength() + " / p99=" + formatNs(snapshot.gateway().latencyP99Ns()),
+                    List.of("health status", "queue length", "p99 latency", "venue heartbeat explanation"),
+                    snapshot.gateway().notes()
+                ),
+                new SessionMonitor(
+                    "OMS projection",
+                    snapshot.omsProjection().state(),
+                    "accepted / cancel / fill の順序が崩れると注文状態の説明が閉じない。",
+                    "gap=" + snapshot.omsProjection().sequenceGaps()
+                        + " / pending=" + snapshot.omsProjection().pendingOrphans()
+                        + " / DLQ=" + snapshot.omsProjection().deadLetters(),
+                    List.of("aggregate progress", "pending orphan", "DLQ", "bus pending", "last event age"),
+                    snapshot.omsProjection().notes()
+                ),
+                new SessionMonitor(
+                    "BackOffice projection",
+                    snapshot.backOfficeProjection().state(),
+                    "cash / position / realized PnL の説明責任を閉じる最後の壁。",
+                    "gap=" + snapshot.backOfficeProjection().sequenceGaps()
+                        + " / pending=" + snapshot.backOfficeProjection().pendingOrphans()
+                        + " / DLQ=" + snapshot.backOfficeProjection().deadLetters(),
+                    List.of("ledger truth", "reconcile issues", "bus pending", "last event age"),
+                    snapshot.backOfficeProjection().notes()
+                ),
+                new SessionMonitor(
+                    "Market data freshness",
+                    snapshot.marketData().state(),
+                    "価格 stale は execution quality と risk の前提を同時に壊す。",
+                    "maxAge=" + snapshot.marketData().maxTickAgeMs() + "ms / stale=" + snapshot.marketData().staleSymbolCount(),
+                    List.of("tick freshness", "auction / halt watch", "spread widening", "benchmark 混同防止"),
+                    snapshot.marketData().notes()
+                )
+            ),
+            snapshot.incidents().stream().map(incident -> new IncidentDrill(
+                incident.title(),
+                incident.summary(),
+                List.of(
+                    "これは session / projection / schema / feed のどれに属するか",
+                    "raw event と live metric のどちらが崩れているか",
+                    "ユーザへの説明責任はどこで開いたままか"
+                ),
+                List.of(
+                    incident.firstAction(),
+                    "pending orphan と DLQ を分けて数える",
+                    "復旧後に reconcile と final-out completeness を再確認する"
+                ),
+                incident.severity(),
+                !"OK".equals(incident.severity()),
+                "incident が解消し state が RUNNING / COMPATIBLE / FRESH に戻る"
+            )).toList(),
+            List.of(
+                new SchemaControl(
+                    "Event contract",
+                    "新規項目は optional / additive を原則とする。",
+                    "old consumer が decode 不能になり dead letter が増える。",
+                    snapshot.schema().state(),
+                    snapshot.schema().notes()
+                ),
+                new SchemaControl(
+                    "Replay safety",
+                    "schema 変更時は replay と checkpoint 互換を先に確認する。",
+                    "過去 audit が読めず recovery drill が壊れる。",
+                    snapshot.omsProjection().busPending() > 0 || snapshot.backOfficeProjection().busPending() > 0 ? "WATCH" : "READY",
+                    List.of(
+                        "OMS bus pending=" + snapshot.omsProjection().busPending(),
+                        "BackOffice bus pending=" + snapshot.backOfficeProjection().busPending(),
+                        "replay 前に additive-only を崩していないか確認する"
+                    )
+                ),
+                new SchemaControl(
+                    "Operator wording",
+                    "UI 文言を変えても raw event / source field は維持する。",
+                    "runbook と現場画面の用語がずれ、復旧時の会話が壊れる。",
+                    "REQUIRED",
+                    List.of(
+                        "final-out と statement の意味を分ける",
+                        "accepted / filled / settlement を同義語として扱わない"
+                    )
+                )
             ),
             List.of(
-                new IncidentDrill("sequence gap 増加", "pending orphan が増え続ける", List.of("accepted 前提が欠けているか", "aggregate progress が止まっていないか"), List.of("pending と DLQ を分けて数える", "replay で直す前に raw event 順序を確認"), "pending orphan が解消し aggregate progress が進む"),
-                new IncidentDrill("DLQ 増加", "decode 失敗や schema mismatch", List.of("payload が壊れているか", "consumer の schema 想定が古いか"), List.of("DLQ payload を保存", "schema 互換性を確認してから requeue"), "同じ eventRef が再度 DLQ に戻らない"),
-                new IncidentDrill("market data stale", "価格は見えるが tick が止まる", List.of("risk 数字が古くなっていないか", "arrival benchmark と current price が混ざっていないか"), List.of("stale 表示を優先", "execution / risk を保守モードで読む"), "fresh tick と venue state が復帰する"),
-                new IncidentDrill("schema rollout", "bus event 項目追加", List.of("producer と consumer の互換性を保っているか", "default 値と optional 扱いが定義されているか"), List.of("backward compatible を先に配る", "replay drill を事前に回す"), "old payload と new payload の双方で projection が壊れない")
+                new CapacityControl(
+                    "Order intake latency",
+                    "gateway p99 latency",
+                    "< 2ms warning / < 5ms critical",
+                    "hot path に学習や集約ロジックを混ぜない理由。",
+                    formatNs(snapshot.gateway().latencyP99Ns()),
+                    snapshot.gateway().state(),
+                    snapshot.gateway().notes()
+                ),
+                new CapacityControl(
+                    "Projection backlog",
+                    "pending orphan + DLQ + bus pending",
+                    "0 を維持し、増加傾向なら projection 側を疑う",
+                    "offset だけでは安全とは言えない。",
+                    String.valueOf(snapshot.capacity().projectionBacklog()),
+                    snapshot.capacity().state(),
+                    snapshot.capacity().notes()
+                ),
+                new CapacityControl(
+                    "Market data freshness budget",
+                    "max tick age",
+                    "< " + snapshot.marketData().freshnessBudgetMs() + "ms",
+                    "execution と risk の両方の前提を守る閾値。",
+                    snapshot.marketData().maxTickAgeMs() + "ms",
+                    snapshot.marketData().state(),
+                    snapshot.marketData().symbols().stream()
+                        .limit(3)
+                        .map(symbol -> symbol.symbol() + " " + symbol.tickAgeMs() + "ms / " + symbol.venueState())
+                        .toList()
+                ),
+                new CapacityControl(
+                    "UI trust signal",
+                    "final-out completeness / reconcile",
+                    "fills / reservation / ledger が揃ってから説明を閉じる",
+                    "中途半端な画面で成功判定しない。",
+                    liveCompletenessLabel,
+                    snapshot.backOfficeProjection().state(),
+                    List.of(
+                        "reconcile issues=" + reconcileNotes.size(),
+                        "active incidents=" + snapshot.incidents().size()
+                    )
+                )
             ),
-            List.of(
-                new SchemaControl("Event contract", "新規項目は optional / additive を原則とする", "old consumer が decode 不能になり DLQ が急増する"),
-                new SchemaControl("Replay safety", "schema 変更時は replay script と checkpoint 互換を先に確認する", "過去 audit が読めず projection recovery が失敗する"),
-                new SchemaControl("Operator wording", "UI 表示名を変えても raw event / source field は維持する", "運用 runbook と現場画面の用語が噛み合わなくなる")
-            ),
-            List.of(
-                new CapacityControl("Order intake latency", "hot path latency", "< 1ms class を維持", "説明系 aggregation を gateway に混ぜない理由"),
-                new CapacityControl("Projection backlog", "pending orphan / DLQ / current offset", "増加傾向なら input 側より projection 側を疑う", "offset だけで安心しない"),
-                new CapacityControl("Recovery time", "snapshot restore + replay duration", "デモ / drill で数分以内を目標", "事故後に再説明可能な時間を短くする"),
-                new CapacityControl("UI trust signal", "final-out completeness", "fills / reservation / ledger が揃ってから説明を閉じる", "中途半端な画面で成功判定しない")
-            ),
+            snapshot.operatorSequence(),
             List.of(
                 new MobileLearningService.ImplementationAnchor(
-                    "ops overview 集約",
+                    "production engineering snapshot",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/ops/ProductionEngineeringService.java",
+                    "gateway / projection / feed / schema / capacity を live に集約する本体",
+                    null
+                ),
+                new MobileLearningService.ImplementationAnchor(
+                    "ops API",
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OpsApiHandler.java",
-                    "OMS / BackOffice / bus / orphan / DLQ をまとめて返す入口",
+                    "mobile と operator の両方が参照する production engineering API 入口",
                     null
                 ),
                 new MobileLearningService.ImplementationAnchor(
-                    "mainline runbook",
-                    "/Users/fujii/Desktop/dev/event-switchyard/docs/ops/business_mainline_operations_runbook.md",
-                    "incident 時に何を見るかを文章で固定している",
-                    null
-                ),
-                new MobileLearningService.ImplementationAnchor(
-                    "projection recovery drill",
-                    "/Users/fujii/Desktop/dev/event-switchyard/scripts/ops/drill_business_mainline_projection_recovery.sh",
-                    "replay と reconcile を分けて確認する drill",
+                    "market feed runtime",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
+                    "tick freshness、venue state、spread を live runtime として返す",
                     null
                 )
             )
@@ -551,6 +665,16 @@ public final class MobileRoadmapService {
 
     private static String safeState(String value) {
         return value == null || value.isBlank() ? "UNKNOWN" : value;
+    }
+
+    private static String formatNs(long nanos) {
+        if (nanos < 0) {
+            return "n/a";
+        }
+        if (nanos >= 1_000_000L) {
+            return round2(nanos / 1_000_000.0) + "ms";
+        }
+        return round2(nanos / 1_000.0) + "us";
     }
 
     private static double round2(double value) {
@@ -776,16 +900,23 @@ public final class MobileRoadmapService {
         List<IncidentDrill> incidentDrills,
         List<SchemaControl> schemaControls,
         List<CapacityControl> capacityControls,
+        List<String> operatorSequence,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
 
     public record LiveStateSummary(
+        String gatewayState,
         String omsState,
         String backOfficeState,
+        String marketDataState,
+        String schemaState,
+        String capacityState,
         int sequenceGapCount,
         int pendingOrphanCount,
         int deadLetterCount,
+        int activeIncidentCount,
+        List<String> activeIncidents,
         List<String> reconcileNotes
     ) {
     }
@@ -794,7 +925,9 @@ public final class MobileRoadmapService {
         String name,
         String state,
         String whyItMatters,
-        List<String> checkpoints
+        String currentValue,
+        List<String> checkpoints,
+        List<String> operatorActions
     ) {
     }
 
@@ -803,6 +936,8 @@ public final class MobileRoadmapService {
         String trigger,
         List<String> firstQuestions,
         List<String> actions,
+        String severity,
+        boolean active,
         String recoverySignal
     ) {
     }
@@ -810,7 +945,9 @@ public final class MobileRoadmapService {
     public record SchemaControl(
         String title,
         String rule,
-        String failureMode
+        String failureMode,
+        String currentState,
+        List<String> operatorChecks
     ) {
     }
 
@@ -818,7 +955,10 @@ public final class MobileRoadmapService {
         String title,
         String metric,
         String threshold,
-        String whyItMatters
+        String whyItMatters,
+        String currentValue,
+        String status,
+        List<String> operatorActions
     ) {
     }
 }

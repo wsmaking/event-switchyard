@@ -430,37 +430,53 @@ export interface MobileAssetClassGuide {
 export interface MobileOperationsGuide {
   generatedAt: number;
   liveState: {
+    gatewayState: string;
     omsState: string;
     backOfficeState: string;
+    marketDataState: string;
+    schemaState: string;
+    capacityState: string;
     sequenceGapCount: number;
     pendingOrphanCount: number;
     deadLetterCount: number;
+    activeIncidentCount: number;
+    activeIncidents: string[];
     reconcileNotes: string[];
   };
   sessionMonitors: Array<{
     name: string;
     state: string;
     whyItMatters: string;
+    currentValue: string;
     checkpoints: string[];
+    operatorActions: string[];
   }>;
   incidentDrills: Array<{
     name: string;
     trigger: string;
     firstQuestions: string[];
     actions: string[];
+    severity: string;
+    active: boolean;
     recoverySignal: string;
   }>;
   schemaControls: Array<{
     title: string;
     rule: string;
     failureMode: string;
+    currentState: string;
+    operatorChecks: string[];
   }>;
   capacityControls: Array<{
     title: string;
     metric: string;
     threshold: string;
     whyItMatters: string;
+    currentValue: string;
+    status: string;
+    operatorActions: string[];
   }>;
+  operatorSequence: string[];
   implementationAnchors: MobileImplementationAnchor[];
 }
 

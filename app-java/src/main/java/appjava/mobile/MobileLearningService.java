@@ -11,6 +11,7 @@ import appjava.clients.OmsClient.OmsStats;
 import appjava.market.MarketDataService;
 import appjava.market.PricePoint;
 import appjava.market.StockInfo;
+import appjava.ops.ProductionEngineeringService;
 import appjava.order.OrderView;
 
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ public final class MobileLearningService {
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
         OmsClient omsClient,
+        ProductionEngineeringService productionEngineeringService,
         MobileProgressStore progressStore
     ) {
         this.accountId = accountId;
@@ -46,7 +48,13 @@ public final class MobileLearningService {
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
         this.progressStore = progressStore;
-        this.roadmapService = new MobileRoadmapService(accountId, marketDataService, backOfficeClient, omsClient);
+        this.roadmapService = new MobileRoadmapService(
+            accountId,
+            marketDataService,
+            backOfficeClient,
+            omsClient,
+            productionEngineeringService
+        );
         this.cards = buildCards();
         this.cardIndex = new LinkedHashMap<>();
         this.cards.forEach(card -> cardIndex.put(card.id(), card));

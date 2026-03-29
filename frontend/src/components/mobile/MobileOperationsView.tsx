@@ -30,11 +30,23 @@ export function MobileOperationsView() {
       <section className="rounded-[24px] border border-white/10 bg-white/5 p-4">
         <div className="text-sm font-semibold text-white">現在の live state</div>
         <div className="mt-4 grid grid-cols-2 gap-3">
+          <Metric label="Gateway" value={data.liveState.gatewayState} />
           <Metric label="OMS" value={data.liveState.omsState} />
           <Metric label="BackOffice" value={data.liveState.backOfficeState} />
+          <Metric label="Feed" value={data.liveState.marketDataState} />
+          <Metric label="Schema" value={data.liveState.schemaState} />
+          <Metric label="Capacity" value={data.liveState.capacityState} />
           <Metric label="gap" value={`${data.liveState.sequenceGapCount}`} />
           <Metric label="pending" value={`${data.liveState.pendingOrphanCount}`} />
           <Metric label="DLQ" value={`${data.liveState.deadLetterCount}`} />
+          <Metric label="incident" value={`${data.liveState.activeIncidentCount}`} />
+        </div>
+        <div className="mt-4 space-y-2">
+          {data.liveState.activeIncidents.map((incident) => (
+            <div key={incident} className="rounded-2xl border border-amber-200/20 bg-amber-500/10 px-3 py-3 text-sm leading-6 text-amber-100">
+              {incident}
+            </div>
+          ))}
         </div>
         <div className="mt-4 space-y-2">
           {data.liveState.reconcileNotes.map((note) => (
@@ -53,7 +65,11 @@ export function MobileOperationsView() {
               <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{monitor.state}</div>
             </div>
             <div className="mt-3 text-sm leading-6 text-slate-300">{monitor.whyItMatters}</div>
+            <div className="mt-3 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-sm leading-6 text-cyan-100">
+              current: {monitor.currentValue}
+            </div>
             <List items={monitor.checkpoints} />
+            <SubList title="Operator Actions" items={monitor.operatorActions} />
           </div>
         ))}
       </Section>
@@ -61,7 +77,12 @@ export function MobileOperationsView() {
       <Section title="Incident Drills">
         {data.incidentDrills.map((drill) => (
           <div key={drill.name} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-            <div className="text-base font-semibold text-white">{drill.name}</div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-base font-semibold text-white">{drill.name}</div>
+              <div className={`rounded-full border px-3 py-1 text-[11px] ${drill.active ? 'border-amber-200/30 bg-amber-500/15 text-amber-100' : 'border-white/10 bg-black/20 text-slate-300'}`}>
+                {drill.severity}
+              </div>
+            </div>
             <div className="mt-2 text-sm text-amber-100">Trigger: {drill.trigger}</div>
             <SubList title="最初の問い" items={drill.firstQuestions} />
             <SubList title="Actions" items={drill.actions} />
@@ -75,9 +96,13 @@ export function MobileOperationsView() {
       <Section title="Schema Controls">
         {data.schemaControls.map((item) => (
           <div key={item.title} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">{item.title}</div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-white">{item.title}</div>
+              <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{item.currentState}</div>
+            </div>
             <div className="mt-2 text-sm leading-6 text-slate-300">{item.rule}</div>
             <div className="mt-3 text-xs leading-5 text-rose-200/80">failure mode: {item.failureMode}</div>
+            <SubList title="Operator Checks" items={item.operatorChecks} />
           </div>
         ))}
       </Section>
@@ -85,12 +110,23 @@ export function MobileOperationsView() {
       <Section title="Capacity Controls">
         {data.capacityControls.map((item) => (
           <div key={item.title} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-            <div className="text-sm font-semibold text-white">{item.title}</div>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-white">{item.title}</div>
+              <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{item.status}</div>
+            </div>
             <div className="mt-2 text-xs uppercase tracking-[0.14em] text-slate-500">{item.metric}</div>
             <div className="mt-2 text-sm text-emerald-100">{item.threshold}</div>
+            <div className="mt-3 rounded-2xl border border-emerald-200/20 bg-emerald-500/10 px-3 py-3 text-sm leading-6 text-emerald-100">
+              current: {item.currentValue}
+            </div>
             <div className="mt-3 text-sm leading-6 text-slate-300">{item.whyItMatters}</div>
+            <SubList title="Operator Actions" items={item.operatorActions} />
           </div>
         ))}
+      </Section>
+
+      <Section title="Operator Sequence">
+        <List items={data.operatorSequence} />
       </Section>
 
       <Section title="実装アンカー">

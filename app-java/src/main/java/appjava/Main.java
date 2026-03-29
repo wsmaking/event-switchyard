@@ -9,6 +9,7 @@ import appjava.http.AppHttpServer;
 import appjava.market.MarketDataService;
 import appjava.mobile.MobileLearningService;
 import appjava.mobile.MobileProgressStore;
+import appjava.ops.ProductionEngineeringService;
 import appjava.order.ExecutionBenchmarkStore;
 import appjava.order.OrderService;
 
@@ -35,6 +36,13 @@ public final class Main {
         OmsClient omsClient = new OmsClient();
         ExecutionBenchmarkStore executionBenchmarkStore = new ExecutionBenchmarkStore();
         OrderService orderService = new OrderService(accountId, gatewayClient, omsClient, marketDataService, executionBenchmarkStore);
+        ProductionEngineeringService productionEngineeringService = new ProductionEngineeringService(
+            accountId,
+            gatewayClient,
+            marketDataService,
+            omsClient,
+            backOfficeClient
+        );
         ReplayScenarioService replayScenarioService = new ReplayScenarioService(
             accountId,
             marketDataService,
@@ -48,6 +56,7 @@ public final class Main {
             marketDataService,
             backOfficeClient,
             omsClient,
+            productionEngineeringService,
             mobileProgressStore
         );
 
@@ -62,6 +71,7 @@ public final class Main {
             executionBenchmarkStore,
             replayScenarioService,
             mobileLearningService,
+            productionEngineeringService,
             frontendDistDir
         );
         server.start();

@@ -13,6 +13,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 public final class MarketDataService {
+    private static final long FRESHNESS_BUDGET_MS = 3_000L;
     private final Map<String, SymbolSpec> specs = Map.of(
         "7203", new SymbolSpec("トヨタ自動車", 2500.0, 1.0, 4.0, 10.0),
         "6758", new SymbolSpec("ソニーグループ", 13500.0, 5.0, 5.0, 12.0),
@@ -116,6 +117,58 @@ public final class MarketDataService {
         );
     }
 
+    public synchronized MarketFeedRuntimeSnapshot getRuntimeSnapshot() {
+        long generatedAt = Instant.now().toEpochMilli();
+        List<MarketFeedSymbolRuntime> symbols = specs.keySet().stream()
+            .sorted()
+            .map(symbol -> {
+                StockInfo stockInfo = latest.get(symbol);
+                if (stockInfo == null) {
+                    return null;
+                }
+                ArrayDeque<PricePoint> points = history.get(symbol);
+                PricePoint lastPoint = points == null ? null : points.peekLast();
+                long lastTickAt = lastPoint == null ? generatedAt : lastPoint.timestamp();
+                long tickAgeMs = Math.max(0L, generatedAt - lastTickAt);
+                MarketStructureSnapshot structure = getMarketStructure(symbol);
+                return new MarketFeedSymbolRuntime(
+                    symbol,
+                    stockInfo.name(),
+                    lastTickAt,
+                    tickAgeMs,
+                    structure.venueState(),
+                    structure.midPrice(),
+                    structure.spreadBps()
+                );
+            })
+            .filter(java.util.Objects::nonNull)
+            .toList();
+        long maxTickAgeMs = symbols.stream()
+            .mapToLong(MarketFeedSymbolRuntime::tickAgeMs)
+            .max()
+            .orElse(0L);
+        int staleSymbolCount = (int) symbols.stream()
+            .filter(symbol -> symbol.tickAgeMs() > FRESHNESS_BUDGET_MS)
+            .count();
+        int venueAlertCount = (int) symbols.stream()
+            .filter(symbol -> !"CONTINUOUS".equalsIgnoreCase(symbol.venueState()))
+            .count();
+        String state = staleSymbolCount > 0
+            ? "STALE"
+            : venueAlertCount > 0
+            ? "DEGRADED"
+            : "FRESH";
+        return new MarketFeedRuntimeSnapshot(
+            generatedAt,
+            state,
+            FRESHNESS_BUDGET_MS,
+            maxTickAgeMs,
+            staleSymbolCount,
+            venueAlertCount,
+            symbols
+        );
+    }
+
     private void tickAll() {
         specs.forEach((symbol, spec) -> latest.compute(symbol, (key, previous) -> next(symbol, spec, previous)));
     }
@@ -182,5 +235,27 @@ public final class MarketDataService {
     }
 
     private record SymbolSpec(String name, double basePrice, double tickSize, double volatilityBps, double maxMovePercent) {
+    }
+
+    public record MarketFeedRuntimeSnapshot(
+        long generatedAt,
+        String state,
+        long freshnessBudgetMs,
+        long maxTickAgeMs,
+        int staleSymbolCount,
+        int venueAlertCount,
+        List<MarketFeedSymbolRuntime> symbols
+    ) {
+    }
+
+    public record MarketFeedSymbolRuntime(
+        String symbol,
+        String symbolName,
+        long lastTickAt,
+        long tickAgeMs,
+        String venueState,
+        double midPrice,
+        double spreadBps
+    ) {
     }
 }

@@ -4,20 +4,27 @@ import appjava.clients.BackOfficeClient;
 import appjava.clients.OmsClient;
 import appjava.ops.AuditReplayOverview;
 import appjava.ops.OpsOverview;
+import appjava.ops.ProductionEngineeringService;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.Map;
 
 public final class OpsApiHandler extends JsonHttpHandler {
-    public OpsApiHandler(String accountId, OmsClient omsClient, BackOfficeClient backOfficeClient) {
-        super(exchange -> route(exchange, accountId, omsClient, backOfficeClient));
+    public OpsApiHandler(
+        String accountId,
+        OmsClient omsClient,
+        BackOfficeClient backOfficeClient,
+        ProductionEngineeringService productionEngineeringService
+    ) {
+        super(exchange -> route(exchange, accountId, omsClient, backOfficeClient, productionEngineeringService));
     }
 
     private static JsonResponse route(
         HttpExchange exchange,
         String accountId,
         OmsClient omsClient,
-        BackOfficeClient backOfficeClient
+        BackOfficeClient backOfficeClient,
+        ProductionEngineeringService productionEngineeringService
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/overview".equals(path)) {
@@ -39,6 +46,9 @@ public final class OpsApiHandler extends JsonHttpHandler {
                 backOfficeClient.fetchOrphans(orderId, 20),
                 backOfficeClient.fetchPendingOrphans(orderId, 20)
             ));
+        }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/production-engineering".equals(path)) {
+            return JsonResponse.ok(productionEngineeringService.buildSnapshot());
         }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/ops/audit/replay".equals(path)) {
             ReplayRequest request = exchange.getRequestBody().available() > 0
