@@ -9,6 +9,20 @@ import backofficejava.audit.AggregateSequenceStore;
 import backofficejava.audit.AuditOffsetStore;
 import backofficejava.audit.DeadLetterStore;
 import backofficejava.audit.PendingOrphanStore;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ParentExecutionStateReadModel;
+import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 
 public record BackOfficeRuntime(
     AccountOverviewReadModel accountOverviewReadModel,
@@ -16,6 +30,20 @@ public record BackOfficeRuntime(
     FillReadModel fillReadModel,
     OrderProjectionStateStore orderProjectionStateStore,
     LedgerReadModel ledgerReadModel,
+    ExecutionPackageReadModel executionPackageReadModel,
+    PostTradePackageReadModel postTradePackageReadModel,
+    ParentExecutionStateReadModel parentExecutionStateReadModel,
+    AllocationStateReadModel allocationStateReadModel,
+    SettlementProjectionReadModel settlementProjectionReadModel,
+    StatementProjectionReadModel statementProjectionReadModel,
+    RiskSnapshotReadModel riskSnapshotReadModel,
+    SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+    CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+    MarginProjectionReadModel marginProjectionReadModel,
+    ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+    BacktestHistoryReadModel backtestHistoryReadModel,
+    AccountHierarchyReadModel accountHierarchyReadModel,
+    OperatorControlStateReadModel operatorControlStateReadModel,
     AuditOffsetStore auditOffsetStore,
     DeadLetterStore deadLetterStore,
     PendingOrphanStore pendingOrphanStore,

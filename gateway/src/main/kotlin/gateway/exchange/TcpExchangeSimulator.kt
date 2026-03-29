@@ -6,9 +6,13 @@ import gateway.order.OrderSide
 import gateway.order.OrderStatus
 import gateway.order.OrderType
 import gateway.order.TimeInForce
+import com.sun.net.httpserver.HttpExchange
+import com.sun.net.httpserver.HttpServer
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -24,6 +28,8 @@ import kotlin.concurrent.thread
 class TcpExchangeSimulator(
     private val bindHost: String = System.getenv("EXCHANGE_TCP_BIND") ?: "0.0.0.0",
     private val port: Int = (System.getenv("EXCHANGE_TCP_PORT") ?: "9901").toInt(),
+    private val adminBindHost: String = System.getenv("EXCHANGE_SIM_ADMIN_BIND") ?: "127.0.0.1",
+    private val adminPort: Int = (System.getenv("EXCHANGE_SIM_ADMIN_PORT") ?: "9902").toInt(),
     private val exchange: ExchangeClient = ExchangeSimulator()
 ) : AutoCloseable {
     private val mapper = Json.mapper
@@ -31,9 +37,11 @@ class TcpExchangeSimulator(
     private val serverSocket = ServerSocket()
     private val clientPool: ExecutorService =
         Executors.newCachedThreadPool { r -> Thread(r, "tcp-exchange-client").apply { isDaemon = false } }
+    private var adminServer: HttpServer? = null
 
     fun start() {
         serverSocket.bind(InetSocketAddress(bindHost, port))
+        startAdminServer()
         thread(name = "tcp-exchange-accept", isDaemon = false, start = true) {
             while (running.get()) {
                 val socket = try {
@@ -55,6 +63,7 @@ class TcpExchangeSimulator(
         }
         exchange.close()
         clientPool.shutdownNow()
+        adminServer?.stop(0)
     }
 
     private fun handle(socket: Socket) {
@@ -131,5 +140,56 @@ class TcpExchangeSimulator(
                 at = Instant.now()
             )
         )
+    }
+
+    private fun startAdminServer() {
+        val managedExchange = exchange as? ExchangeSimulator ?: return
+        if (adminPort <= 0) return
+        val server = HttpServer.create(InetSocketAddress(adminBindHost, adminPort), 0)
+        server.createContext("/health") { exchange ->
+            writeJson(exchange, 200, mapOf("status" to "UP", "service" to "tcp-exchange-sim"))
+        }
+        server.createContext("/admin/status") { exchange ->
+            if (exchange.requestMethod.equals("GET", ignoreCase = true)) {
+                writeJson(exchange, 200, managedExchange.snapshot())
+            } else {
+                writeJson(exchange, 405, mapOf("error" to "method_not_allowed"))
+            }
+        }
+        server.createContext("/admin/control") { exchange ->
+            if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+                writeJson(exchange, 405, mapOf("error" to "method_not_allowed"))
+                return@createContext
+            }
+            val request = readJson(exchange.requestBody, ExchangeSimulatorControlRequest::class.java)
+                ?: ExchangeSimulatorControlRequest()
+            writeJson(exchange, 200, managedExchange.applyControl(request))
+        }
+        server.createContext("/admin/reset") { exchange ->
+            if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+                writeJson(exchange, 405, mapOf("error" to "method_not_allowed"))
+                return@createContext
+            }
+            writeJson(exchange, 200, managedExchange.resetControl())
+        }
+        server.executor = clientPool
+        server.start()
+        adminServer = server
+        println("TCP Exchange Simulator admin listening on $adminBindHost:$adminPort")
+    }
+
+    private fun writeJson(exchange: HttpExchange, statusCode: Int, body: Any) {
+        val payload = mapper.writeValueAsBytes(body)
+        exchange.responseHeaders.add("Content-Type", "application/json")
+        exchange.sendResponseHeaders(statusCode, payload.size.toLong())
+        exchange.responseBody.use { output ->
+            output.write(payload)
+            output.flush()
+        }
+        exchange.close()
+    }
+
+    private fun <T> readJson(input: InputStream, type: Class<T>): T? {
+        return runCatching { mapper.readValue(input, type) }.getOrNull()
     }
 }

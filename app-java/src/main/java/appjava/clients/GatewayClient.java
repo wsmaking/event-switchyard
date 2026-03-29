@@ -91,6 +91,26 @@ public final class GatewayClient {
         }
     }
 
+    public Optional<GatewayHealth> fetchHealth() {
+        try {
+            HttpRequest httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/health"))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(objectMapper.readValue(response.body(), GatewayHealth.class));
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
     private GatewayOrderResponse parseGatewayResponse(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
@@ -173,5 +193,13 @@ public final class GatewayClient {
     }
 
     public record GatewaySubmitResult(boolean accepted, String orderId, String reason, int httpStatus) {
+    }
+
+    public record GatewayHealth(
+        String status,
+        long queueLen,
+        long latencyP50Ns,
+        long latencyP99Ns
+    ) {
     }
 }

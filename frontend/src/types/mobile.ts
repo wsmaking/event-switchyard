@@ -236,7 +236,19 @@ export interface MobileRiskEvaluateRequest {
 }
 
 export interface MobileRouteState {
-  section: 'home' | 'orders' | 'market' | 'ledger' | 'architecture' | 'cards' | 'drills' | 'risk';
+  section:
+    | 'home'
+    | 'orders'
+    | 'market'
+    | 'institutional'
+    | 'posttrade'
+    | 'ledger'
+    | 'architecture'
+    | 'assets'
+    | 'operations'
+    | 'cards'
+    | 'drills'
+    | 'risk';
   orderId: string | null;
   symbol: string | null;
   cardId: string | null;
@@ -256,6 +268,445 @@ export interface MobileOptionEvaluateRequest {
   ratePercent?: number | null;
   maturityDays?: number | null;
   contracts?: number | null;
+}
+
+export interface MobileInstitutionalFlow {
+  generatedAt: number;
+  anchorOrderId: string | null;
+  symbol: string;
+  symbolName: string;
+  clientIntent: string;
+  executionStyles: Array<{
+    name: string;
+    useCase: string;
+    businessRule: string;
+    systemImplication: string;
+    tradeoffs: string[];
+  }>;
+  parentOrderPlan: {
+    side: string;
+    totalQuantity: number;
+    arrivalMidPrice: number;
+    targetParticipationPercent: number;
+    scheduleWindowMinutes: number;
+    chosenStyle: string;
+    whyNotOtherChoices: string[];
+  };
+  childOrders: Array<{
+    id: string;
+    venueIntent: string;
+    plannedQuantity: number;
+    benchmarkPrice: number;
+    expectedFillPrice: number;
+    expectedSlippageBps: number;
+    timeBucketLabel: string;
+    learningPoint: string;
+  }>;
+  allocationPlan: {
+    blockBook: string;
+    averagePrice: number;
+    totalQuantity: number;
+    allocations: Array<{
+      targetBook: string;
+      quantity: number;
+      ratioPercent: number;
+      note: string;
+    }>;
+    settlementNote: string;
+    controlChecks: string[];
+  };
+  parentExecutionState: {
+    parentStatus: string;
+    executionStyle: string;
+    targetQuantity: number;
+    executedQuantity: number;
+    remainingQuantity: number;
+    participationTargetPercent: number;
+    participationActualPercent: number;
+    scheduleWindowLabel: string;
+    childStates: Array<{
+      childId: string;
+      state: string;
+      venueIntent: string;
+      plannedQuantity: number;
+      executedQuantity: number;
+      remainingQuantity: number;
+      benchmarkPrice: number;
+      averageFillPrice: number;
+      slippageBps: number;
+      nextAction: string;
+    }>;
+    operatorAlerts: string[];
+  } | null;
+  allocationState: {
+    allocationStatus: string;
+    allocatedQuantity: number;
+    pendingQuantity: number;
+    allocationAveragePrice: number;
+    books: Array<{
+      book: string;
+      targetQuantity: number;
+      allocatedQuantity: number;
+      status: string;
+      rationale: string;
+    }>;
+    controls: string[];
+  } | null;
+  accountHierarchy: {
+    clientName: string;
+    legalEntity: string;
+    region: string;
+    desk: string;
+    strategy: string;
+    clearingBroker: string;
+    custodian: string;
+    books: Array<{
+      fund: string;
+      book: string;
+      subAccount: string;
+      trader: string;
+      settlementLocation: string;
+      mandate: string;
+    }>;
+    permissions: Array<{
+      role: string;
+      scope: string;
+      actions: string[];
+      approvalRequired: boolean;
+      note: string;
+    }>;
+    reportingLines: string[];
+    controlChecks: string[];
+  } | null;
+  operatorControlState: {
+    workflowState: string;
+    escalationLevel: string;
+    requiredApprovals: Array<{
+      name: string;
+      role: string;
+      state: string;
+      reason: string;
+      nextAction: string;
+    }>;
+    acknowledgements: Array<{
+      actor: string;
+      action: string;
+      atLabel: string;
+      note: string;
+    }>;
+    permittedActions: string[];
+    blockedActions: string[];
+    auditTrail: string[];
+  } | null;
+  operatorChecks: string[];
+  implementationAnchors: MobileImplementationAnchor[];
+}
+
+export interface MobilePostTradeGuide {
+  generatedAt: number;
+  orderId: string | null;
+  symbol: string | null;
+  orderStatus: string;
+  stages: Array<{
+    name: string;
+    owner: string;
+    purpose: string;
+    currentView: string;
+    whyItMatters: string;
+  }>;
+  feeBreakdown: {
+    grossNotional: number;
+    commission: number;
+    exchangeFee: number;
+    taxes: number;
+    netCashMovement: number;
+    assumptions: string[];
+  };
+  statementPreview: {
+    accountId: string;
+    symbol: string;
+    symbolName: string;
+    settledQuantity: number;
+    averagePrice: number;
+    settlementDateLabel: string;
+    netCashMovementLabel: string;
+    notes: string[];
+  };
+  settlementChecks: Array<{
+    title: string;
+    rule: string;
+    currentValue: string;
+  }>;
+  corporateActionHooks: Array<{
+    name: string;
+    businessImpact: string;
+    systemImpact: string;
+  }>;
+  settlementProjection: {
+    settlementStatus: string;
+    tradeDateLabel: string;
+    settlementDateLabel: string;
+    grossNotional: number;
+    netCashMovement: number;
+    settledQuantity: number;
+    cashLegStatus: string;
+    securitiesLegStatus: string;
+    exceptionFlags: string[];
+    nextAction: string;
+  } | null;
+  statementProjection: {
+    statementStatus: string;
+    confirmReference: string;
+    statementReference: string;
+    customerFacingSummary: string;
+    lines: Array<{
+      label: string;
+      value: string;
+      note: string;
+    }>;
+    controls: string[];
+  } | null;
+  settlementExceptionWorkflow: {
+    workflowStatus: string;
+    exceptionType: string;
+    blockedStage: string;
+    ageingLabel: string;
+    rootCause: string;
+    exceptionOwner: string;
+    resolutionEtaLabel: string;
+    cashBreakAmount: number;
+    securitiesBreakQuantity: number;
+    cancelCorrectRequired: boolean;
+    failAgingBucket: string;
+    nextAction: string;
+    breakDetails: string[];
+    controls: string[];
+    operatorNotes: string[];
+  } | null;
+  corporateActionWorkflow: {
+    eventName: string;
+    workflowStatus: string;
+    recordDateLabel: string;
+    effectiveDateLabel: string;
+    customerImpact: string;
+    ledgerImpact: string;
+    booksRecordImpact: string;
+    ledgerContinuityCheck: string;
+    nextAction: string;
+    controls: string[];
+  } | null;
+  accountHierarchy: MobileInstitutionalFlow['accountHierarchy'];
+  operatorControlState: MobileInstitutionalFlow['operatorControlState'];
+  implementationAnchors: MobileImplementationAnchor[];
+}
+
+export interface MobileRiskDeepDive {
+  generatedAt: number;
+  accountId: string;
+  marketValue: number;
+  cashBalance: number;
+  concentration: Array<{
+    symbol: string;
+    symbolName: string;
+    exposure: number;
+    weightPercent: number;
+    note: string;
+  }>;
+  factorExposures: Array<{
+    factor: string;
+    exposure: number;
+    limit: number;
+    utilizationPercent: number;
+    note: string;
+  }>;
+  liquidity: Array<{
+    symbol: string;
+    symbolName: string;
+    positionQuantity: number;
+    visibleTopOfBookQuantity: number;
+    participationPercent: number;
+    estimatedDaysToExit: number;
+    note: string;
+  }>;
+  liquidityBuckets: Array<{
+    bucket: string;
+    grossExposure: number;
+    stressedExitDays: number;
+    action: string;
+  }>;
+  scenarioLibrary: Array<{
+    id: string;
+    title: string;
+    category: string;
+    shock: string;
+    rationale: string;
+    focus: string;
+  }>;
+  backtesting: {
+    observationCount: number;
+    breachRatePercent: number;
+    averageTailLoss: number;
+    note: string;
+    samples: Array<{
+      label: string;
+      pnl: number;
+      breached: boolean;
+    }>;
+  };
+  marginProjection: {
+    methodology: string;
+    marginLimit: number;
+    marginUsed: number;
+    utilizationPercent: number;
+    breachStatus: string;
+    breachedLimits: string[];
+    requiredActions: string[];
+    modelNotes: string[];
+    marginChangeDrivers: string[];
+    nextReviewWindowLabel: string;
+  } | null;
+  scenarioEvaluationHistory: {
+    lastEvaluatedAtLabel: string;
+    governanceState: string;
+    modelVersion: string;
+    approvals: string[];
+    evaluations: Array<{
+      title: string;
+      shock: string;
+      pnlDelta: number;
+      note: string;
+    }>;
+  } | null;
+  backtestHistory: {
+    windowLabel: string;
+    coverageLabel: string;
+    breachRatePercent: number;
+    exceptions: string[];
+    history: Array<{
+      label: string;
+      pnl: number;
+      breached: boolean;
+      note: string;
+    }>;
+  } | null;
+  modelBoundaries: Array<{
+    title: string;
+    whyItMatters: string;
+    whatIncluded: string;
+    whatExcluded: string;
+  }>;
+  governanceChecks: Array<{
+    title: string;
+    state: string;
+    owner: string;
+    note: string;
+  }>;
+  limitBreaches: Array<{
+    limitName: string;
+    severity: string;
+    state: string;
+    nextAction: string;
+  }>;
+  implementationAnchors: MobileImplementationAnchor[];
+}
+
+export interface MobileAssetClassGuide {
+  generatedAt: number;
+  assetClasses: Array<{
+    assetClass: string;
+    tradeInitiation: string;
+    lifecycle: string;
+    valuationDriver: string;
+    settlementModel: string;
+    riskDriver: string;
+    operatorWatchpoints: string[];
+    whatStaysCommon: string[];
+    whatMustSpecialize: string[];
+    sampleMetrics: Array<{
+      label: string;
+      value: string;
+      note: string;
+    }>;
+    lifecycleBreakpoints: string[];
+    booksAndRecordsImplications: string[];
+    failureModes: string[];
+  }>;
+  boundaryPrinciples: string[];
+  implementationAnchors: MobileImplementationAnchor[];
+}
+
+export interface MobileOperationsGuide {
+  generatedAt: number;
+  liveState: {
+    gatewayState: string;
+    omsState: string;
+    backOfficeState: string;
+    marketDataState: string;
+    schemaState: string;
+    capacityState: string;
+    sequenceGapCount: number;
+    pendingOrphanCount: number;
+    deadLetterCount: number;
+    activeIncidentCount: number;
+    activeIncidents: string[];
+    reconcileNotes: string[];
+  };
+  sessionMonitors: Array<{
+    name: string;
+    state: string;
+    whyItMatters: string;
+    currentValue: string;
+    checkpoints: string[];
+    operatorActions: string[];
+  }>;
+  incidentDrills: Array<{
+    name: string;
+    trigger: string;
+    firstQuestions: string[];
+    actions: string[];
+    severity: string;
+    active: boolean;
+    recoverySignal: string;
+  }>;
+  schemaControls: Array<{
+    title: string;
+    rule: string;
+    failureMode: string;
+    currentState: string;
+    operatorChecks: string[];
+  }>;
+  capacityControls: Array<{
+    title: string;
+    metric: string;
+    threshold: string;
+    whyItMatters: string;
+    currentValue: string;
+    status: string;
+    operatorActions: string[];
+  }>;
+  venueSessions: Array<{
+    name: string;
+    state: string;
+    dropCopyState: string;
+    heartbeatAgeMs: number;
+    currentValue: string;
+    notes: string[];
+  }>;
+  goNoGo: {
+    state: string;
+    blockedReasons: string[];
+    requiredDrills: string[];
+  };
+  rolloutState: {
+    state: string;
+    contractVersion: string;
+    replayReadiness: string;
+    consumerCompatibility: string;
+    checks: string[];
+  };
+  operatorSequence: string[];
+  guidedSteps: string[];
+  implementationAnchors: MobileImplementationAnchor[];
 }
 
 export interface MobileOptionEvaluation {

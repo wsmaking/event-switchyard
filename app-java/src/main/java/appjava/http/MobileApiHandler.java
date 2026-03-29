@@ -19,6 +19,21 @@ public final class MobileApiHandler extends JsonHttpHandler {
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/drills".equals(path)) {
             return JsonResponse.ok(mobileLearningService.listDrills());
         }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/institutional-flow".equals(path)) {
+            return JsonResponse.ok(mobileLearningService.buildInstitutionalFlow());
+        }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/post-trade".equals(path)) {
+            return JsonResponse.ok(mobileLearningService.buildPostTradeGuide());
+        }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/risk/deep-dive".equals(path)) {
+            return JsonResponse.ok(mobileLearningService.buildRiskDeepDive());
+        }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/asset-classes".equals(path)) {
+            return JsonResponse.ok(mobileLearningService.buildAssetClassGuide());
+        }
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/operations".equals(path)) {
+            return JsonResponse.ok(mobileLearningService.buildOperationsEngineering());
+        }
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/mobile/progress".equals(path)) {
             return JsonResponse.ok(mobileLearningService.getProgress());
         }

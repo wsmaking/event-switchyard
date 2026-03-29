@@ -7,6 +7,21 @@ import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.audit.GatewayAuditIntakeService;
 import backofficejava.bus.BusEventIntakeService;
+import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ParentExecutionStateReadModel;
+import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.BusinessProjectionUpdater;
+import backofficejava.business.OperatorControlStateReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -24,6 +39,40 @@ public final class Main {
         FillReadModel fillReadModel = runtime.fillReadModel();
         OrderProjectionStateStore orderProjectionStateStore = runtime.orderProjectionStateStore();
         LedgerReadModel ledgerReadModel = runtime.ledgerReadModel();
+        ExecutionPackageReadModel executionPackageReadModel = runtime.executionPackageReadModel();
+        PostTradePackageReadModel postTradePackageReadModel = runtime.postTradePackageReadModel();
+        ParentExecutionStateReadModel parentExecutionStateReadModel = runtime.parentExecutionStateReadModel();
+        AllocationStateReadModel allocationStateReadModel = runtime.allocationStateReadModel();
+        SettlementProjectionReadModel settlementProjectionReadModel = runtime.settlementProjectionReadModel();
+        StatementProjectionReadModel statementProjectionReadModel = runtime.statementProjectionReadModel();
+        RiskSnapshotReadModel riskSnapshotReadModel = runtime.riskSnapshotReadModel();
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel = runtime.settlementExceptionWorkflowReadModel();
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel = runtime.corporateActionWorkflowReadModel();
+        MarginProjectionReadModel marginProjectionReadModel = runtime.marginProjectionReadModel();
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel = runtime.scenarioEvaluationHistoryReadModel();
+        BacktestHistoryReadModel backtestHistoryReadModel = runtime.backtestHistoryReadModel();
+        AccountHierarchyReadModel accountHierarchyReadModel = runtime.accountHierarchyReadModel();
+        OperatorControlStateReadModel operatorControlStateReadModel = runtime.operatorControlStateReadModel();
+        BusinessProjectionUpdater businessProjectionUpdater = new BusinessProjectionUpdater(
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderProjectionStateStore,
+            executionPackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel,
+            postTradePackageReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel
+        );
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -33,7 +82,8 @@ public final class Main {
             runtime.auditOffsetStore(),
             runtime.deadLetterStore(),
             runtime.pendingOrphanStore(),
-            runtime.aggregateSequenceStore()
+            runtime.aggregateSequenceStore(),
+            businessProjectionUpdater
         );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(intakeService);
         BackOfficeHttpServer server = new BackOfficeHttpServer(
@@ -43,6 +93,20 @@ public final class Main {
             fillReadModel,
             orderProjectionStateStore,
             ledgerReadModel,
+            executionPackageReadModel,
+            postTradePackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel,
             intakeService,
             busEventIntakeService
         );

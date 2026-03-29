@@ -13,6 +13,7 @@ APP_PORT="${APP_PORT:-8080}"
 OMS_PORT="${OMS_PORT:-18081}"
 BACKOFFICE_PORT="${BACKOFFICE_PORT:-18082}"
 EXCHANGE_TCP_PORT="${EXCHANGE_TCP_PORT:-9901}"
+EXCHANGE_SIM_ADMIN_PORT="${EXCHANGE_SIM_ADMIN_PORT:-9902}"
 ACCOUNT_ID="${ACCOUNT_ID:-acct_demo}"
 JWT_HS256_SECRET="${JWT_HS256_SECRET:-secret123}"
 
@@ -127,6 +128,7 @@ start_gradle_service \
   "tcp-exchange-sim-debug" \
   ":gateway:runDebug" \
   EXCHANGE_TCP_PORT="${EXCHANGE_TCP_PORT}" \
+  EXCHANGE_SIM_ADMIN_PORT="${EXCHANGE_SIM_ADMIN_PORT}" \
   EXCHANGE_SIM_PARTIAL_STEPS=3 \
   EXCHANGE_SIM_DELAY_MS=150 \
   GATEWAY_SIM_DEBUG_PORT="${GATEWAY_SIM_DEBUG_PORT}" \
@@ -168,6 +170,7 @@ start_gradle_service \
   APP_DEBUG_SUSPEND=n \
   JWT_HS256_SECRET="${JWT_HS256_SECRET}" \
   GATEWAY_BASE_URL="http://localhost:${GATEWAY_PORT}" \
+  EXCHANGE_SIM_ADMIN_URL="http://localhost:${EXCHANGE_SIM_ADMIN_PORT}" \
   OMS_JAVA_BASE_URL="http://localhost:${OMS_PORT}" \
   BACKOFFICE_JAVA_BASE_URL="http://localhost:${BACKOFFICE_PORT}"
 
@@ -199,6 +202,7 @@ cat <<EOF
   oms-java       : http://localhost:${OMS_PORT}
   backoffice-java: http://localhost:${BACKOFFICE_PORT}
   exchange-sim   : tcp://127.0.0.1:${EXCHANGE_TCP_PORT}
+  sim-admin      : http://127.0.0.1:${EXCHANGE_SIM_ADMIN_PORT}
   state dir      : ${STATE_DIR}
   logs dir       : ${RUN_DIR}
 

@@ -23,6 +23,35 @@ import backofficejava.audit.JdbcAuditOffsetStore;
 import backofficejava.audit.JdbcDeadLetterStore;
 import backofficejava.audit.JdbcPendingOrphanStore;
 import backofficejava.audit.PendingOrphanStore;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.InMemoryExecutionPackageReadModel;
+import backofficejava.business.InMemoryAllocationStateReadModel;
+import backofficejava.business.InMemoryParentExecutionStateReadModel;
+import backofficejava.business.InMemoryPostTradePackageReadModel;
+import backofficejava.business.InMemorySettlementProjectionReadModel;
+import backofficejava.business.InMemoryStatementProjectionReadModel;
+import backofficejava.business.InMemoryRiskSnapshotReadModel;
+import backofficejava.business.InMemorySettlementExceptionWorkflowReadModel;
+import backofficejava.business.InMemoryCorporateActionWorkflowReadModel;
+import backofficejava.business.InMemoryMarginProjectionReadModel;
+import backofficejava.business.InMemoryScenarioEvaluationHistoryReadModel;
+import backofficejava.business.InMemoryBacktestHistoryReadModel;
+import backofficejava.business.InMemoryAccountHierarchyReadModel;
+import backofficejava.business.InMemoryOperatorControlStateReadModel;
+import backofficejava.business.JdbcBusinessPackageStore;
+import backofficejava.business.ParentExecutionStateReadModel;
+import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,9 +68,16 @@ public final class BackOfficeStoreFactory {
                 connectionFactory,
                 "db/migration/V1__backoffice_schema.sql",
                 "db/migration/V2__backoffice_orphan_state.sql",
-                "db/migration/V3__backoffice_aggregate_progress.sql"
+                "db/migration/V3__backoffice_aggregate_progress.sql",
+                "db/migration/V4__backoffice_business_packages.sql",
+                "db/migration/V5__backoffice_institutional_states.sql",
+                "db/migration/V6__backoffice_post_trade_projections.sql",
+                "db/migration/V7__backoffice_risk_snapshots.sql",
+                "db/migration/V8__backoffice_business_workflows.sql",
+                "db/migration/V9__backoffice_control_plane.sql"
             );
             JdbcBackOfficeStore store = new JdbcBackOfficeStore(connectionFactory, accountId);
+            JdbcBusinessPackageStore businessPackageStore = new JdbcBusinessPackageStore(connectionFactory);
             AuditOffsetStore offsetStore = new JdbcAuditOffsetStore(connectionFactory, "gateway-audit");
             DeadLetterStore deadLetterStore = new JdbcDeadLetterStore(connectionFactory);
             PendingOrphanStore pendingOrphanStore = new JdbcPendingOrphanStore(connectionFactory);
@@ -52,6 +88,20 @@ public final class BackOfficeStoreFactory {
                 store.fillReadModel(),
                 store.orderProjectionStateStore(),
                 store.ledgerReadModel(),
+                businessPackageStore.executionPackageReadModel(),
+                businessPackageStore.postTradePackageReadModel(),
+                businessPackageStore.parentExecutionStateReadModel(),
+                businessPackageStore.allocationStateReadModel(),
+                businessPackageStore.settlementProjectionReadModel(),
+                businessPackageStore.statementProjectionReadModel(),
+                businessPackageStore.riskSnapshotReadModel(),
+                businessPackageStore.settlementExceptionWorkflowReadModel(),
+                businessPackageStore.corporateActionWorkflowReadModel(),
+                businessPackageStore.marginProjectionReadModel(),
+                businessPackageStore.scenarioEvaluationHistoryReadModel(),
+                businessPackageStore.backtestHistoryReadModel(),
+                businessPackageStore.accountHierarchyReadModel(),
+                businessPackageStore.operatorControlStateReadModel(),
                 offsetStore,
                 deadLetterStore,
                 pendingOrphanStore,
@@ -65,6 +115,20 @@ public final class BackOfficeStoreFactory {
         FillReadModel fillReadModel = new InMemoryFillReadModel();
         OrderProjectionStateStore orderProjectionStateStore = new InMemoryOrderProjectionStateStore();
         LedgerReadModel ledgerReadModel = new InMemoryLedgerReadModel();
+        ExecutionPackageReadModel executionPackageReadModel = new InMemoryExecutionPackageReadModel();
+        PostTradePackageReadModel postTradePackageReadModel = new InMemoryPostTradePackageReadModel();
+        ParentExecutionStateReadModel parentExecutionStateReadModel = new InMemoryParentExecutionStateReadModel();
+        AllocationStateReadModel allocationStateReadModel = new InMemoryAllocationStateReadModel();
+        SettlementProjectionReadModel settlementProjectionReadModel = new InMemorySettlementProjectionReadModel();
+        StatementProjectionReadModel statementProjectionReadModel = new InMemoryStatementProjectionReadModel();
+        RiskSnapshotReadModel riskSnapshotReadModel = new InMemoryRiskSnapshotReadModel();
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel = new InMemorySettlementExceptionWorkflowReadModel();
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel = new InMemoryCorporateActionWorkflowReadModel();
+        MarginProjectionReadModel marginProjectionReadModel = new InMemoryMarginProjectionReadModel();
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel = new InMemoryScenarioEvaluationHistoryReadModel();
+        BacktestHistoryReadModel backtestHistoryReadModel = new InMemoryBacktestHistoryReadModel();
+        AccountHierarchyReadModel accountHierarchyReadModel = new InMemoryAccountHierarchyReadModel();
+        OperatorControlStateReadModel operatorControlStateReadModel = new InMemoryOperatorControlStateReadModel();
         Path offsetPath = resolvePath(
             System.getProperty(
                 "backoffice.gateway.audit.offset.path",
@@ -77,6 +141,20 @@ public final class BackOfficeStoreFactory {
             fillReadModel,
             orderProjectionStateStore,
             ledgerReadModel,
+            executionPackageReadModel,
+            postTradePackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel,
             new FileAuditOffsetStore(offsetPath),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),

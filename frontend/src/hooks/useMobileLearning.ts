@@ -7,14 +7,19 @@ import type {
   MobileDrillDetail,
   MobileDrillProgressResponse,
   MobileDrillSummary,
+  MobileInstitutionalFlow,
   MobileHome,
   MobileOptionEvaluateRequest,
   MobileOptionEvaluation,
+  MobileOperationsGuide,
+  MobilePostTradeGuide,
   MobileProgressResponse,
   MobileProgressUpdateRequest,
+  MobileRiskDeepDive,
   MobileRiskEvaluateRequest,
   MobileRiskEvaluation,
   MobileRiskScenario,
+  MobileAssetClassGuide,
 } from '../types/mobile';
 import {
   applyOfflineMobileDrillAttempt,
@@ -29,6 +34,13 @@ import {
   getOfflineMobileProgress,
   getOfflineMobileRiskScenarios,
 } from '../offline/mobileOfflineStore';
+import {
+  getOfflineMobileAssetClassGuide,
+  getOfflineMobileInstitutionalFlow,
+  getOfflineMobileOperationsGuide,
+  getOfflineMobilePostTradeGuide,
+  getOfflineMobileRiskDeepDive,
+} from '../offline/mobileRoadmapOffline';
 
 const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
@@ -92,6 +104,66 @@ export function useMobileDrills() {
   return useQuery({
     queryKey: ['mobileDrills'],
     queryFn: () => fetchJsonWithOfflineFallback<MobileDrillSummary[]>('/api/mobile/drills', () => getOfflineMobileDrills()),
+    refetchInterval: 10000,
+  });
+}
+
+export function useMobileInstitutionalFlow() {
+  return useQuery({
+    queryKey: ['mobileInstitutionalFlow'],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MobileInstitutionalFlow>(
+        '/api/mobile/institutional-flow',
+        () => getOfflineMobileInstitutionalFlow()
+      ),
+    refetchInterval: 15000,
+  });
+}
+
+export function useMobilePostTradeGuide() {
+  return useQuery({
+    queryKey: ['mobilePostTradeGuide'],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MobilePostTradeGuide>(
+        '/api/mobile/post-trade',
+        () => getOfflineMobilePostTradeGuide()
+      ),
+    refetchInterval: 15000,
+  });
+}
+
+export function useMobileRiskDeepDive() {
+  return useQuery({
+    queryKey: ['mobileRiskDeepDive'],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MobileRiskDeepDive>(
+        '/api/mobile/risk/deep-dive',
+        () => getOfflineMobileRiskDeepDive()
+      ),
+    refetchInterval: 15000,
+  });
+}
+
+export function useMobileAssetClassGuide() {
+  return useQuery({
+    queryKey: ['mobileAssetClassGuide'],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MobileAssetClassGuide>(
+        '/api/mobile/asset-classes',
+        () => getOfflineMobileAssetClassGuide()
+      ),
+    refetchInterval: 30000,
+  });
+}
+
+export function useMobileOperationsGuide() {
+  return useQuery({
+    queryKey: ['mobileOperationsGuide'],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MobileOperationsGuide>(
+        '/api/mobile/operations',
+        () => getOfflineMobileOperationsGuide()
+      ),
     refetchInterval: 10000,
   });
 }

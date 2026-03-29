@@ -87,6 +87,272 @@ public final class BackOfficeClient {
         return List.of();
     }
 
+    public ExecutionPackage fetchExecutionPackage(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/execution-package?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ExecutionPackage.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public PostTradePackage fetchPostTradePackage(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/post-trade-package?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), PostTradePackage.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public ParentExecutionState fetchParentExecutionState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/parent-execution-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ParentExecutionState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public AllocationState fetchAllocationState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/allocation-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), AllocationState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public SettlementProjection fetchSettlementProjection(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/settlement-projection?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), SettlementProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public StatementProjection fetchStatementProjection(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/statement-projection?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), StatementProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public RiskSnapshot fetchRiskSnapshot(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/risk-snapshot?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), RiskSnapshot.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public SettlementExceptionWorkflow fetchSettlementExceptionWorkflow(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/settlement-exception-workflow?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), SettlementExceptionWorkflow.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public CorporateActionWorkflow fetchCorporateActionWorkflow(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/corporate-action-workflow?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), CorporateActionWorkflow.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public MarginProjection fetchMarginProjection(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/margin-projection?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), MarginProjection.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public ScenarioEvaluationHistory fetchScenarioEvaluationHistory(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/scenario-evaluation-history?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ScenarioEvaluationHistory.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public BacktestHistory fetchBacktestHistory(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/backtest-history?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), BacktestHistory.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public AccountHierarchy fetchAccountHierarchy(String requestedAccountId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/account-hierarchy?accountId=" + requestedAccountId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), AccountHierarchy.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public OperatorControlState fetchOperatorControlState(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/operator-control-state?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), OperatorControlState.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -113,6 +379,62 @@ public final class BackOfficeClient {
 
     public void replaceLedger(List<LedgerEntry> entries) {
         postJson("/internal/ledger/replace", new ReplaceLedgerRequest(entries));
+    }
+
+    public void upsertExecutionPackage(ExecutionPackage executionPackage) {
+        postJson("/internal/business/execution-package/upsert", executionPackage);
+    }
+
+    public void upsertPostTradePackage(PostTradePackage postTradePackage) {
+        postJson("/internal/business/post-trade-package/upsert", postTradePackage);
+    }
+
+    public void upsertParentExecutionState(ParentExecutionState parentExecutionState) {
+        postJson("/internal/business/parent-execution-state/upsert", parentExecutionState);
+    }
+
+    public void upsertAllocationState(AllocationState allocationState) {
+        postJson("/internal/business/allocation-state/upsert", allocationState);
+    }
+
+    public void upsertSettlementProjection(SettlementProjection settlementProjection) {
+        postJson("/internal/business/settlement-projection/upsert", settlementProjection);
+    }
+
+    public void upsertStatementProjection(StatementProjection statementProjection) {
+        postJson("/internal/business/statement-projection/upsert", statementProjection);
+    }
+
+    public void upsertRiskSnapshot(RiskSnapshot riskSnapshot) {
+        postJson("/internal/business/risk-snapshot/upsert", riskSnapshot);
+    }
+
+    public void upsertSettlementExceptionWorkflow(SettlementExceptionWorkflow workflow) {
+        postJson("/internal/business/settlement-exception-workflow/upsert", workflow);
+    }
+
+    public void upsertCorporateActionWorkflow(CorporateActionWorkflow workflow) {
+        postJson("/internal/business/corporate-action-workflow/upsert", workflow);
+    }
+
+    public void upsertMarginProjection(MarginProjection projection) {
+        postJson("/internal/business/margin-projection/upsert", projection);
+    }
+
+    public void upsertScenarioEvaluationHistory(ScenarioEvaluationHistory history) {
+        postJson("/internal/business/scenario-evaluation-history/upsert", history);
+    }
+
+    public void upsertBacktestHistory(BacktestHistory history) {
+        postJson("/internal/business/backtest-history/upsert", history);
+    }
+
+    public void upsertAccountHierarchy(AccountHierarchy hierarchy) {
+        postJson("/internal/business/account-hierarchy/upsert", hierarchy);
+    }
+
+    public void upsertOperatorControlState(OperatorControlState controlState) {
+        postJson("/internal/business/operator-control-state/upsert", controlState);
     }
 
     public BackOfficeStats fetchStats() {
@@ -345,6 +667,492 @@ public final class BackOfficeClient {
     }
 
     public record ReplaceLedgerRequest(List<LedgerEntry> entries) {
+    }
+
+    public record ExecutionPackage(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String symbolName,
+        String clientIntent,
+        List<ExecutionStyle> executionStyles,
+        ParentOrderPlan parentOrderPlan,
+        List<ChildOrderSlice> childOrders,
+        AllocationPlan allocationPlan,
+        List<String> operatorChecks
+    ) {
+    }
+
+    public record ExecutionStyle(
+        String name,
+        String useCase,
+        String businessRule,
+        String systemImplication,
+        List<String> tradeoffs
+    ) {
+    }
+
+    public record ParentOrderPlan(
+        String side,
+        long totalQuantity,
+        double arrivalMidPrice,
+        double targetParticipationPercent,
+        int scheduleWindowMinutes,
+        String chosenStyle,
+        List<String> whyNotOtherChoices
+    ) {
+    }
+
+    public record ChildOrderSlice(
+        String id,
+        String venueIntent,
+        long plannedQuantity,
+        double benchmarkPrice,
+        double expectedFillPrice,
+        double expectedSlippageBps,
+        String timeBucketLabel,
+        String learningPoint
+    ) {
+    }
+
+    public record AllocationPlan(
+        String blockBook,
+        double averagePrice,
+        long totalQuantity,
+        List<AllocationSlice> allocations,
+        String settlementNote,
+        List<String> controlChecks
+    ) {
+    }
+
+    public record AllocationSlice(
+        String targetBook,
+        long quantity,
+        double ratioPercent,
+        String note
+    ) {
+    }
+
+    public record PostTradePackage(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String symbolName,
+        String orderStatus,
+        List<PostTradeStage> stages,
+        FeeBreakdown feeBreakdown,
+        StatementPreview statementPreview,
+        List<SettlementCheck> settlementChecks,
+        List<CorporateActionHook> corporateActionHooks
+    ) {
+    }
+
+    public record PostTradeStage(
+        String name,
+        String owner,
+        String purpose,
+        String currentView,
+        String whyItMatters
+    ) {
+    }
+
+    public record FeeBreakdown(
+        long grossNotional,
+        long commission,
+        long exchangeFee,
+        long taxes,
+        long netCashMovement,
+        List<String> assumptions
+    ) {
+    }
+
+    public record StatementPreview(
+        String accountId,
+        String symbol,
+        String symbolName,
+        long settledQuantity,
+        double averagePrice,
+        String settlementDateLabel,
+        String netCashMovementLabel,
+        List<String> notes
+    ) {
+    }
+
+    public record SettlementCheck(
+        String title,
+        String rule,
+        String currentValue
+    ) {
+    }
+
+    public record CorporateActionHook(
+        String name,
+        String businessImpact,
+        String systemImpact
+    ) {
+    }
+
+    public record ParentExecutionState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String parentStatus,
+        String executionStyle,
+        long targetQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double participationTargetPercent,
+        double participationActualPercent,
+        String scheduleWindowLabel,
+        List<ChildExecutionState> childStates,
+        List<String> operatorAlerts
+    ) {
+    }
+
+    public record ChildExecutionState(
+        String childId,
+        String state,
+        String venueIntent,
+        long plannedQuantity,
+        long executedQuantity,
+        long remainingQuantity,
+        double benchmarkPrice,
+        double averageFillPrice,
+        double slippageBps,
+        String nextAction
+    ) {
+    }
+
+    public record AllocationState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String allocationStatus,
+        long allocatedQuantity,
+        long pendingQuantity,
+        double allocationAveragePrice,
+        List<BookAllocationState> books,
+        List<String> controls
+    ) {
+    }
+
+    public record BookAllocationState(
+        String book,
+        long targetQuantity,
+        long allocatedQuantity,
+        String status,
+        String rationale
+    ) {
+    }
+
+    public record SettlementProjection(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String settlementStatus,
+        String tradeDateLabel,
+        String settlementDateLabel,
+        long grossNotional,
+        long netCashMovement,
+        long settledQuantity,
+        String cashLegStatus,
+        String securitiesLegStatus,
+        List<String> exceptionFlags,
+        String nextAction
+    ) {
+    }
+
+    public record StatementProjection(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String statementStatus,
+        String confirmReference,
+        String statementReference,
+        String customerFacingSummary,
+        List<StatementLine> lines,
+        List<String> controls
+    ) {
+    }
+
+    public record StatementLine(
+        String label,
+        String value,
+        String note
+    ) {
+    }
+
+    public record RiskSnapshot(
+        long generatedAt,
+        String accountId,
+        double marketValue,
+        double cashBalance,
+        List<RiskConcentrationMetric> concentration,
+        List<RiskFactorExposure> factorExposures,
+        List<RiskLiquidityMetric> liquidity,
+        List<RiskLiquidityBucket> liquidityBuckets,
+        List<RiskScenarioLibraryEntry> scenarioLibrary,
+        RiskBacktestingPreview backtesting,
+        List<RiskModelBoundary> modelBoundaries,
+        List<RiskGovernanceCheck> governanceChecks,
+        List<RiskLimitBreach> limitBreaches,
+        List<String> marginAlerts
+    ) {
+    }
+
+    public record RiskConcentrationMetric(
+        String symbol,
+        String symbolName,
+        double exposure,
+        double weightPercent,
+        String note
+    ) {
+    }
+
+    public record RiskLiquidityMetric(
+        String symbol,
+        String symbolName,
+        long positionQuantity,
+        long visibleTopOfBookQuantity,
+        double participationPercent,
+        double estimatedDaysToExit,
+        String note
+    ) {
+    }
+
+    public record RiskFactorExposure(
+        String factor,
+        double exposure,
+        double limit,
+        double utilizationPercent,
+        String note
+    ) {
+    }
+
+    public record RiskLiquidityBucket(
+        String bucket,
+        double grossExposure,
+        double stressedExitDays,
+        String action
+    ) {
+    }
+
+    public record RiskScenarioLibraryEntry(
+        String id,
+        String title,
+        String category,
+        String shock,
+        String rationale,
+        String focus
+    ) {
+    }
+
+    public record RiskBacktestingPreview(
+        int observationCount,
+        double breachRatePercent,
+        double averageTailLoss,
+        String note,
+        List<RiskBacktestSample> samples
+    ) {
+    }
+
+    public record RiskBacktestSample(
+        String label,
+        double pnl,
+        boolean breached
+    ) {
+    }
+
+    public record RiskModelBoundary(
+        String title,
+        String whyItMatters,
+        String whatIncluded,
+        String whatExcluded
+    ) {
+    }
+
+    public record RiskGovernanceCheck(
+        String title,
+        String state,
+        String owner,
+        String note
+    ) {
+    }
+
+    public record RiskLimitBreach(
+        String limitName,
+        String severity,
+        String state,
+        String nextAction
+    ) {
+    }
+
+    public record SettlementExceptionWorkflow(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String workflowStatus,
+        String exceptionType,
+        String blockedStage,
+        String ageingLabel,
+        String rootCause,
+        String exceptionOwner,
+        String resolutionEtaLabel,
+        long cashBreakAmount,
+        long securitiesBreakQuantity,
+        boolean cancelCorrectRequired,
+        String failAgingBucket,
+        String nextAction,
+        List<String> breakDetails,
+        List<String> controls,
+        List<String> operatorNotes
+    ) {
+    }
+
+    public record CorporateActionWorkflow(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String eventName,
+        String workflowStatus,
+        String recordDateLabel,
+        String effectiveDateLabel,
+        String customerImpact,
+        String ledgerImpact,
+        String booksRecordImpact,
+        String ledgerContinuityCheck,
+        String nextAction,
+        List<String> controls
+    ) {
+    }
+
+    public record MarginProjection(
+        long generatedAt,
+        String accountId,
+        String methodology,
+        double marginLimit,
+        double marginUsed,
+        double utilizationPercent,
+        String breachStatus,
+        List<String> breachedLimits,
+        List<String> requiredActions,
+        List<String> modelNotes,
+        List<String> marginChangeDrivers,
+        String nextReviewWindowLabel
+    ) {
+    }
+
+    public record ScenarioEvaluationHistory(
+        long generatedAt,
+        String accountId,
+        String lastEvaluatedAtLabel,
+        String governanceState,
+        String modelVersion,
+        List<String> approvals,
+        List<ScenarioEvaluationEntry> evaluations
+    ) {
+    }
+
+    public record ScenarioEvaluationEntry(
+        String title,
+        String shock,
+        double pnlDelta,
+        String note
+    ) {
+    }
+
+    public record BacktestHistory(
+        long generatedAt,
+        String accountId,
+        String windowLabel,
+        String coverageLabel,
+        double breachRatePercent,
+        List<String> exceptions,
+        List<BacktestHistoryPoint> history
+    ) {
+    }
+
+    public record AccountHierarchy(
+        long generatedAt,
+        String accountId,
+        String clientName,
+        String legalEntity,
+        String region,
+        String desk,
+        String strategy,
+        String clearingBroker,
+        String custodian,
+        List<BookHierarchy> books,
+        List<PermissionGrant> permissions,
+        List<String> reportingLines,
+        List<String> controlChecks
+    ) {
+    }
+
+    public record BookHierarchy(
+        String fund,
+        String book,
+        String subAccount,
+        String trader,
+        String settlementLocation,
+        String mandate
+    ) {
+    }
+
+    public record PermissionGrant(
+        String role,
+        String scope,
+        List<String> actions,
+        boolean approvalRequired,
+        String note
+    ) {
+    }
+
+    public record OperatorControlState(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String workflowState,
+        String escalationLevel,
+        List<ApprovalRequirement> requiredApprovals,
+        List<OperatorAcknowledgement> acknowledgements,
+        List<String> permittedActions,
+        List<String> blockedActions,
+        List<String> auditTrail
+    ) {
+    }
+
+    public record ApprovalRequirement(
+        String name,
+        String role,
+        String state,
+        String reason,
+        String nextAction
+    ) {
+    }
+
+    public record OperatorAcknowledgement(
+        String actor,
+        String action,
+        String atLabel,
+        String note
+    ) {
+    }
+
+    public record BacktestHistoryPoint(
+        String label,
+        double pnl,
+        boolean breached,
+        String note
+    ) {
     }
 
     public record BackOfficeStats(

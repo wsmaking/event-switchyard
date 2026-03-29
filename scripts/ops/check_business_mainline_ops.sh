@@ -62,3 +62,11 @@ if errors:
         print(f"  - {error}", file=sys.stderr)
     sys.exit(1)
 '
+
+echo "[check] go/no-go ${APP_BASE_URL}/api/ops/go-no-go"
+go_json="$(curl -fsS "${APP_BASE_URL}/api/ops/go-no-go")"
+echo "${go_json}"
+if [[ "${go_json}" == *'"state":"NO_GO"'* ]]; then
+  echo "[fail] go/no-go is NO_GO" >&2
+  exit 1
+fi

@@ -5,6 +5,7 @@ import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.market.MarketDataService;
 import appjava.mobile.MobileLearningService;
+import appjava.ops.ProductionEngineeringService;
 import appjava.order.ExecutionBenchmarkStore;
 import appjava.order.OrderService;
 import com.sun.net.httpserver.HttpServer;
@@ -25,6 +26,7 @@ public final class AppHttpServer {
     private final ExecutionBenchmarkStore executionBenchmarkStore;
     private final ReplayScenarioService replayScenarioService;
     private final MobileLearningService mobileLearningService;
+    private final ProductionEngineeringService productionEngineeringService;
     private final Path frontendDistDir;
 
     public AppHttpServer(
@@ -38,6 +40,7 @@ public final class AppHttpServer {
         ExecutionBenchmarkStore executionBenchmarkStore,
         ReplayScenarioService replayScenarioService,
         MobileLearningService mobileLearningService,
+        ProductionEngineeringService productionEngineeringService,
         Path frontendDistDir
     ) {
         this.host = host;
@@ -50,6 +53,7 @@ public final class AppHttpServer {
         this.executionBenchmarkStore = executionBenchmarkStore;
         this.replayScenarioService = replayScenarioService;
         this.mobileLearningService = mobileLearningService;
+        this.productionEngineeringService = productionEngineeringService;
         this.frontendDistDir = frontendDistDir;
     }
 
@@ -63,7 +67,7 @@ public final class AppHttpServer {
         server.createContext("/api/market", new MarketApiHandler(marketDataService));
         server.createContext("/api/accounts", new AccountApiHandler(backOfficeClient));
         server.createContext("/api/demo", new DemoApiHandler(marketDataService, backOfficeClient, orderService, replayScenarioService));
-        server.createContext("/api/ops", new OpsApiHandler(accountId, omsClient, backOfficeClient));
+        server.createContext("/api/ops", new OpsApiHandler(accountId, omsClient, backOfficeClient, productionEngineeringService));
         server.createContext("/api/order-stream", new OrderStreamHandler(omsClient, backOfficeClient));
         server.createContext("/api/mobile", new MobileApiHandler(mobileLearningService));
         server.createContext("/", new StaticFrontendHandler(frontendDistDir));

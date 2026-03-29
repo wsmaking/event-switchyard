@@ -5,6 +5,20 @@ import backofficejava.account.FillReadModel;
 import backofficejava.account.LedgerReadModel;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
+import backofficejava.business.AllocationStateReadModel;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ParentExecutionStateReadModel;
+import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.SettlementProjectionReadModel;
+import backofficejava.business.StatementProjectionReadModel;
+import backofficejava.business.RiskSnapshotReadModel;
+import backofficejava.business.SettlementExceptionWorkflowReadModel;
+import backofficejava.business.CorporateActionWorkflowReadModel;
+import backofficejava.business.MarginProjectionReadModel;
+import backofficejava.business.ScenarioEvaluationHistoryReadModel;
+import backofficejava.business.BacktestHistoryReadModel;
+import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.OperatorControlStateReadModel;
 import com.sun.net.httpserver.HttpExchange;
 
 public final class DemoResetHttpHandler extends JsonHttpHandler {
@@ -13,9 +27,44 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         PositionReadModel positionReadModel,
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
-        LedgerReadModel ledgerReadModel
+        LedgerReadModel ledgerReadModel,
+        ExecutionPackageReadModel executionPackageReadModel,
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel,
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+        MarginProjectionReadModel marginProjectionReadModel,
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) {
-        super(exchange -> route(exchange, accountOverviewReadModel, positionReadModel, fillReadModel, orderProjectionStateStore, ledgerReadModel));
+        super(exchange -> route(
+            exchange,
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderProjectionStateStore,
+            ledgerReadModel,
+            executionPackageReadModel,
+            postTradePackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel
+        ));
     }
 
     private static JsonResponse route(
@@ -24,7 +73,21 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         PositionReadModel positionReadModel,
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
-        LedgerReadModel ledgerReadModel
+        LedgerReadModel ledgerReadModel,
+        ExecutionPackageReadModel executionPackageReadModel,
+        PostTradePackageReadModel postTradePackageReadModel,
+        ParentExecutionStateReadModel parentExecutionStateReadModel,
+        AllocationStateReadModel allocationStateReadModel,
+        SettlementProjectionReadModel settlementProjectionReadModel,
+        StatementProjectionReadModel statementProjectionReadModel,
+        RiskSnapshotReadModel riskSnapshotReadModel,
+        SettlementExceptionWorkflowReadModel settlementExceptionWorkflowReadModel,
+        CorporateActionWorkflowReadModel corporateActionWorkflowReadModel,
+        MarginProjectionReadModel marginProjectionReadModel,
+        ScenarioEvaluationHistoryReadModel scenarioEvaluationHistoryReadModel,
+        BacktestHistoryReadModel backtestHistoryReadModel,
+        AccountHierarchyReadModel accountHierarchyReadModel,
+        OperatorControlStateReadModel operatorControlStateReadModel
     ) {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             return new JsonResponse(204, new ResetResponse("OK"));
@@ -37,6 +100,20 @@ public final class DemoResetHttpHandler extends JsonHttpHandler {
         fillReadModel.reset();
         orderProjectionStateStore.reset();
         ledgerReadModel.reset();
+        executionPackageReadModel.reset();
+        postTradePackageReadModel.reset();
+        parentExecutionStateReadModel.reset();
+        allocationStateReadModel.reset();
+        settlementProjectionReadModel.reset();
+        statementProjectionReadModel.reset();
+        riskSnapshotReadModel.reset();
+        settlementExceptionWorkflowReadModel.reset();
+        corporateActionWorkflowReadModel.reset();
+        marginProjectionReadModel.reset();
+        scenarioEvaluationHistoryReadModel.reset();
+        backtestHistoryReadModel.reset();
+        accountHierarchyReadModel.reset();
+        operatorControlStateReadModel.reset();
         return JsonResponse.ok(new ResetResponse("RESET"));
     }
 

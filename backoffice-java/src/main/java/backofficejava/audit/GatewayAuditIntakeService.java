@@ -10,6 +10,7 @@ import backofficejava.account.OrderProjectionState;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
+import backofficejava.business.BusinessProjectionUpdater;
 import backofficejava.bus.BusEventV2;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,6 +47,7 @@ public final class GatewayAuditIntakeService {
     private final DeadLetterStore deadLetterStore;
     private final PendingOrphanStore pendingOrphanStore;
     private final AggregateSequenceStore aggregateSequenceStore;
+    private final BusinessProjectionUpdater businessProjectionUpdater;
     private final boolean enabled;
     private final Path auditPath;
     private final AuditOffsetStore offsetStore;
@@ -79,7 +81,8 @@ public final class GatewayAuditIntakeService {
             defaultOffsetStore(),
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),
-            new InMemoryAggregateSequenceStore()
+            new InMemoryAggregateSequenceStore(),
+            null
         );
     }
 
@@ -100,7 +103,8 @@ public final class GatewayAuditIntakeService {
             offsetStore,
             new InMemoryDeadLetterStore(),
             new InMemoryPendingOrphanStore(),
-            new InMemoryAggregateSequenceStore()
+            new InMemoryAggregateSequenceStore(),
+            null
         );
     }
 
@@ -114,6 +118,32 @@ public final class GatewayAuditIntakeService {
         DeadLetterStore deadLetterStore,
         PendingOrphanStore pendingOrphanStore,
         AggregateSequenceStore aggregateSequenceStore
+    ) {
+        this(
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderStateStore,
+            ledgerReadModel,
+            offsetStore,
+            deadLetterStore,
+            pendingOrphanStore,
+            aggregateSequenceStore,
+            null
+        );
+    }
+
+    public GatewayAuditIntakeService(
+        AccountOverviewReadModel accountOverviewReadModel,
+        PositionReadModel positionReadModel,
+        FillReadModel fillReadModel,
+        OrderProjectionStateStore orderStateStore,
+        LedgerReadModel ledgerReadModel,
+        AuditOffsetStore offsetStore,
+        DeadLetterStore deadLetterStore,
+        PendingOrphanStore pendingOrphanStore,
+        AggregateSequenceStore aggregateSequenceStore,
+        BusinessProjectionUpdater businessProjectionUpdater
     ) {
         this.accountOverviewReadModel = accountOverviewReadModel;
         this.positionReadModel = positionReadModel;
@@ -146,6 +176,7 @@ public final class GatewayAuditIntakeService {
         this.deadLetterStore = deadLetterStore;
         this.pendingOrphanStore = pendingOrphanStore;
         this.aggregateSequenceStore = aggregateSequenceStore;
+        this.businessProjectionUpdater = businessProjectionUpdater;
     }
 
     public void start() {
@@ -199,6 +230,9 @@ public final class GatewayAuditIntakeService {
                 fillReadModel.reset();
                 orderStateStore.reset();
                 ledgerReadModel.reset();
+                if (businessProjectionUpdater != null) {
+                    businessProjectionUpdater.reset();
+                }
                 deadLetterStore.reset();
                 pendingOrphanStore.reset();
                 aggregateSequenceStore.reset();
@@ -501,6 +535,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(event.accountId(), event.orderId(), event.at());
         processed.incrementAndGet();
     }
 
@@ -550,6 +585,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -599,6 +635,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -644,6 +681,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -694,6 +732,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -761,6 +800,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -806,6 +846,7 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
     }
@@ -864,8 +905,16 @@ public final class GatewayAuditIntakeService {
             event.at(),
             "gateway-audit"
         ));
+        refreshBusinessState(current.accountId(), current.orderId(), event.at());
         processed.incrementAndGet();
         return true;
+    }
+
+    private void refreshBusinessState(String accountId, String orderId, long eventAt) {
+        if (businessProjectionUpdater == null) {
+            return;
+        }
+        businessProjectionUpdater.refresh(accountId, orderId, eventAt);
     }
 
     private PositionMutation updatePositions(String accountId, String symbol, String side, long deltaQty, long fillPrice) {
