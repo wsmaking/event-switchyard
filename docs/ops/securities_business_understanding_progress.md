@@ -1124,6 +1124,12 @@ repo に入れるべきもの:
 - [x] mobile に運用工学画面を追加
 - [x] session monitor、incident drill、schema control、capacity control を追加
 - [x] app-java に `operations` API を追加
+- [x] app-java に live runtime 集約 `ProductionEngineeringService` を追加
+- [x] gateway / OMS / BackOffice / market data を束ねる `/api/ops/production-engineering` を追加
+- [x] mobile の `運用工学` 画面を live runtime 表示へ拡張
+
+この優先度は、handbook を読むだけでは完了とみなさない。  
+実装として必要なのは、`何を監視するか`、`どこから値を引くか`、`どの順で事故を切り分けるか` をコードと API に落とすことである。
 
 追加すべき論点:
 
@@ -1137,18 +1143,97 @@ repo に入れるべきもの:
 - incident response
 - capacity / latency / failure budget
 
-repo に入れるべきもの:
+実装方針:
 
-- mobile に `運用障害` 画面を追加する
-- incident scenario drill を作る
-- order / ledger だけでなく session / feed / operator action の故障を扱う
+1. まず `app-java` に live runtime 集約層を置く  
+   `gateway-rust`、`oms-java`、`backoffice-java`、`market data` から運用上必要な最小状態を集約する。
+2. その次に `mobile` で handbook と live runtime を同じ画面に載せる  
+   「概念説明」と「いま何が壊れているか」を分けず、同じ画面で往復できるようにする。
+3. その上で drill / runbook / script を追加する  
+   事故を見つけるだけでなく、観測順と復旧順を反復できるようにする。
+
+各サービスで入れるもの:
+
+- `gateway-rust`
+  - [x] `/health` に queue / latency の live 状態がある
+  - [ ] venue session と drop copy の明示状態
+  - [ ] throttling / entitlement / rollout state の明示出力
+- `oms-java`
+  - [x] stats、bus stats、reconcile、pending orphan、DLQ がある
+  - [ ] projection lag と schema compatibility の専用 summary
+  - [ ] replay / reconcile drill を運用 API として束ねる summary
+- `backoffice-java`
+  - [x] stats、bus stats、reconcile、ledger、pending orphan、DLQ がある
+  - [ ] settlement / statement / books and records の runtime summary
+  - [ ] feed stale 時の risk / valuation guard 表示
+- `app-java`
+  - [x] `ProductionEngineeringService` で gateway / projection / feed / schema / capacity を集約
+  - [x] `/api/ops/production-engineering` を追加
+  - [ ] drop copy / venue state / rollout state / throttling state の集約
+- `mobile`
+  - [x] live runtime と operator sequence を同じ画面に表示
+  - [x] session / feed / schema / capacity を live 値で読む導線
+  - [ ] incident drill を live runtime と結び付けた step-by-step モード
+  - [ ] throttle / entitlement / rollout を UI で再現
+
+API / contract:
+
+- [x] `GET /api/ops/production-engineering`
+  - gateway state
+  - OMS projection state
+  - BackOffice projection state
+  - market data freshness
+  - schema compatibility
+  - capacity / backlog
+  - active incident 一覧
+  - operator の確認順
+- [ ] `GET /api/ops/venue-sessions`
+  - venue / drop copy / entitlement / throttling の個別状態
+- [ ] `GET /api/ops/rollout-state`
+  - schema rollout / consumer compatibility / replay readiness
+
+PR 境界:
+
+1. [x] live runtime 集約
+   - `ProductionEngineeringService`
+   - `MarketDataService` の freshness snapshot
+   - mobile operations の live 表示
+2. [ ] venue / drop copy / entitlement / throttling
+3. [ ] rollout / schema compatibility / replay readiness gate
+4. [ ] incident drill と capacity gate の自動化
+
+Done 条件:
+
+- gateway / OMS / BackOffice / market data の live 状態を 1 画面で読める
+- incident を `session / projection / schema / feed / capacity` に分類できる
+- operator の最初の 3 手が固定されている
+- pending orphan、DLQ、schema mismatch、market stale、queue pressure を区別できる
+- runbook の記述と live API の用語が一致している
+
+今回ここまで入れたもの:
+
+- [x] `app-java/src/main/java/appjava/ops/ProductionEngineeringService.java`
+- [x] `app-java/src/main/java/appjava/http/OpsApiHandler.java`
+- [x] `app-java/src/main/java/appjava/market/MarketDataService.java`
+- [x] `frontend/src/components/mobile/MobileOperationsView.tsx`
+- [x] `frontend/src/offline/mobileRoadmapOffline.ts`
+
+まだ残る本実装:
+
+- [ ] FIX / native venue session の明示状態
+- [ ] drop copy と operator acknowledgement の導線
+- [ ] throttling / entitlement の runtime state
+- [ ] rollout / backward compatibility / replay readiness gate
+- [ ] capacity / latency / failure budget の自動チェック script
 
 この優先度で増やすファイル:
 
+- `app-java/src/main/java/appjava/ops/ProductionEngineeringService.java`
+- `app-java/src/main/java/appjava/http/OpsApiHandler.java`
+- `app-java/src/main/java/appjava/market/MarketDataService.java`
 - `frontend/src/components/mobile/MobileOperationsView.tsx`
 - `frontend/src/offline/mobileRoadmapOffline.ts`
-- `docs/ops` に session / incident handbook を追加
-- `scripts/ops` に incident replay drill を追加
+- `docs/ops` のこの文書に実装計画を集約
 
 ## 最短で価値が出る実装順
 
