@@ -87,6 +87,44 @@ public final class BackOfficeClient {
         return List.of();
     }
 
+    public ExecutionPackage fetchExecutionPackage(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/execution-package?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), ExecutionPackage.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    public PostTradePackage fetchPostTradePackage(String orderId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/business/post-trade-package?orderId=" + orderId))
+                .GET()
+                .timeout(Duration.ofSeconds(3))
+                .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return objectMapper.readValue(response.body(), PostTradePackage.class);
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     public void resetDemo() {
         postNoBody("/demo/reset");
     }
@@ -113,6 +151,14 @@ public final class BackOfficeClient {
 
     public void replaceLedger(List<LedgerEntry> entries) {
         postJson("/internal/ledger/replace", new ReplaceLedgerRequest(entries));
+    }
+
+    public void upsertExecutionPackage(ExecutionPackage executionPackage) {
+        postJson("/internal/business/execution-package/upsert", executionPackage);
+    }
+
+    public void upsertPostTradePackage(PostTradePackage postTradePackage) {
+        postJson("/internal/business/post-trade-package/upsert", postTradePackage);
     }
 
     public BackOfficeStats fetchStats() {
@@ -345,6 +391,131 @@ public final class BackOfficeClient {
     }
 
     public record ReplaceLedgerRequest(List<LedgerEntry> entries) {
+    }
+
+    public record ExecutionPackage(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String symbolName,
+        String clientIntent,
+        List<ExecutionStyle> executionStyles,
+        ParentOrderPlan parentOrderPlan,
+        List<ChildOrderSlice> childOrders,
+        AllocationPlan allocationPlan,
+        List<String> operatorChecks
+    ) {
+    }
+
+    public record ExecutionStyle(
+        String name,
+        String useCase,
+        String businessRule,
+        String systemImplication,
+        List<String> tradeoffs
+    ) {
+    }
+
+    public record ParentOrderPlan(
+        String side,
+        long totalQuantity,
+        double arrivalMidPrice,
+        double targetParticipationPercent,
+        int scheduleWindowMinutes,
+        String chosenStyle,
+        List<String> whyNotOtherChoices
+    ) {
+    }
+
+    public record ChildOrderSlice(
+        String id,
+        String venueIntent,
+        long plannedQuantity,
+        double benchmarkPrice,
+        double expectedFillPrice,
+        double expectedSlippageBps,
+        String timeBucketLabel,
+        String learningPoint
+    ) {
+    }
+
+    public record AllocationPlan(
+        String blockBook,
+        double averagePrice,
+        long totalQuantity,
+        List<AllocationSlice> allocations,
+        String settlementNote,
+        List<String> controlChecks
+    ) {
+    }
+
+    public record AllocationSlice(
+        String targetBook,
+        long quantity,
+        double ratioPercent,
+        String note
+    ) {
+    }
+
+    public record PostTradePackage(
+        long generatedAt,
+        String orderId,
+        String accountId,
+        String symbol,
+        String symbolName,
+        String orderStatus,
+        List<PostTradeStage> stages,
+        FeeBreakdown feeBreakdown,
+        StatementPreview statementPreview,
+        List<SettlementCheck> settlementChecks,
+        List<CorporateActionHook> corporateActionHooks
+    ) {
+    }
+
+    public record PostTradeStage(
+        String name,
+        String owner,
+        String purpose,
+        String currentView,
+        String whyItMatters
+    ) {
+    }
+
+    public record FeeBreakdown(
+        long grossNotional,
+        long commission,
+        long exchangeFee,
+        long taxes,
+        long netCashMovement,
+        List<String> assumptions
+    ) {
+    }
+
+    public record StatementPreview(
+        String accountId,
+        String symbol,
+        String symbolName,
+        long settledQuantity,
+        double averagePrice,
+        String settlementDateLabel,
+        String netCashMovementLabel,
+        List<String> notes
+    ) {
+    }
+
+    public record SettlementCheck(
+        String title,
+        String rule,
+        String currentValue
+    ) {
+    }
+
+    public record CorporateActionHook(
+        String name,
+        String businessImpact,
+        String systemImpact
+    ) {
     }
 
     public record BackOfficeStats(

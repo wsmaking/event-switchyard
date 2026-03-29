@@ -4,7 +4,11 @@ import appjava.account.AccountOverview;
 import appjava.clients.BackOfficeClient;
 import appjava.clients.BackOfficeClient.BackOfficeOrderState;
 import appjava.clients.BackOfficeClient.BackOfficePosition;
+import appjava.clients.BackOfficeClient.ExecutionPackage;
+import appjava.clients.BackOfficeClient.ExecutionStyle;
 import appjava.clients.BackOfficeClient.LedgerEntry;
+import appjava.clients.BackOfficeClient.ParentOrderPlan;
+import appjava.clients.BackOfficeClient.PostTradePackage;
 import appjava.clients.OmsClient;
 import appjava.http.JsonHttpHandler;
 import appjava.market.MarketDataService;
@@ -17,6 +21,14 @@ import appjava.order.OrderRequest;
 import appjava.order.ReservationView;
 import appjava.order.OrderStatus;
 import appjava.order.OrderView;
+import appjava.clients.BackOfficeClient.AllocationPlan;
+import appjava.clients.BackOfficeClient.AllocationSlice;
+import appjava.clients.BackOfficeClient.ChildOrderSlice;
+import appjava.clients.BackOfficeClient.CorporateActionHook;
+import appjava.clients.BackOfficeClient.FeeBreakdown;
+import appjava.clients.BackOfficeClient.PostTradeStage;
+import appjava.clients.BackOfficeClient.SettlementCheck;
+import appjava.clients.BackOfficeClient.StatementPreview;
 
 import java.time.Instant;
 import java.util.List;
@@ -106,6 +118,8 @@ public final class ReplayScenarioService {
         List<FillView> fills = buildFills(order, snapshot, workingPrice);
         BackOfficeOrderState orderState = buildOrderState(order, snapshot, workingPrice);
         List<LedgerEntry> ledgerEntries = buildLedgerEntries(order, snapshot);
+        ExecutionPackage executionPackage = buildExecutionPackage(order, snapshot, marketStructure, workingPrice);
+        PostTradePackage postTradePackage = buildPostTradePackage(order, snapshot, fills, marketStructure);
         executionBenchmarkStore.put(new ExecutionBenchmark(
             order.id(),
             symbol,
@@ -127,6 +141,8 @@ public final class ReplayScenarioService {
         backOfficeClient.replacePositions(accountId, snapshot.positions());
         backOfficeClient.replaceFills(order.id(), fills);
         backOfficeClient.replaceLedger(ledgerEntries);
+        backOfficeClient.upsertExecutionPackage(executionPackage);
+        backOfficeClient.upsertPostTradePackage(postTradePackage);
         return omsClient.fetchOrder(order.id()).orElse(order);
     }
 
@@ -397,6 +413,176 @@ public final class ReplayScenarioService {
         );
     }
 
+    private ExecutionPackage buildExecutionPackage(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        MarketStructureSnapshot marketStructure,
+        double workingPrice
+    ) {
+        long parentQuantity = Math.max(order.quantity(), 100L);
+        long sliceOne = Math.max(1L, Math.round(parentQuantity * 0.25));
+        long sliceTwo = Math.max(1L, Math.round(parentQuantity * 0.35));
+        long sliceThree = Math.max(1L, parentQuantity - sliceOne - sliceTwo);
+        double arrivalMid = round2(marketStructure.midPrice());
+        double targetParticipation = round2(
+            Math.min(18.0, Math.max(4.0, ((double) parentQuantity / Math.max(1L, marketStructure.bidQuantity() + marketStructure.askQuantity())) * 100.0))
+        );
+        String symbolName = marketDataService.getStockInfo(order.symbol()).name();
+        double takerPrice = round2(Math.max(workingPrice, marketStructure.askPrice()));
+        double patientPrice = round2(Math.max(arrivalMid, marketStructure.bidPrice()));
+        double closePrice = round2(arrivalMid + Math.max(0.5, marketStructure.spread() * 0.7));
+
+        return new ExecutionPackage(
+            snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt(),
+            order.id(),
+            accountId,
+            order.symbol(),
+            symbolName,
+            order.side().equalsIgnoreCase("BUY")
+                ? symbolName + " を価格を飛ばしすぎず集め、説明可能な execution quality を残したい。"
+                : symbolName + " を崩しすぎず売却し、close 前に inventory を閉じたい。",
+            List.of(
+                new ExecutionStyle(
+                    "DMA",
+                    "価格を細かく調整しながら queue priority を取りたい場面",
+                    "最良気配の内側に無理に飛び込まず、cancel-replace の理由を残す",
+                    "clientOrderId / venueOrderId / amend history の追跡が必須",
+                    List.of("柔軟だが operator の判断負荷が高い", "相場急変時は説明責任が個人に寄りやすい")
+                ),
+                new ExecutionStyle(
+                    "Care Order",
+                    "顧客説明と価格保護を両立したい場面",
+                    "板の外にある流動性も見ながら aggressiveness を調整する",
+                    "親注文と child slice の状態を分け、判断理由を operator に残す",
+                    List.of("丁寧だが人手依存が増える", "状態遷移が雑だと説明が破綻する")
+                ),
+                new ExecutionStyle(
+                    "POV",
+                    "出来高参加率を守りながら footprint を抑えたい場面",
+                    "market volume の変化に応じて child slice のサイズを動かす",
+                    "arrival benchmark と participation limit を親注文単位で固定する",
+                    List.of("未約定残が残りやすい", "平時は benchmark 説明がしやすい")
+                )
+            ),
+            new ParentOrderPlan(
+                order.side(),
+                parentQuantity,
+                arrivalMid,
+                targetParticipation,
+                "EXPIRED".equals(order.status().name()) ? 30 : 45,
+                snapshot.status() == OrderStatus.REJECTED ? "Care Order" : "POV",
+                List.of(
+                    "一撃の成行で spread を取りに行かず、arrival benchmark を残す",
+                    "operator 裁量だけに寄せず、child order の根拠を時間帯と市場状態に結びつける",
+                    order.quantity() < 500 ? "demo size のため quantity は小さいが、判断軸は institutional flow と同じに置く" : "親注文を child order に分けて footprint を制御する"
+                )
+            ),
+            List.of(
+                new ChildOrderSlice("slice-01", "opening-queue", sliceOne, arrivalMid, patientPrice, slippageBps(arrivalMid, patientPrice), "前場寄り", "queue を取りに行く初手。板を飛ばさない"),
+                new ChildOrderSlice("slice-02", "volume-follow", sliceTwo, arrivalMid, round2((patientPrice + takerPrice) / 2.0), slippageBps(arrivalMid, round2((patientPrice + takerPrice) / 2.0)), "前場中盤", "出来高を見ながら participation を守る"),
+                new ChildOrderSlice("slice-03", "close-control", sliceThree, arrivalMid, closePrice, slippageBps(arrivalMid, closePrice), "大引け前", snapshot.remainingQuantity() > 0L ? "未約定残を持ちすぎず、close までに説明可能な形で片付ける" : "残数量を持ち越さず平均価格で block allocation を閉じる")
+            ),
+            new AllocationPlan(
+                "block-equities-book",
+                snapshot.filledQuantity() > 0L ? round2((double) snapshot.fillNotional() / snapshot.filledQuantity()) : arrivalMid,
+                snapshot.filledQuantity(),
+                snapshot.filledQuantity() <= 0L
+                    ? List.of()
+                    : List.of(
+                        new AllocationSlice("long-only-japan", Math.round(snapshot.filledQuantity() * 0.50), 50.0, "benchmark 追随を優先"),
+                        new AllocationSlice("event-driven", Math.round(snapshot.filledQuantity() * 0.30), 30.0, "材料イベント前に inventory を確保"),
+                        new AllocationSlice(
+                            "multi-strat",
+                            snapshot.filledQuantity() - Math.round(snapshot.filledQuantity() * 0.50) - Math.round(snapshot.filledQuantity() * 0.30),
+                            20.0,
+                            "残数量を book balance に応じて配賦"
+                        )
+                    ),
+                "allocation truth は parent fill 総数に置き、child slice 単価ではなく平均約定単価で book 配賦する。",
+                List.of(
+                    "親注文 working 中に allocation を確定しない",
+                    "book 配賦後の数量合計を parent fill 総数と常に一致させる",
+                    snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "partial fill の間は残数量と allocation 済数量を混同しない" : "fill 完了後に block average を fix する"
+                )
+            ),
+            List.of(
+                "arrival benchmark を親注文単位で固定しているか",
+                "child slice の aggressiveness を市場状態と結びつけて説明できるか",
+                snapshot.status() == OrderStatus.REJECTED
+                    ? "reject reason と再発注方針を operator log に残しているか"
+                    : "allocation の総和と fill 総数が一致しているか"
+            )
+        );
+    }
+
+    private PostTradePackage buildPostTradePackage(
+        OrderView order,
+        ScenarioSnapshot snapshot,
+        List<FillView> fills,
+        MarketStructureSnapshot marketStructure
+    ) {
+        long grossNotional = snapshot.fillNotional();
+        long commission = grossNotional <= 0L ? 0L : Math.max(120L, Math.round(grossNotional * 0.0003));
+        long exchangeFee = grossNotional <= 0L ? 0L : Math.max(40L, Math.round(grossNotional * 0.00005));
+        long taxes = order.side().equalsIgnoreCase("SELL") && grossNotional > 0L ? Math.max(0L, Math.round(grossNotional * 0.00002)) : 0L;
+        long netCashMovement = signedCashDelta(order.side(), grossNotional) - commission - exchangeFee - taxes;
+        long settledQuantity = snapshot.filledQuantity();
+        double averagePrice = settledQuantity <= 0L ? 0.0 : round2((double) grossNotional / settledQuantity);
+        long stageTime = snapshot.statusEventAt() != null ? snapshot.statusEventAt() : order.submittedAt();
+        String symbolName = marketDataService.getStockInfo(order.symbol()).name();
+
+        return new PostTradePackage(
+            stageTime,
+            order.id(),
+            accountId,
+            order.symbol(),
+            symbolName,
+            order.status().name(),
+            List.of(
+                new PostTradeStage("Execution", "front office", "約定数量と平均単価を固める", fills.isEmpty() ? "未約定" : fills.size() + " fill / 平均 " + averagePrice, fills.isEmpty() ? "fill が無ければ post-trade は始まらない" : "child fill を parent fill に束ねる入口"),
+                new PostTradeStage("Allocation", "middle office", "block fill を各 book に配賦する", settledQuantity <= 0L ? "未配賦" : settledQuantity + "株を平均単価で配賦", "book ごとの cash/position を child slice 単位ではなく block 単位で説明する"),
+                new PostTradeStage("Confirmation", "operations", "顧客向け確認情報を確定する", order.status().name() + " / T+2 予定", "約定したのか、まだ working なのかを言葉で閉じる"),
+                new PostTradeStage("Settlement", "back office", "受渡と cash movement を確定する", settledQuantity <= 0L ? "未受渡" : settlementLabel(stageTime, 2), "position と cash の truth を ledger に落とす")
+            ),
+            new FeeBreakdown(
+                grossNotional,
+                commission,
+                exchangeFee,
+                taxes,
+                netCashMovement,
+                List.of(
+                    "commission は 3bps の簡易モデル",
+                    "exchange fee は venue fee の教育用近似",
+                    "実在の税率・手数料テーブルとは接続しない"
+                )
+            ),
+            new StatementPreview(
+                accountId,
+                order.symbol(),
+                symbolName,
+                settledQuantity,
+                averagePrice,
+                settledQuantity <= 0L ? "T+0 (未受渡)" : settlementLabel(stageTime, 2),
+                formatSignedYen(netCashMovement),
+                List.of(
+                    order.side().equalsIgnoreCase("BUY") ? "buy side では cash outflow と position increase が対になる" : "sell side では cash inflow と position decrease が対になる",
+                    snapshot.status() == OrderStatus.PARTIALLY_FILLED ? "remaining quantity は statement ではなく OMS 側で追う" : "statement は fill 済数量だけを表す",
+                    "market structure reference: " + marketStructure.venueState() + " / spread " + round2(marketStructure.spreadBps()) + "bps"
+                )
+            ),
+            List.of(
+                new SettlementCheck("数量整合", "fill 総数 = statement settled quantity", settledQuantity + "株"),
+                new SettlementCheck("現金整合", "gross notional + fee/tax = net cash movement", formatSignedYen(netCashMovement)),
+                new SettlementCheck("受渡日", "現物株は T+2 を基準に扱う", settledQuantity <= 0L ? "未受渡" : settlementLabel(stageTime, 2))
+            ),
+            List.of(
+                new CorporateActionHook("Cash Dividend", "権利落ち後の statement 説明に影響", "position date と record date を結びつける必要がある"),
+                new CorporateActionHook("Stock Split", "保有数量と平均単価の見え方が変わる", "post-trade book の数量換算が必要"),
+                new CorporateActionHook("Tender Offer", "通常受渡と違う案内が必要", "corporate action workflow に引き渡す入口が必要")
+            )
+        );
+    }
+
     private List<LedgerEntry> buildLedgerEntries(OrderView order, ScenarioSnapshot snapshot) {
         long submittedAt = order.submittedAt();
         long acceptedAt = submittedAt + 250L;
@@ -564,6 +750,22 @@ public final class ReplayScenarioService {
 
     private long signedCashDelta(String side, long notional) {
         return side.equalsIgnoreCase("BUY") ? -notional : notional;
+    }
+
+    private double slippageBps(double benchmarkPrice, double executionPrice) {
+        if (benchmarkPrice <= 0.0) {
+            return 0.0;
+        }
+        return round2(((executionPrice - benchmarkPrice) / benchmarkPrice) * 10_000.0);
+    }
+
+    private String settlementLabel(long baseTimeMillis, int plusBusinessDays) {
+        return "T+" + plusBusinessDays + " 想定 (" + new java.util.Date(baseTimeMillis + (plusBusinessDays * 24L * 60L * 60L * 1000L)).toString() + ")";
+    }
+
+    private String formatSignedYen(long value) {
+        String prefix = value > 0 ? "+" : "";
+        return prefix + String.format(Locale.US, "%,d円", value);
     }
 
     private static double round2(double value) {

@@ -10,6 +10,10 @@ import backofficejava.account.OrderProjectionState;
 import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.account.PositionView;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.ExecutionPackageView;
+import backofficejava.business.PostTradePackageReadModel;
+import backofficejava.business.PostTradePackageView;
 import com.sun.net.httpserver.HttpExchange;
 
 import java.util.List;
@@ -20,9 +24,20 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         PositionReadModel positionReadModel,
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
-        LedgerReadModel ledgerReadModel
+        LedgerReadModel ledgerReadModel,
+        ExecutionPackageReadModel executionPackageReadModel,
+        PostTradePackageReadModel postTradePackageReadModel
     ) {
-        super(exchange -> route(exchange, accountOverviewReadModel, positionReadModel, fillReadModel, orderProjectionStateStore, ledgerReadModel));
+        super(exchange -> route(
+            exchange,
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderProjectionStateStore,
+            ledgerReadModel,
+            executionPackageReadModel,
+            postTradePackageReadModel
+        ));
     }
 
     private static JsonResponse route(
@@ -31,7 +46,9 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
         PositionReadModel positionReadModel,
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
-        LedgerReadModel ledgerReadModel
+        LedgerReadModel ledgerReadModel,
+        ExecutionPackageReadModel executionPackageReadModel,
+        PostTradePackageReadModel postTradePackageReadModel
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/accounts/upsert".equals(path)) {
@@ -60,12 +77,24 @@ public final class BackOfficeInternalHttpHandler extends JsonHttpHandler {
             request.entries().forEach(ledgerReadModel::append);
             return JsonResponse.ok(new ReplaceLedgerResponse("REPLACED", request.entries().size()));
         }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/execution-package/upsert".equals(path)) {
+            ExecutionPackageView request = readJson(exchange, ExecutionPackageView.class);
+            executionPackageReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/business/post-trade-package/upsert".equals(path)) {
+            PostTradePackageView request = readJson(exchange, PostTradePackageView.class);
+            postTradePackageReadModel.upsert(request);
+            return JsonResponse.ok(request);
+        }
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/internal/reset".equals(path)) {
             accountOverviewReadModel.reset();
             positionReadModel.reset();
             fillReadModel.reset();
             orderProjectionStateStore.reset();
             ledgerReadModel.reset();
+            executionPackageReadModel.reset();
+            postTradePackageReadModel.reset();
             return JsonResponse.ok(new ResetResponse("RESET"));
         }
         throw new NotFoundException("route_not_found:" + path);

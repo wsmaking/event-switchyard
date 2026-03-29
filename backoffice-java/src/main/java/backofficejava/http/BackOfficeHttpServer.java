@@ -7,6 +7,8 @@ import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.audit.GatewayAuditIntakeService;
 import backofficejava.bus.BusEventIntakeService;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.PostTradePackageReadModel;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -20,6 +22,8 @@ public final class BackOfficeHttpServer {
     private final FillReadModel fillReadModel;
     private final OrderProjectionStateStore orderProjectionStateStore;
     private final LedgerReadModel ledgerReadModel;
+    private final ExecutionPackageReadModel executionPackageReadModel;
+    private final PostTradePackageReadModel postTradePackageReadModel;
     private final GatewayAuditIntakeService intakeService;
     private final BusEventIntakeService busEventIntakeService;
 
@@ -30,6 +34,8 @@ public final class BackOfficeHttpServer {
         FillReadModel fillReadModel,
         OrderProjectionStateStore orderProjectionStateStore,
         LedgerReadModel ledgerReadModel,
+        ExecutionPackageReadModel executionPackageReadModel,
+        PostTradePackageReadModel postTradePackageReadModel,
         GatewayAuditIntakeService intakeService,
         BusEventIntakeService busEventIntakeService
     ) {
@@ -39,6 +45,8 @@ public final class BackOfficeHttpServer {
         this.fillReadModel = fillReadModel;
         this.orderProjectionStateStore = orderProjectionStateStore;
         this.ledgerReadModel = ledgerReadModel;
+        this.executionPackageReadModel = executionPackageReadModel;
+        this.postTradePackageReadModel = postTradePackageReadModel;
         this.intakeService = intakeService;
         this.busEventIntakeService = busEventIntakeService;
     }
@@ -56,6 +64,8 @@ public final class BackOfficeHttpServer {
         server.createContext("/positions", new PositionHttpHandler(positionReadModel));
         server.createContext("/fills", new FillHttpHandler(fillReadModel));
         server.createContext("/ledger", new LedgerHttpHandler(ledgerReadModel));
+        server.createContext("/business/execution-package", new ExecutionPackageHttpHandler(executionPackageReadModel));
+        server.createContext("/business/post-trade-package", new PostTradePackageHttpHandler(postTradePackageReadModel));
         server.createContext(
             "/demo/reset",
             new DemoResetHttpHandler(
@@ -63,7 +73,9 @@ public final class BackOfficeHttpServer {
                 positionReadModel,
                 fillReadModel,
                 orderProjectionStateStore,
-                ledgerReadModel
+                ledgerReadModel,
+                executionPackageReadModel,
+                postTradePackageReadModel
             )
         );
         server.createContext(
@@ -73,7 +85,9 @@ public final class BackOfficeHttpServer {
                 positionReadModel,
                 fillReadModel,
                 orderProjectionStateStore,
-                ledgerReadModel
+                ledgerReadModel,
+                executionPackageReadModel,
+                postTradePackageReadModel
             )
         );
         server.createContext("/internal/audit", new BackOfficeInternalAuditHttpHandler(intakeService));

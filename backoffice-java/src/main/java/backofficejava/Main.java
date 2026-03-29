@@ -7,6 +7,8 @@ import backofficejava.account.OrderProjectionStateStore;
 import backofficejava.account.PositionReadModel;
 import backofficejava.audit.GatewayAuditIntakeService;
 import backofficejava.bus.BusEventIntakeService;
+import backofficejava.business.ExecutionPackageReadModel;
+import backofficejava.business.PostTradePackageReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
 import backofficejava.persistence.BackOfficeStoreFactory;
@@ -24,6 +26,8 @@ public final class Main {
         FillReadModel fillReadModel = runtime.fillReadModel();
         OrderProjectionStateStore orderProjectionStateStore = runtime.orderProjectionStateStore();
         LedgerReadModel ledgerReadModel = runtime.ledgerReadModel();
+        ExecutionPackageReadModel executionPackageReadModel = runtime.executionPackageReadModel();
+        PostTradePackageReadModel postTradePackageReadModel = runtime.postTradePackageReadModel();
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -43,6 +47,8 @@ public final class Main {
             fillReadModel,
             orderProjectionStateStore,
             ledgerReadModel,
+            executionPackageReadModel,
+            postTradePackageReadModel,
             intakeService,
             busEventIntakeService
         );

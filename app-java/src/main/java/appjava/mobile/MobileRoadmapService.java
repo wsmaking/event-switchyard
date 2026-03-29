@@ -40,6 +40,12 @@ public final class MobileRoadmapService {
 
     public InstitutionalFlowResponse buildInstitutionalFlow() {
         OrderView anchorOrder = latestOrder();
+        if (anchorOrder != null) {
+            BackOfficeClient.ExecutionPackage executionPackage = backOfficeClient.fetchExecutionPackage(anchorOrder.id());
+            if (executionPackage != null) {
+                return mapExecutionPackage(executionPackage, anchorOrder.id());
+            }
+        }
         String symbol = anchorOrder == null ? "7203" : anchorOrder.symbol();
         String symbolName = safeName(symbol);
         MarketStructureSnapshot structure = marketDataService.getMarketStructure(symbol);
@@ -122,31 +128,18 @@ public final class MobileRoadmapService {
                 "child order ごとの aggressiveness を市場状態と結びつけて話せるか",
                 "allocation が book 事情ではなく fill 実績に基づいているか"
             ),
-            List.of(
-                new MobileLearningService.ImplementationAnchor(
-                    "注文 submit と benchmark 保存",
-                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java",
-                    "親注文の arrival benchmark を orderId 単位で保存して執行品質を説明する基点",
-                    null
-                ),
-                new MobileLearningService.ImplementationAnchor(
-                    "final-out と fills の集約",
-                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java",
-                    "約定結果と execution quality を束ねて parent / child の説明に繋げる入口",
-                    null
-                ),
-                new MobileLearningService.ImplementationAnchor(
-                    "市場構造の生成",
-                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
-                    "book depth、spread、venue state を child order 判断の前提として返す",
-                    null
-                )
-            )
+            institutionalFlowAnchors()
         );
     }
 
     public PostTradeGuideResponse buildPostTradeGuide() {
         OrderView anchorOrder = latestOrder();
+        if (anchorOrder != null) {
+            BackOfficeClient.PostTradePackage postTradePackage = backOfficeClient.fetchPostTradePackage(anchorOrder.id());
+            if (postTradePackage != null) {
+                return mapPostTradePackage(postTradePackage);
+            }
+        }
         String orderId = anchorOrder == null ? null : anchorOrder.id();
         List<FillView> fills = orderId == null ? List.of() : backOfficeClient.fetchFills(orderId);
         List<LedgerEntry> ledgerEntries = orderId == null ? List.of() : backOfficeClient.fetchLedger(accountId, orderId, 20);
@@ -209,26 +202,7 @@ public final class MobileRoadmapService {
                 new CorporateActionHook("Split / Reverse Split", "quantity と average price の変換が必要", "order history は変えず position 表示を調整"),
                 new CorporateActionHook("Ticker Change / Merger", "symbol identity が変わっても ledger と statement の連続性を保つ", "asset master と reporting label の分離が必要")
             ),
-            List.of(
-                new MobileLearningService.ImplementationAnchor(
-                    "fills の取得",
-                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/clients/BackOfficeClient.java",
-                    "orderId 単位で fill と ledger を引き、post-trade 説明の根拠を作る",
-                    null
-                ),
-                new MobileLearningService.ImplementationAnchor(
-                    "ledger の確定",
-                    "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/ledger",
-                    "fill 起点で cash / position / realized PnL を組み立てる正本",
-                    null
-                ),
-                new MobileLearningService.ImplementationAnchor(
-                    "final-out との接続",
-                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java",
-                    "front-to-back をまとめて照会する入口。statement と違い、raw event まで含めて説明する",
-                    null
-                )
-            )
+            postTradeAnchors()
         );
     }
 
@@ -601,6 +575,152 @@ public final class MobileRoadmapService {
                     "tick freshness、venue state、spread を live runtime として返す",
                     null
                 )
+            )
+        );
+    }
+
+    private InstitutionalFlowResponse mapExecutionPackage(BackOfficeClient.ExecutionPackage executionPackage, String anchorOrderId) {
+        return new InstitutionalFlowResponse(
+            executionPackage.generatedAt(),
+            anchorOrderId,
+            executionPackage.symbol(),
+            executionPackage.symbolName(),
+            executionPackage.clientIntent(),
+            executionPackage.executionStyles().stream()
+                .map(style -> new ExecutionStyle(
+                    style.name(),
+                    style.useCase(),
+                    style.businessRule(),
+                    style.systemImplication(),
+                    style.tradeoffs()
+                ))
+                .toList(),
+            new ParentOrderPlan(
+                executionPackage.parentOrderPlan().side(),
+                executionPackage.parentOrderPlan().totalQuantity(),
+                executionPackage.parentOrderPlan().arrivalMidPrice(),
+                executionPackage.parentOrderPlan().targetParticipationPercent(),
+                executionPackage.parentOrderPlan().scheduleWindowMinutes(),
+                executionPackage.parentOrderPlan().chosenStyle(),
+                executionPackage.parentOrderPlan().whyNotOtherChoices()
+            ),
+            executionPackage.childOrders().stream()
+                .map(child -> new ChildOrderSlice(
+                    child.id(),
+                    child.venueIntent(),
+                    child.plannedQuantity(),
+                    child.benchmarkPrice(),
+                    child.expectedFillPrice(),
+                    child.expectedSlippageBps(),
+                    child.timeBucketLabel(),
+                    child.learningPoint()
+                ))
+                .toList(),
+            new AllocationPlan(
+                executionPackage.allocationPlan().blockBook(),
+                executionPackage.allocationPlan().averagePrice(),
+                executionPackage.allocationPlan().totalQuantity(),
+                executionPackage.allocationPlan().allocations().stream()
+                    .map(allocation -> new AllocationSlice(
+                        allocation.targetBook(),
+                        allocation.quantity(),
+                        allocation.ratioPercent(),
+                        allocation.note()
+                    ))
+                    .toList(),
+                executionPackage.allocationPlan().settlementNote(),
+                executionPackage.allocationPlan().controlChecks()
+            ),
+            executionPackage.operatorChecks(),
+            institutionalFlowAnchors()
+        );
+    }
+
+    private PostTradeGuideResponse mapPostTradePackage(BackOfficeClient.PostTradePackage postTradePackage) {
+        return new PostTradeGuideResponse(
+            postTradePackage.generatedAt(),
+            postTradePackage.orderId(),
+            postTradePackage.symbol(),
+            postTradePackage.orderStatus(),
+            postTradePackage.stages().stream()
+                .map(stage -> new PostTradeStage(
+                    stage.name(),
+                    stage.owner(),
+                    stage.purpose(),
+                    stage.currentView(),
+                    stage.whyItMatters()
+                ))
+                .toList(),
+            new FeeBreakdown(
+                postTradePackage.feeBreakdown().grossNotional(),
+                postTradePackage.feeBreakdown().commission(),
+                postTradePackage.feeBreakdown().exchangeFee(),
+                postTradePackage.feeBreakdown().taxes(),
+                postTradePackage.feeBreakdown().netCashMovement(),
+                postTradePackage.feeBreakdown().assumptions()
+            ),
+            new StatementPreview(
+                postTradePackage.statementPreview().accountId(),
+                postTradePackage.statementPreview().symbol(),
+                postTradePackage.statementPreview().symbolName(),
+                postTradePackage.statementPreview().settledQuantity(),
+                postTradePackage.statementPreview().averagePrice(),
+                postTradePackage.statementPreview().settlementDateLabel(),
+                postTradePackage.statementPreview().netCashMovementLabel(),
+                postTradePackage.statementPreview().notes()
+            ),
+            postTradePackage.settlementChecks().stream()
+                .map(check -> new SettlementCheck(check.title(), check.rule(), check.currentValue()))
+                .toList(),
+            postTradePackage.corporateActionHooks().stream()
+                .map(hook -> new CorporateActionHook(hook.name(), hook.businessImpact(), hook.systemImpact()))
+                .toList(),
+            postTradeAnchors()
+        );
+    }
+
+    private List<MobileLearningService.ImplementationAnchor> institutionalFlowAnchors() {
+        return List.of(
+            new MobileLearningService.ImplementationAnchor(
+                "execution package 正本",
+                "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/business/ExecutionPackageView.java",
+                "親注文、child slice、allocation を backoffice-java 側の read model として保持する正本",
+                null
+            ),
+            new MobileLearningService.ImplementationAnchor(
+                "execution package upsert",
+                "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java",
+                "replay scenario から execution package を組み立てて正本へ書き込む入口",
+                null
+            ),
+            new MobileLearningService.ImplementationAnchor(
+                "市場構造の生成",
+                "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
+                "book depth、spread、venue state を child order 判断の前提として返す",
+                null
+            )
+        );
+    }
+
+    private List<MobileLearningService.ImplementationAnchor> postTradeAnchors() {
+        return List.of(
+            new MobileLearningService.ImplementationAnchor(
+                "post-trade package 正本",
+                "/Users/fujii/Desktop/dev/event-switchyard/backoffice-java/src/main/java/backofficejava/business/PostTradePackageView.java",
+                "statement、fee/tax、settlement check、corporate action hook を保持する read model",
+                null
+            ),
+            new MobileLearningService.ImplementationAnchor(
+                "fills / ledger からの組み立て",
+                "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/demo/ReplayScenarioService.java",
+                "fill と ledger を起点に post-trade package を作る入口",
+                null
+            ),
+            new MobileLearningService.ImplementationAnchor(
+                "正本 read の client",
+                "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/clients/BackOfficeClient.java",
+                "mobile 画面が backoffice-java 正本から package を fetch する client",
+                null
             )
         );
     }
