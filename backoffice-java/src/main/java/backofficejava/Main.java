@@ -20,6 +20,7 @@ import backofficejava.business.MarginProjectionReadModel;
 import backofficejava.business.ScenarioEvaluationHistoryReadModel;
 import backofficejava.business.BacktestHistoryReadModel;
 import backofficejava.business.AccountHierarchyReadModel;
+import backofficejava.business.BusinessProjectionUpdater;
 import backofficejava.business.OperatorControlStateReadModel;
 import backofficejava.http.BackOfficeHttpServer;
 import backofficejava.persistence.BackOfficeRuntime;
@@ -52,6 +53,26 @@ public final class Main {
         BacktestHistoryReadModel backtestHistoryReadModel = runtime.backtestHistoryReadModel();
         AccountHierarchyReadModel accountHierarchyReadModel = runtime.accountHierarchyReadModel();
         OperatorControlStateReadModel operatorControlStateReadModel = runtime.operatorControlStateReadModel();
+        BusinessProjectionUpdater businessProjectionUpdater = new BusinessProjectionUpdater(
+            accountOverviewReadModel,
+            positionReadModel,
+            fillReadModel,
+            orderProjectionStateStore,
+            executionPackageReadModel,
+            parentExecutionStateReadModel,
+            allocationStateReadModel,
+            postTradePackageReadModel,
+            settlementProjectionReadModel,
+            statementProjectionReadModel,
+            riskSnapshotReadModel,
+            settlementExceptionWorkflowReadModel,
+            corporateActionWorkflowReadModel,
+            marginProjectionReadModel,
+            scenarioEvaluationHistoryReadModel,
+            backtestHistoryReadModel,
+            accountHierarchyReadModel,
+            operatorControlStateReadModel
+        );
         GatewayAuditIntakeService intakeService = new GatewayAuditIntakeService(
             accountOverviewReadModel,
             positionReadModel,
@@ -61,7 +82,8 @@ public final class Main {
             runtime.auditOffsetStore(),
             runtime.deadLetterStore(),
             runtime.pendingOrphanStore(),
-            runtime.aggregateSequenceStore()
+            runtime.aggregateSequenceStore(),
+            businessProjectionUpdater
         );
         BusEventIntakeService busEventIntakeService = new BusEventIntakeService(intakeService);
         BackOfficeHttpServer server = new BackOfficeHttpServer(
