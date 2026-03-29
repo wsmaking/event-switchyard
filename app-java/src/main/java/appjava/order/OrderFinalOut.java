@@ -9,6 +9,7 @@ public record OrderFinalOut(
     OrderView order,
     AccountOverview accountOverview,
     BalanceEffectView balanceEffect,
+    ExecutionQualityView executionQuality,
     List<ReservationView> reservations,
     List<FillView> fills,
     List<UiPosition> positions,

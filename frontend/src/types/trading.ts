@@ -73,6 +73,29 @@ export interface StockInfo {
   volume: number;
 }
 
+export interface BookLevel {
+  price: number;
+  quantity: number;
+}
+
+export interface MarketStructureSnapshot {
+  symbol: string;
+  symbolName: string;
+  venueState: string;
+  lastPrice: number;
+  bidPrice: number;
+  bidQuantity: number;
+  askPrice: number;
+  askQuantity: number;
+  midPrice: number;
+  spread: number;
+  spreadBps: number;
+  indicativeOpenPrice: number;
+  bids: BookLevel[];
+  asks: BookLevel[];
+  notes: string[];
+}
+
 export interface PricePoint {
   timestamp: number;
   price: number;
@@ -101,11 +124,28 @@ export interface OrderFinalOut {
   order: Order;
   accountOverview: AccountOverview;
   balanceEffect: BalanceEffect;
+  executionQuality: ExecutionQuality;
   reservations: Reservation[];
   fills: Fill[];
   positions: Position[];
   timeline: OrderTimelineEntry[];
   rawEvents: RawEvent[];
+}
+
+export interface ExecutionQuality {
+  benchmarkLabel: string;
+  venueState: string;
+  arrivalLastPrice: number;
+  arrivalBidPrice: number;
+  arrivalAskPrice: number;
+  arrivalMidPrice: number;
+  arrivalSpreadBps: number;
+  averageExecutionPrice: number | null;
+  fillRatePercent: number | null;
+  slippagePerShare: number | null;
+  slippageAmount: number | null;
+  slippageBps: number | null;
+  note: string;
 }
 
 export interface OrderTimelineEntry {

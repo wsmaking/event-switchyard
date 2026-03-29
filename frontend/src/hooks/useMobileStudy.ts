@@ -1,8 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { isLocalBundleRuntime, isMobileRuntime } from '../appBase';
-import { getOfflineOpsOverview, getOfflineOrderFinalOut, getOfflineOrders, runOfflineReplayScenario } from '../offline/mobileOfflineStore';
-import type { OpsOverview, Order, OrderFinalOut, OrderRequest } from '../types/trading';
+import {
+  getOfflineMarketStructure,
+  getOfflineOpsOverview,
+  getOfflineOrderFinalOut,
+  getOfflineOrders,
+  runOfflineReplayScenario,
+} from '../offline/mobileOfflineStore';
+import type { MarketStructureSnapshot, OpsOverview, Order, OrderFinalOut, OrderRequest } from '../types/trading';
 
 const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:8080' : '';
 
@@ -59,6 +65,19 @@ export function useMobileOpsOverview(orderId: string | null) {
       const query = orderId ? `?orderId=${encodeURIComponent(orderId)}` : '';
       return fetchJsonWithOfflineFallback<OpsOverview>(`/api/ops/overview${query}`, () => getOfflineOpsOverview(orderId));
     },
+    refetchInterval: 3000,
+  });
+}
+
+export function useMobileMarketStructure(symbol: string | null) {
+  return useQuery({
+    queryKey: ['mobileMarketStructure', symbol],
+    queryFn: () =>
+      fetchJsonWithOfflineFallback<MarketStructureSnapshot>(
+        `/api/market/${encodeURIComponent(symbol as string)}/structure`,
+        () => getOfflineMarketStructure(symbol as string)
+      ),
+    enabled: !!symbol,
     refetchInterval: 3000,
   });
 }

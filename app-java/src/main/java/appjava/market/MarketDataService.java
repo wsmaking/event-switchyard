@@ -66,6 +66,56 @@ public final class MarketDataService {
         return getStockInfo(symbol).currentPrice();
     }
 
+    public MarketStructureSnapshot getMarketStructure(String symbol) {
+        StockInfo stockInfo = getStockInfo(symbol);
+        SymbolSpec spec = specs.get(symbol);
+        double lastPrice = stockInfo.currentPrice();
+        double halfSpread = Math.max(spec.tickSize(), round2(spec.tickSize() * (1.0 + Math.abs(stockInfo.changePercent()) / 2.0)));
+        double bidPrice = applyTick(Math.max(spec.tickSize(), lastPrice - halfSpread), spec.tickSize());
+        double askPrice = applyTick(lastPrice + halfSpread, spec.tickSize());
+        if (askPrice <= bidPrice) {
+            askPrice = applyTick(bidPrice + spec.tickSize(), spec.tickSize());
+        }
+        double midPrice = round2((bidPrice + askPrice) / 2.0);
+        double spread = round2(askPrice - bidPrice);
+        double spreadBps = midPrice == 0.0 ? 0.0 : round2((spread / midPrice) * 10_000.0);
+        long baseDepth = Math.max(100L, stockInfo.volume() / 1_200L);
+        List<BookLevel> bids = List.of(
+            new BookLevel(bidPrice, baseDepth),
+            new BookLevel(applyTick(bidPrice - spec.tickSize(), spec.tickSize()), Math.max(50L, Math.round(baseDepth * 0.82))),
+            new BookLevel(applyTick(bidPrice - spec.tickSize() * 2.0, spec.tickSize()), Math.max(50L, Math.round(baseDepth * 0.67)))
+        );
+        List<BookLevel> asks = List.of(
+            new BookLevel(askPrice, Math.max(50L, Math.round(baseDepth * 0.95))),
+            new BookLevel(applyTick(askPrice + spec.tickSize(), spec.tickSize()), Math.max(50L, Math.round(baseDepth * 0.76))),
+            new BookLevel(applyTick(askPrice + spec.tickSize() * 2.0, spec.tickSize()), Math.max(50L, Math.round(baseDepth * 0.61)))
+        );
+        String venueState = determineVenueState(stockInfo, spec);
+        double indicativeOpenPrice = round2(applyTick(midPrice + (spec.tickSize() * 2.0), spec.tickSize()));
+        List<String> notes = switch (venueState) {
+            case "AUCTION_WATCH" -> List.of("寄り付き・引け前後の板寄せを意識する局面", "指値の価格保護と約定待ちの説明が重要");
+            case "HALT_WATCH" -> List.of("値動きが大きく、約定より状態説明が先に必要な局面", "再送より先に venue 状態確認を優先");
+            default -> List.of("通常の連続約定フェーズ", "spread と queue priority を見る基本局面");
+        };
+        return new MarketStructureSnapshot(
+            symbol,
+            stockInfo.name(),
+            venueState,
+            round2(lastPrice),
+            round2(bidPrice),
+            bids.getFirst().quantity(),
+            round2(askPrice),
+            asks.getFirst().quantity(),
+            midPrice,
+            spread,
+            spreadBps,
+            indicativeOpenPrice,
+            bids,
+            asks,
+            notes
+        );
+    }
+
     private void tickAll() {
         specs.forEach((symbol, spec) -> latest.compute(symbol, (key, previous) -> next(symbol, spec, previous)));
     }
@@ -118,6 +168,17 @@ public final class MarketDataService {
 
     private static double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static String determineVenueState(StockInfo stockInfo, SymbolSpec spec) {
+        double absoluteMove = Math.abs(stockInfo.changePercent());
+        if (absoluteMove >= spec.maxMovePercent() * 0.75) {
+            return "HALT_WATCH";
+        }
+        if (absoluteMove >= spec.maxMovePercent() * 0.45) {
+            return "AUCTION_WATCH";
+        }
+        return "CONTINUOUS";
     }
 
     private record SymbolSpec(String name, double basePrice, double tickSize, double volatilityBps, double maxMovePercent) {

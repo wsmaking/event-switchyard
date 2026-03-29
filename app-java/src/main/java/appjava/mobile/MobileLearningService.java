@@ -91,6 +91,7 @@ public final class MobileLearningService {
         String scenarioBody = recentOrders.isEmpty()
             ? "outbox / audit / sequence の判断を短時間で反復"
             : recentOrders.getFirst().symbol() + " の final-out から reservation と台帳を追跡";
+        String marketRoute = recentOrders.isEmpty() ? "/mobile/market/7203" : "/mobile/market/" + recentOrders.getFirst().symbol();
 
         return new MobileHomeResponse(
             accountId,
@@ -114,10 +115,11 @@ public final class MobileLearningService {
             bookmarks,
             List.of(
                 new QuickAction("注文フローを見る", recentOrders.isEmpty() ? "/mobile/orders" : "/mobile/orders/" + recentOrders.getFirst().id(), "注文"),
+                new QuickAction("市場構造を見る", marketRoute, "市場"),
                 new QuickAction("台帳フローを見る", "/mobile/ledger", "台帳"),
                 new QuickAction("障害導線を見る", "/mobile/architecture", "運用"),
                 new QuickAction("設計カードに入る", "/mobile/cards", "設計"),
-                new QuickAction("risk sandbox を開く", "/mobile/risk", "リスク"),
+                new QuickAction("リスクを見る", "/mobile/risk", "リスク"),
                 new QuickAction("説明ドリルを開く", "/mobile/drills", "反復")
             ),
             progressSummary(progress, cardSummaries, drillSummaries)
@@ -1113,6 +1115,138 @@ public final class MobileLearningService {
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/mobile/MobileLearningService.java"
                 ),
                 List.of("exercise", "American option", "assignment")
+            ),
+            new LearningCard(
+                "market-structure-reading",
+                "板と spread をどう読むか",
+                "市場構造",
+                "medium",
+                "注文を出す前に、板と spread から何を読むべきか。",
+                "bid / ask の差、先頭数量、venue state を見て、今ぶつけるコストと板の薄さを判断する。",
+                "最終値だけでは execution quality は読めない。bid / ask、mid、spread、先頭数量、venue state を見ることで、今すぐぶつけるとどれだけ不利な約定になり得るかを説明できる。特に partial fill や一段上の板へ食い込む状況では、表示価格と平均約定価格がずれる。",
+                "利用者は「今いくらで約定しそうか」を知りたいが、システム側はそれを top-of-book と depth から近似して説明する必要がある。spread が広い、板が薄い、auction / halt 監視状態という条件が重なると、待つか刻むかの判断が変わる。",
+                "最終値ではなく bid / ask / spread / 先頭数量を先に見る。注文数量が先頭数量を超えるなら、平均約定単価の悪化を前提に話す。",
+                List.of(
+                    "market data から bid / ask / mid / spread を作る",
+                    "注文数量と先頭数量を比べ、板を何段食うかを推定する",
+                    "auction / halt 監視状態では execution quality の前提が変わる"
+                ),
+                List.of(
+                    "最終値だけを見ると、taker side のコスト説明が抜ける",
+                    "板 depth を持つと説明は増えるが、slippage の理由まで話せる"
+                ),
+                List.of(
+                    "spread が広いのに成行を勧めていないか",
+                    "表示数量より注文数量が大きい場合に、平均約定単価悪化を見落としていないか"
+                ),
+                List.of(
+                    new ImplementationAnchor(
+                        "市場構造 API",
+                        "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/MarketApiHandler.java",
+                        "top-of-book と depth を返す入口",
+                        null
+                    ),
+                    new ImplementationAnchor(
+                        "教育用板生成",
+                        "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
+                        "bid / ask / spread / venue state を組み立てる場所",
+                        null
+                    )
+                ),
+                List.of("/mobile/market"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/MarketApiHandler.java",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java"
+                ),
+                List.of("spread", "board depth", "venue state")
+            ),
+            new LearningCard(
+                "arrival-benchmark",
+                "arrival benchmark を固定する理由",
+                "市場構造",
+                "hard",
+                "なぜ execution quality は current price ではなく submit 時点の benchmark で読むべきか。",
+                "後から見た current price で説明すると、注文時の判断と実際の執行品質が混ざるから。",
+                "execution quality を説明するときは、submit 時点の bid / ask / mid を arrival benchmark として固定する必要がある。後で画面を開いた current price は、その時点の市場を示すだけで、注文判断時の条件ではない。benchmark を固定しないと、良い execution を悪く見せたり、悪い execution を相場変動で誤魔化したりする。",
+                "利用者からは「なぜこの価格で約定したのか」と聞かれる。ここで current price を持ち出すと会話がずれる。注文を送った瞬間の市場条件と、fill の結果との差を見せることが重要。",
+                "submit 時点の bid / ask / mid / spread を orderId 単位で保存する。評価時に current price を benchmark に使い回さない。",
+                List.of(
+                    "注文送信時に arrival benchmark を保存する",
+                    "fill 到着後に average execution price と比較する",
+                    "directional slippage を売買方向込みで算出する"
+                ),
+                List.of(
+                    "benchmark を固定すると保存対象が増える",
+                    "保存しないと execution の良し悪しが時価変動に埋もれる"
+                ),
+                List.of(
+                    "arrival benchmark が無い注文を current price で雑に埋めていないか",
+                    "sell と buy で slippage の向きが反転する点を UI が取り違えていないか"
+                ),
+                List.of(
+                    new ImplementationAnchor(
+                        "arrival benchmark store",
+                        "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java",
+                        "submit 時点の bid / ask / mid を orderId ごとに保持する",
+                        null
+                    ),
+                    new ImplementationAnchor(
+                        "執行品質の集約",
+                        "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java",
+                        "fills と benchmark から slippage / fill rate を返す",
+                        null
+                    )
+                ),
+                List.of("/mobile/market", "/mobile/orders"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java"
+                ),
+                List.of("arrival benchmark", "execution quality", "slippage")
+            ),
+            new LearningCard(
+                "auction-halt-watch",
+                "auction / halt 監視で説明が変わる理由",
+                "市場構造",
+                "hard",
+                "auction や halt 監視状態では、なぜ通常時と同じ説明が通らないのか。",
+                "連続売買の前提が崩れ、板の見え方と execution quality の意味が変わるから。",
+                "auction では continuous matching ではなく板寄せで価格形成される。halt 監視では売買停止や特別気配に近い状況を意識する必要がある。そのため、表示されている板と実際の execution 可能性を同じ感覚で読むと危ない。system 側でも venue state を明示し、通常時と説明を分ける必要がある。",
+                "利用者には『板が見えているのに、なぜその価格で今すぐ約定しないのか』という疑問が生じやすい。ここで venue state を無視すると、画面と業務説明が噛み合わない。",
+                "連続売買か、それ以外の監視状態かを先に伝える。通常時の spread や depth の読み方を、そのまま auction / halt に持ち込まない。",
+                List.of(
+                    "market structure 生成時に venue state を判定する",
+                    "UI では state ごとに説明文を切り替える",
+                    "execution quality の説明も通常時と同じ口調にしない"
+                ),
+                List.of(
+                    "state を増やすと UI は複雑になる",
+                    "state を持たないと特殊局面の説明が常に薄くなる"
+                ),
+                List.of(
+                    "連続売買前提の slippage 説明を auction 監視でもそのまま使っていないか",
+                    "halt 監視時に『今すぐ成行で行けばよい』と誤って言っていないか"
+                ),
+                List.of(
+                    new ImplementationAnchor(
+                        "venue state 判定",
+                        "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
+                        "価格変動率から AUCTION_WATCH / HALT_WATCH を出している",
+                        null
+                    ),
+                    new ImplementationAnchor(
+                        "市場構造画面",
+                        "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileMarketStructureView.tsx",
+                        "state ごとに読む順番と注意点を切り替えている",
+                        null
+                    )
+                ),
+                List.of("/mobile/market"),
+                List.of(
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
+                    "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileMarketStructureView.tsx"
+                ),
+                List.of("auction", "halt", "venue state")
             )
         );
     }
@@ -1207,6 +1341,22 @@ public final class MobileLearningService {
                 "fill、reservation release、cash delta、position 更新、realized / unrealized P&L のつながりを順に説明する。",
                 List.of("/mobile/ledger"),
                 List.of("ledger", "P&L", "reservation release")
+            ),
+            new ExplanationDrill(
+                "drill-market-structure",
+                "板と spread を 60 秒で説明する",
+                "市場構造",
+                "bid / ask、spread、先頭数量、venue state から、なぜ今ぶつけるとコストが出るかを説明する。",
+                List.of("/mobile/market"),
+                List.of("spread", "book depth", "venue state")
+            ),
+            new ExplanationDrill(
+                "drill-execution-quality",
+                "arrival benchmark と slippage を説明する",
+                "市場構造",
+                "submit 時点の benchmark を固定する理由と、average execution price / fill rate / directional slippage の意味を説明する。",
+                List.of("/mobile/market", "/mobile/orders"),
+                List.of("arrival benchmark", "fill rate", "slippage")
             )
         );
     }
@@ -1286,13 +1436,59 @@ public final class MobileLearningService {
         String question,
         String shortAnswer,
         String longAnswer,
+        String businessContext,
+        String decisionRule,
+        List<String> eventFlow,
+        List<String> tradeoffs,
+        List<String> operatorChecks,
+        List<ImplementationAnchor> implementationAnchors,
         List<String> routes,
         List<String> codeReferences,
         List<String> keywords
     ) {
+        public LearningCard(
+            String id,
+            String title,
+            String category,
+            String difficulty,
+            String question,
+            String shortAnswer,
+            String longAnswer,
+            List<String> routes,
+            List<String> codeReferences,
+            List<String> keywords
+        ) {
+            this(
+                id,
+                title,
+                category,
+                difficulty,
+                question,
+                shortAnswer,
+                longAnswer,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                routes,
+                codeReferences,
+                keywords
+            );
+        }
+
         public String route() {
             return routes.isEmpty() ? "/mobile/cards/" + id : routes.getFirst();
         }
+    }
+
+    public record ImplementationAnchor(
+        String title,
+        String path,
+        String focus,
+        String excerpt
+    ) {
     }
 
     public record CardProgress(

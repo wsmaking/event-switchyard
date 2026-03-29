@@ -104,6 +104,7 @@ export function MobileArchitectureView({ home, orderId }: MobileArchitectureView
             `BackOffice reconcile: ${opsOverview.backOfficeReconcile?.issues?.length ? opsOverview.backOfficeReconcile.issues.join(' / ') : 'issue なし'}`,
             `OMS processed ${opsOverview.omsStats?.processed ?? 0} / duplicates ${opsOverview.omsStats?.duplicates ?? 0} / replays ${opsOverview.omsStats?.replays ?? 0}`,
             `BackOffice ledger ${opsOverview.backOfficeStats?.ledgerEntryCount ?? 0} / duplicates ${opsOverview.backOfficeStats?.duplicates ?? 0} / replays ${opsOverview.backOfficeStats?.replays ?? 0}`,
+            '市場構造と執行品質は app-java の market / final-out 集約で見せ、hot path に押し込まない。',
             home?.mainlineStatus.summary ?? 'mainline status は未取得',
           ]}
         />
@@ -160,7 +161,17 @@ function buildArchitectureAnchors(): ArchitectureAnchor[] {
     {
       title: '利用者向け最終表示',
       path: '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
-      focus: 'final-out を返す app-java の入口。注文状態と台帳結果をどう束ねるかを見る。',
+      focus: 'final-out を返す app-java の入口。注文状態、台帳結果、執行品質をどう束ねるかを見る。',
+    },
+    {
+      title: '市場構造 API',
+      path: '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/MarketApiHandler.java',
+      focus: 'bid / ask / spread / venue state を mobile へ返す入口。注文説明と市場説明を分ける理由が見える。',
+    },
+    {
+      title: 'arrival benchmark 保存',
+      path: '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java',
+      focus: '送信時点の到着時基準を orderId 単位で残し、後から現在価格で説明を塗り替えない。',
     },
     {
       title: 'OMS の順序制御',

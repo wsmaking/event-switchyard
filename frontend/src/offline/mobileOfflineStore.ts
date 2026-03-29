@@ -17,9 +17,9 @@ import type {
   MobileImplementationAnchor,
   MobileRiskScenario,
 } from '../types/mobile';
-import { OrderSide, OrderStatus, OrderType, TimeInForce, type AccountOverview, type BalanceEffect, type BusStats, type Fill, type LedgerEntry, type OpsOverview, type Order, type OrderFinalOut, type OrderRequest, type OrderTimelineEntry, type OmsStats, type OmsReconcile, type BackOfficeStats, type BackOfficeReconcile, type PendingOrphanEntry, type DeadLetterEntry, type Position, type RawEvent, type Reservation } from '../types/trading';
+import { OrderSide, OrderStatus, OrderType, TimeInForce, type AccountOverview, type BalanceEffect, type BookLevel, type BusStats, type ExecutionQuality, type Fill, type LedgerEntry, type MarketStructureSnapshot, type OpsOverview, type Order, type OrderFinalOut, type OrderRequest, type OrderTimelineEntry, type OmsStats, type OmsReconcile, type BackOfficeStats, type BackOfficeReconcile, type PendingOrphanEntry, type DeadLetterEntry, type Position, type RawEvent, type Reservation } from '../types/trading';
 
-const STORAGE_KEY = 'switchyard-mobile-offline-v2';
+const STORAGE_KEY = 'switchyard-mobile-offline-v3';
 const ACCOUNT_ID = 'demo-001';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -568,6 +568,141 @@ const CARD_DEFINITIONS: OfflineCard[] = [
       ),
     ],
   },
+  {
+    id: 'market-structure-reading',
+    title: '板と spread をどう読むか',
+    category: '市場構造',
+    difficulty: 'medium',
+    question: '注文を出す前に、板と spread から何を読むべきか。',
+    shortAnswer: 'bid / ask の差、先頭数量、venue state を見て、今ぶつけるコストと板の薄さを判断する。',
+    longAnswer:
+      '最終値だけでは execution quality は読めない。bid / ask、mid、spread、先頭数量、venue state を見ることで、今すぐぶつけるとどれだけ不利な約定になり得るかを説明できる。特に partial fill や一段上の板へ食い込む状況では、表示価格と平均約定価格がずれる。',
+    businessContext:
+      '利用者は「今いくらで約定しそうか」を知りたいが、システム側はそれを top-of-book と depth から近似して説明する必要がある。spread が広い、板が薄い、auction / halt 監視状態という条件が重なると、待つか刻むかの判断が変わる。',
+    decisionRule:
+      '最終値ではなく bid / ask / spread / 先頭数量を先に見る。注文数量が先頭数量を超えるなら、平均約定単価の悪化を前提に話す。',
+    eventFlow: [
+      'market data から bid / ask / mid / spread を作る',
+      '注文数量と先頭数量を比べ、板を何段食うかを推定する',
+      'auction / halt 監視状態では execution quality の前提が変わる',
+    ],
+    tradeoffs: [
+      '最終値だけを見ると、taker side のコスト説明が抜ける',
+      '板 depth を持つと説明は増えるが、slippage の理由まで話せる',
+    ],
+    operatorChecks: [
+      'spread が広いのに成行を勧めていないか',
+      '表示数量より注文数量が大きい場合に、平均約定単価悪化を見落としていないか',
+    ],
+    routes: ['/mobile/market'],
+    codeReferences: [
+      '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/MarketApiHandler.java',
+      '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java',
+    ],
+    keywords: ['spread', 'board depth', 'venue state'],
+    implementationAnchors: [
+      implementationAnchor(
+        '市場構造 API',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/MarketApiHandler.java',
+        'top-of-book と depth を返す入口'
+      ),
+      implementationAnchor(
+        '教育用板生成',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java',
+        'bid / ask / spread / venue state を組み立てる場所'
+      ),
+    ],
+  },
+  {
+    id: 'arrival-benchmark',
+    title: 'arrival benchmark を固定する理由',
+    category: '市場構造',
+    difficulty: 'hard',
+    question: 'なぜ execution quality は current price ではなく submit 時点の benchmark で読むべきか。',
+    shortAnswer: '後から見た current price で説明すると、注文時の判断と実際の執行品質が混ざるから。',
+    longAnswer:
+      'execution quality を説明するときは、submit 時点の bid / ask / mid を arrival benchmark として固定する必要がある。後で画面を開いた current price は、その時点の市場を示すだけで、注文判断時の条件ではない。benchmark を固定しないと、良い execution を悪く見せたり、悪い execution を相場変動で誤魔化したりする。',
+    businessContext:
+      '利用者からは「なぜこの価格で約定したのか」と聞かれる。ここで current price を持ち出すと会話がずれる。注文を送った瞬間の市場条件と、fill の結果との差を見せることが重要。',
+    decisionRule:
+      'submit 時点の bid / ask / mid / spread を orderId 単位で保存する。評価時に current price を benchmark に使い回さない。',
+    eventFlow: [
+      '注文送信時に arrival benchmark を保存する',
+      'fill 到着後に average execution price と比較する',
+      'directional slippage を売買方向込みで算出する',
+    ],
+    tradeoffs: [
+      'benchmark を固定すると保存対象が増える',
+      '保存しないと execution の良し悪しが時価変動に埋もれる',
+    ],
+    operatorChecks: [
+      'arrival benchmark が無い注文を current price で雑に埋めていないか',
+      'sell と buy で slippage の向きが反転する点を UI が取り違えていないか',
+    ],
+    routes: ['/mobile/market', '/mobile/orders'],
+    codeReferences: [
+      '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java',
+      '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
+    ],
+    keywords: ['arrival benchmark', 'execution quality', 'slippage'],
+    implementationAnchors: [
+      implementationAnchor(
+        'arrival benchmark store',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/order/ExecutionBenchmarkStore.java',
+        'submit 時点の bid / ask / mid を orderId ごとに保持する'
+      ),
+      implementationAnchor(
+        '執行品質の集約',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/http/OrderApiHandler.java',
+        'fills と benchmark から slippage / fill rate を返す'
+      ),
+    ],
+  },
+  {
+    id: 'auction-halt-watch',
+    title: 'auction / halt 監視で説明が変わる理由',
+    category: '市場構造',
+    difficulty: 'hard',
+    question: 'auction や halt 監視状態では、なぜ通常時と同じ説明が通らないのか。',
+    shortAnswer: '連続売買の前提が崩れ、板の見え方と execution quality の意味が変わるから。',
+    longAnswer:
+      'auction では continuous matching ではなく板寄せで価格形成される。halt 監視では売買停止や特別気配に近い状況を意識する必要がある。そのため、表示されている板と実際の execution 可能性を同じ感覚で読むと危ない。system 側でも venue state を明示し、通常時と説明を分ける必要がある。',
+    businessContext:
+      '利用者には「板が見えているのに、なぜその価格で今すぐ約定しないのか」という疑問が生じやすい。ここで venue state を無視すると、画面と業務説明が噛み合わない。',
+    decisionRule:
+      '連続売買か、それ以外の監視状態かを先に伝える。通常時の spread や depth の読み方を、そのまま auction / halt に持ち込まない。',
+    eventFlow: [
+      'market structure 生成時に venue state を判定する',
+      'UI では state ごとに説明文を切り替える',
+      'execution quality の説明も通常時と同じ口調にしない',
+    ],
+    tradeoffs: [
+      'state を増やすと UI は複雑になる',
+      'state を持たないと特殊局面の説明が常に薄くなる',
+    ],
+    operatorChecks: [
+      '連続売買前提の slippage 説明を auction 監視でもそのまま使っていないか',
+      'halt 監視時に「今すぐ成行で行けばよい」と誤って言っていないか',
+    ],
+    routes: ['/mobile/market'],
+    codeReferences: [
+      '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java',
+      '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileMarketStructureView.tsx',
+    ],
+    keywords: ['auction', 'halt', 'venue state'],
+    implementationAnchors: [
+      implementationAnchor(
+        'venue state 判定',
+        '/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java',
+        '価格変動率から AUCTION_WATCH / HALT_WATCH を出している'
+      ),
+      implementationAnchor(
+        '市場構造画面',
+        '/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileMarketStructureView.tsx',
+        'state ごとに読む順番と注意点を切り替えている'
+      ),
+    ],
+  },
 ];
 
 const DRILL_DEFINITIONS: OfflineDrill[] = [
@@ -618,6 +753,22 @@ const DRILL_DEFINITIONS: OfflineDrill[] = [
     prompt: 'equities / FX / rates / credit の主要 risk driver と system boundary の違いを説明する。',
     routes: ['/mobile/cards'],
     keywords: ['equities', 'FX', 'rates', 'credit'],
+  },
+  {
+    id: 'drill-market-structure',
+    title: '板と spread を 60 秒で説明する',
+    category: '市場構造',
+    prompt: 'bid / ask、spread、先頭数量、venue state から、なぜ今ぶつけるとコストが出るかを説明する。',
+    routes: ['/mobile/market'],
+    keywords: ['spread', 'book depth', 'venue state'],
+  },
+  {
+    id: 'drill-execution-quality',
+    title: 'arrival benchmark と slippage を説明する',
+    category: '市場構造',
+    prompt: 'submit 時点の benchmark を固定する理由と、average execution price / fill rate / directional slippage の意味を説明する。',
+    routes: ['/mobile/market', '/mobile/orders'],
+    keywords: ['arrival benchmark', 'fill rate', 'slippage'],
   },
 ];
 
@@ -727,11 +878,12 @@ export function getOfflineMobileHome(): MobileHome {
     bookmarks,
     quickActions: [
       { label: '注文フローを見る', route: recentOrders[0] ? `/mobile/orders/${recentOrders[0].orderId}` : '/mobile/orders', tone: '注文' },
+      { label: '市場構造を見る', route: recentOrders[0] ? `/mobile/market/${recentOrders[0].symbol}` : '/mobile/market/7203', tone: '市場' },
       { label: '台帳フローを見る', route: '/mobile/ledger', tone: '台帳' },
       { label: '構成を見る', route: '/mobile/architecture', tone: '運用' },
       { label: '設計カード', route: '/mobile/cards', tone: '設計' },
       { label: '説明ドリル', route: '/mobile/drills', tone: '反復' },
-      { label: 'risk sandbox', route: '/mobile/risk', tone: 'リスク' },
+      { label: 'リスクを見る', route: '/mobile/risk', tone: 'リスク' },
     ],
     progress: {
       anchor,
@@ -868,6 +1020,10 @@ export function applyOfflineMobileDrillAttempt(request: MobileDrillAttemptReques
 
 export function getOfflineMobileRiskScenarios(): MobileRiskScenario[] {
   return [...RISK_SCENARIOS];
+}
+
+export function getOfflineMarketStructure(symbol: string): MarketStructureSnapshot {
+  return buildOfflineMarketStructure(symbol);
 }
 
 export function evaluateOfflineMobileRisk(request: MobileRiskEvaluateRequest): MobileRiskEvaluation {
@@ -1023,7 +1179,7 @@ function readStorage(): OfflineState | null {
   }
   try {
     const parsed = JSON.parse(raw) as OfflineState;
-    if (parsed.version !== 2) {
+    if (parsed.version !== 3) {
       return null;
     }
     return parsed;
@@ -1122,7 +1278,7 @@ function createSeedState(): OfflineState {
   ];
 
   const state: OfflineState = {
-    version: 2,
+    version: 3,
     accountId: ACCOUNT_ID,
     updatedAt: now,
     anchor: null,
@@ -1556,10 +1712,12 @@ function buildReplayBundle(
   const timeline = createTimeline(order, status, executionQuantity, filledPrice, remainingQuantity, reserveAmount);
   const rawEvents = createRawEvents(orderId, timeline);
   const ledgerEntries = createLedgerEntries(order, balanceEffect, fills, reservations, rawEvents);
+  const executionQuality = createExecutionQuality(order, fills);
   const finalOut: OrderFinalOut = {
     order,
     accountOverview: mutateState ? accountAfter : snapshotAccountForScenario(status, existingAccount, accountAfter),
     balanceEffect,
+    executionQuality,
     reservations,
     fills,
     positions: mutateState ? positionsAfter : snapshotPositionsForScenario(status, existingPositions, positionsAfter),
@@ -1951,6 +2109,51 @@ function currentPrice(symbol: string): number {
   return SYMBOLS[symbol as keyof typeof SYMBOLS]?.price ?? 1000;
 }
 
+function buildOfflineMarketStructure(symbol: string): MarketStructureSnapshot {
+  const spec = SYMBOLS[symbol as keyof typeof SYMBOLS] ?? { name: symbol, price: 1000, phase: 0 };
+  const lastPrice = currentPrice(symbol);
+  const tick = spec.price >= 10_000 ? 5 : spec.price >= 5_000 ? 1 : 0.5;
+  const halfSpread = round2(Math.max(tick, tick * (1 + Math.abs(Math.sin(spec.phase)) * 2.1)));
+  const bidPrice = round2(lastPrice - halfSpread);
+  const askPrice = round2(lastPrice + halfSpread);
+  const midPrice = round2((bidPrice + askPrice) / 2);
+  const spread = round2(askPrice - bidPrice);
+  const spreadBps = midPrice === 0 ? 0 : round2((spread / midPrice) * 10_000);
+  const venueState = Math.abs(Math.cos(spec.phase)) > 0.82 ? 'AUCTION_WATCH' : 'CONTINUOUS';
+  const bidBase = Math.round(900 + Math.abs(Math.sin(spec.phase)) * 700);
+  const askBase = Math.round(820 + Math.abs(Math.cos(spec.phase)) * 620);
+  const bids: BookLevel[] = [
+    { price: bidPrice, quantity: bidBase },
+    { price: round2(bidPrice - tick), quantity: Math.round(bidBase * 0.82) },
+    { price: round2(bidPrice - tick * 2), quantity: Math.round(bidBase * 0.67) },
+  ];
+  const asks: BookLevel[] = [
+    { price: askPrice, quantity: askBase },
+    { price: round2(askPrice + tick), quantity: Math.round(askBase * 0.8) },
+    { price: round2(askPrice + tick * 2), quantity: Math.round(askBase * 0.64) },
+  ];
+  return {
+    symbol,
+    symbolName: symbolName(symbol),
+    venueState,
+    lastPrice,
+    bidPrice,
+    bidQuantity: bids[0].quantity,
+    askPrice,
+    askQuantity: asks[0].quantity,
+    midPrice,
+    spread,
+    spreadBps,
+    indicativeOpenPrice: round2(midPrice + tick * 2),
+    bids,
+    asks,
+    notes:
+      venueState === 'AUCTION_WATCH'
+        ? ['板寄せや再開直前を想定した教育用 snapshot', 'price protection と約定待ちを同時に考える局面']
+        : ['通常の連続約定を想定した教育用 snapshot', 'spread と queue priority をまず読む局面'],
+  };
+}
+
 function symbolName(symbol: string): string {
   return SYMBOLS[symbol as keyof typeof SYMBOLS]?.name ?? symbol;
 }
@@ -2002,6 +2205,50 @@ function rejectionReason(status: OrderStatus, scenarioName: string): string | nu
     return 'RISK_LIMIT_EXCEEDED';
   }
   return 'SCENARIO_REJECTED';
+}
+
+function createExecutionQuality(order: Order, fills: Fill[]): ExecutionQuality {
+  const structure = buildOfflineMarketStructure(order.symbol);
+  const fillRatePercent = order.quantity === 0 ? 0 : round2(((order.filledQuantity ?? 0) * 100) / order.quantity);
+  if (fills.length === 0) {
+    return {
+      benchmarkLabel: 'arrival-mid',
+      venueState: structure.venueState,
+      arrivalLastPrice: structure.lastPrice,
+      arrivalBidPrice: structure.bidPrice,
+      arrivalAskPrice: structure.askPrice,
+      arrivalMidPrice: structure.midPrice,
+      arrivalSpreadBps: structure.spreadBps,
+      averageExecutionPrice: null,
+      fillRatePercent,
+      slippagePerShare: null,
+      slippageAmount: null,
+      slippageBps: null,
+      note: 'まだ fill が無いため、到着時基準と spread のみを表示',
+    };
+  }
+  const totalQuantity = fills.reduce((total, fill) => total + fill.quantity, 0);
+  const totalNotional = fills.reduce((total, fill) => total + fill.notional, 0);
+  const averageExecutionPrice = totalQuantity === 0 ? structure.midPrice : round2(totalNotional / totalQuantity);
+  const directionalSlippagePerShare =
+    order.side === OrderSide.SELL ? round2(structure.midPrice - averageExecutionPrice) : round2(averageExecutionPrice - structure.midPrice);
+  const directionalSlippageAmount = round2(directionalSlippagePerShare * totalQuantity);
+  const directionalSlippageBps = structure.midPrice === 0 ? 0 : round2((directionalSlippagePerShare / structure.midPrice) * 10_000);
+  return {
+    benchmarkLabel: 'arrival-mid',
+    venueState: structure.venueState,
+    arrivalLastPrice: structure.lastPrice,
+    arrivalBidPrice: structure.bidPrice,
+    arrivalAskPrice: structure.askPrice,
+    arrivalMidPrice: structure.midPrice,
+    arrivalSpreadBps: structure.spreadBps,
+    averageExecutionPrice,
+    fillRatePercent,
+    slippagePerShare: directionalSlippagePerShare,
+    slippageAmount: directionalSlippageAmount,
+    slippageBps: directionalSlippageBps,
+    note: directionalSlippagePerShare <= 0 ? '到着時基準対比では改善側の執行' : '到着時基準対比ではコスト側の執行',
+  };
 }
 
 function cumulativeNormal(value: number): number {

@@ -5,6 +5,7 @@ import appjava.clients.OmsClient;
 import appjava.demo.ReplayScenarioService;
 import appjava.market.MarketDataService;
 import appjava.mobile.MobileLearningService;
+import appjava.order.ExecutionBenchmarkStore;
 import appjava.order.OrderService;
 import com.sun.net.httpserver.HttpServer;
 
@@ -21,6 +22,7 @@ public final class AppHttpServer {
     private final BackOfficeClient backOfficeClient;
     private final OmsClient omsClient;
     private final OrderService orderService;
+    private final ExecutionBenchmarkStore executionBenchmarkStore;
     private final ReplayScenarioService replayScenarioService;
     private final MobileLearningService mobileLearningService;
     private final Path frontendDistDir;
@@ -33,6 +35,7 @@ public final class AppHttpServer {
         BackOfficeClient backOfficeClient,
         OmsClient omsClient,
         OrderService orderService,
+        ExecutionBenchmarkStore executionBenchmarkStore,
         ReplayScenarioService replayScenarioService,
         MobileLearningService mobileLearningService,
         Path frontendDistDir
@@ -44,6 +47,7 @@ public final class AppHttpServer {
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
         this.orderService = orderService;
+        this.executionBenchmarkStore = executionBenchmarkStore;
         this.replayScenarioService = replayScenarioService;
         this.mobileLearningService = mobileLearningService;
         this.frontendDistDir = frontendDistDir;
@@ -54,7 +58,7 @@ public final class AppHttpServer {
         server.createContext("/health", new JsonHttpHandler(exchange ->
             JsonHttpHandler.JsonResponse.ok(new HealthResponse("UP", "app-java"))
         ));
-        server.createContext("/api/orders", new OrderApiHandler(accountId, marketDataService, backOfficeClient, omsClient, orderService));
+        server.createContext("/api/orders", new OrderApiHandler(accountId, marketDataService, backOfficeClient, omsClient, orderService, executionBenchmarkStore));
         server.createContext("/api/positions", new PositionApiHandler(accountId, marketDataService, backOfficeClient));
         server.createContext("/api/market", new MarketApiHandler(marketDataService));
         server.createContext("/api/accounts", new AccountApiHandler(backOfficeClient));

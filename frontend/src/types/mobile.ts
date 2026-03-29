@@ -236,8 +236,9 @@ export interface MobileRiskEvaluateRequest {
 }
 
 export interface MobileRouteState {
-  section: 'home' | 'orders' | 'ledger' | 'architecture' | 'cards' | 'drills' | 'risk';
+  section: 'home' | 'orders' | 'market' | 'ledger' | 'architecture' | 'cards' | 'drills' | 'risk';
   orderId: string | null;
+  symbol: string | null;
   cardId: string | null;
   drillId: string | null;
 }

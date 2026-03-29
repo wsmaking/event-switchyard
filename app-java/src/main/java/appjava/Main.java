@@ -9,6 +9,7 @@ import appjava.http.AppHttpServer;
 import appjava.market.MarketDataService;
 import appjava.mobile.MobileLearningService;
 import appjava.mobile.MobileProgressStore;
+import appjava.order.ExecutionBenchmarkStore;
 import appjava.order.OrderService;
 
 import java.nio.file.Path;
@@ -32,12 +33,14 @@ public final class Main {
         BackOfficeClient backOfficeClient = new BackOfficeClient(accountId);
         GatewayClient gatewayClient = new GatewayClient(accountId, JwtSigner.fromEnv());
         OmsClient omsClient = new OmsClient();
-        OrderService orderService = new OrderService(accountId, gatewayClient, omsClient);
+        ExecutionBenchmarkStore executionBenchmarkStore = new ExecutionBenchmarkStore();
+        OrderService orderService = new OrderService(accountId, gatewayClient, omsClient, marketDataService, executionBenchmarkStore);
         ReplayScenarioService replayScenarioService = new ReplayScenarioService(
             accountId,
             marketDataService,
             backOfficeClient,
-            omsClient
+            omsClient,
+            executionBenchmarkStore
         );
         MobileProgressStore mobileProgressStore = new MobileProgressStore(accountId);
         MobileLearningService mobileLearningService = new MobileLearningService(
@@ -56,6 +59,7 @@ public final class Main {
             backOfficeClient,
             omsClient,
             orderService,
+            executionBenchmarkStore,
             replayScenarioService,
             mobileLearningService,
             frontendDistDir

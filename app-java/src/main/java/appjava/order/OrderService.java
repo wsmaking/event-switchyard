@@ -7,6 +7,8 @@ import appjava.clients.GatewayClient.GatewayOrderSnapshot;
 import appjava.clients.GatewayClient.GatewaySubmitResult;
 import appjava.clients.OmsClient;
 import appjava.http.JsonHttpHandler;
+import appjava.market.MarketDataService;
+import appjava.market.MarketStructureSnapshot;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -18,11 +20,21 @@ public final class OrderService {
     private final String accountId;
     private final GatewayClient gatewayClient;
     private final OmsClient omsClient;
+    private final MarketDataService marketDataService;
+    private final ExecutionBenchmarkStore executionBenchmarkStore;
 
-    public OrderService(String accountId, GatewayClient gatewayClient, OmsClient omsClient) {
+    public OrderService(
+        String accountId,
+        GatewayClient gatewayClient,
+        OmsClient omsClient,
+        MarketDataService marketDataService,
+        ExecutionBenchmarkStore executionBenchmarkStore
+    ) {
         this.accountId = accountId;
         this.gatewayClient = gatewayClient;
         this.omsClient = omsClient;
+        this.marketDataService = marketDataService;
+        this.executionBenchmarkStore = executionBenchmarkStore;
     }
 
     public OrderView submit(OrderRequest request) {
@@ -30,6 +42,7 @@ public final class OrderService {
         long submittedAt = System.currentTimeMillis();
         long startNanos = System.nanoTime();
         String clientOrderId = UUID.randomUUID().toString();
+        MarketStructureSnapshot marketStructure = marketDataService.getMarketStructure(request.symbol());
 
         GatewaySubmitResult result = gatewayClient.submitOrder(
             new GatewayOrderRequest(
@@ -47,6 +60,18 @@ public final class OrderService {
 
         long executionTimeMs = Math.round((System.nanoTime() - startNanos) / 1_000_000.0);
         String orderId = result.orderId() != null ? result.orderId() : clientOrderId;
+        executionBenchmarkStore.put(new ExecutionBenchmark(
+            orderId,
+            request.symbol(),
+            submittedAt,
+            marketStructure.lastPrice(),
+            marketStructure.bidPrice(),
+            marketStructure.askPrice(),
+            marketStructure.midPrice(),
+            marketStructure.spreadBps(),
+            marketStructure.venueState(),
+            "arrival-mid"
+        ));
         OrderStatus status = result.accepted() ? OrderStatus.ACCEPTED : OrderStatus.REJECTED;
         OrderView order = new OrderView(
             orderId,
@@ -93,6 +118,7 @@ public final class OrderService {
 
     public void reset() {
         omsClient.reset();
+        executionBenchmarkStore.reset();
     }
 
     public List<OrderTimelineEntry> buildTimeline(OrderView order) {

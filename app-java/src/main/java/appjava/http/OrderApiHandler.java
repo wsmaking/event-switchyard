@@ -5,7 +5,11 @@ import appjava.clients.BackOfficeClient;
 import appjava.clients.BackOfficeClient.BackOfficePosition;
 import appjava.clients.OmsClient;
 import appjava.market.MarketDataService;
+import appjava.market.MarketStructureSnapshot;
 import appjava.order.BalanceEffectView;
+import appjava.order.ExecutionBenchmark;
+import appjava.order.ExecutionBenchmarkStore;
+import appjava.order.ExecutionQualityView;
 import appjava.order.FillView;
 import appjava.order.OrderFinalOut;
 import appjava.order.OrderEventView;
@@ -27,9 +31,10 @@ public final class OrderApiHandler extends JsonHttpHandler {
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
         OmsClient omsClient,
-        OrderService orderService
+        OrderService orderService,
+        ExecutionBenchmarkStore executionBenchmarkStore
     ) {
-        super(exchange -> route(exchange, accountId, marketDataService, backOfficeClient, omsClient, orderService));
+        super(exchange -> route(exchange, accountId, marketDataService, backOfficeClient, omsClient, orderService, executionBenchmarkStore));
     }
 
     private static JsonResponse route(
@@ -38,7 +43,8 @@ public final class OrderApiHandler extends JsonHttpHandler {
         MarketDataService marketDataService,
         BackOfficeClient backOfficeClient,
         OmsClient omsClient,
-        OrderService orderService
+        OrderService orderService,
+        ExecutionBenchmarkStore executionBenchmarkStore
     ) throws Exception {
         String path = exchange.getRequestURI().getPath();
         if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && "/api/orders".equals(path)) {
@@ -70,10 +76,17 @@ public final class OrderApiHandler extends JsonHttpHandler {
                     .map(position -> toUiPosition(position, marketDataService))
                     .toList();
                 List<OrderTimelineEntry> timeline = resolveTimeline(orderService, omsClient, order);
+                ExecutionQualityView executionQuality = buildExecutionQuality(
+                    order,
+                    fills,
+                    executionBenchmarkStore.get(order.id()).orElse(null),
+                    marketDataService.getMarketStructure(order.symbol())
+                );
                 OrderFinalOut finalOut = new OrderFinalOut(
                     order,
                     accountOverview,
                     balanceEffect(accountOverview),
+                    executionQuality,
                     reservations,
                     fills,
                     positions,
@@ -127,5 +140,67 @@ public final class OrderApiHandler extends JsonHttpHandler {
 
     private static double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static ExecutionQualityView buildExecutionQuality(
+        OrderView order,
+        List<FillView> fills,
+        ExecutionBenchmark benchmark,
+        MarketStructureSnapshot marketStructure
+    ) {
+        double arrivalLast = benchmark == null ? marketStructure.lastPrice() : benchmark.arrivalLastPrice();
+        double arrivalBid = benchmark == null ? marketStructure.bidPrice() : benchmark.arrivalBidPrice();
+        double arrivalAsk = benchmark == null ? marketStructure.askPrice() : benchmark.arrivalAskPrice();
+        double arrivalMid = benchmark == null ? marketStructure.midPrice() : benchmark.arrivalMidPrice();
+        double arrivalSpreadBps = benchmark == null ? marketStructure.spreadBps() : benchmark.arrivalSpreadBps();
+        String venueState = benchmark == null ? marketStructure.venueState() : benchmark.venueState();
+        String benchmarkLabel = benchmark == null ? "current-mid" : benchmark.benchmarkLabel();
+        double fillRatePercent = order.quantity() == 0 ? 0.0 : round2((order.filledQuantity() * 100.0) / order.quantity());
+
+        if (fills.isEmpty()) {
+            return new ExecutionQualityView(
+                benchmarkLabel,
+                venueState,
+                round2(arrivalLast),
+                round2(arrivalBid),
+                round2(arrivalAsk),
+                round2(arrivalMid),
+                round2(arrivalSpreadBps),
+                null,
+                fillRatePercent,
+                null,
+                null,
+                null,
+                "まだ fill が無いため、到着時基準と spread のみを表示"
+            );
+        }
+
+        long totalQuantity = fills.stream().mapToLong(FillView::quantity).sum();
+        long totalNotional = fills.stream().mapToLong(FillView::notional).sum();
+        double averageExecutionPrice = totalQuantity == 0 ? arrivalMid : round2(totalNotional / (double) totalQuantity);
+        double directionalSlippagePerShare = "SELL".equalsIgnoreCase(order.side())
+            ? arrivalMid - averageExecutionPrice
+            : averageExecutionPrice - arrivalMid;
+        double directionalSlippageAmount = round2(directionalSlippagePerShare * totalQuantity);
+        double directionalSlippageBps = arrivalMid == 0.0 ? 0.0 : round2((directionalSlippagePerShare / arrivalMid) * 10_000.0);
+        String note = directionalSlippagePerShare <= 0.0
+            ? "到着時基準対比では改善側の執行"
+            : "到着時基準対比ではコスト側の執行";
+
+        return new ExecutionQualityView(
+            benchmarkLabel,
+            venueState,
+            round2(arrivalLast),
+            round2(arrivalBid),
+            round2(arrivalAsk),
+            round2(arrivalMid),
+            round2(arrivalSpreadBps),
+            averageExecutionPrice,
+            fillRatePercent,
+            round2(directionalSlippagePerShare),
+            directionalSlippageAmount,
+            directionalSlippageBps,
+            note
+        );
     }
 }
