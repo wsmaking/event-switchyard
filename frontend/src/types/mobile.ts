@@ -525,6 +525,7 @@ export interface MobileAssetClassGuide {
   generatedAt: number;
   assetClasses: Array<{
     assetClass: string;
+    tradeInitiation: string;
     lifecycle: string;
     valuationDriver: string;
     settlementModel: string;
@@ -532,6 +533,8 @@ export interface MobileAssetClassGuide {
     operatorWatchpoints: string[];
     whatStaysCommon: string[];
     whatMustSpecialize: string[];
+    booksAndRecordsImplications: string[];
+    failureModes: string[];
   }>;
   boundaryPrinciples: string[];
   implementationAnchors: MobileImplementationAnchor[];
@@ -586,7 +589,23 @@ export interface MobileOperationsGuide {
     status: string;
     operatorActions: string[];
   }>;
+  venueSessions: Array<{
+    name: string;
+    state: string;
+    dropCopyState: string;
+    heartbeatAgeMs: number;
+    currentValue: string;
+    notes: string[];
+  }>;
+  rolloutState: {
+    state: string;
+    contractVersion: string;
+    replayReadiness: string;
+    consumerCompatibility: string;
+    checks: string[];
+  };
   operatorSequence: string[];
+  guidedSteps: string[];
   implementationAnchors: MobileImplementationAnchor[];
 }
 

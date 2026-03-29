@@ -42,6 +42,7 @@ export function MobileAssetClassView() {
           <div key={assetClass.assetClass} className="rounded-[24px] border border-white/10 bg-white/5 p-4">
             <div className="text-lg font-semibold text-white">{assetClass.assetClass}</div>
             <div className="mt-4 grid grid-cols-1 gap-3 text-sm">
+              <Panel label="Trade Initiation" value={assetClass.tradeInitiation} />
               <Panel label="Lifecycle" value={assetClass.lifecycle} />
               <Panel label="Valuation Driver" value={assetClass.valuationDriver} />
               <Panel label="Settlement" value={assetClass.settlementModel} />
@@ -54,6 +55,14 @@ export function MobileAssetClassView() {
               centerItems={assetClass.whatStaysCommon}
               rightTitle="専用化すべきもの"
               rightItems={assetClass.whatMustSpecialize}
+            />
+            <TripleList
+              leftTitle="帳票 / 台帳への影響"
+              leftItems={assetClass.booksAndRecordsImplications}
+              centerTitle="運用事故の起点"
+              centerItems={assetClass.failureModes}
+              rightTitle="監視ポイント"
+              rightItems={assetClass.operatorWatchpoints}
             />
           </div>
         ))}

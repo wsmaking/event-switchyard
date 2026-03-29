@@ -4,6 +4,7 @@ import appjava.clients.BackOfficeClient;
 import appjava.clients.GatewayClient;
 import appjava.clients.OmsClient;
 import appjava.market.MarketDataService;
+import appjava.order.OrderView;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -54,6 +55,9 @@ public final class ProductionEngineeringService {
         MarketDataRuntime marketDataRuntime = buildMarketDataRuntime(marketRuntime);
         SchemaRuntime schemaRuntime = buildSchemaRuntime(omsBusStats, backOfficeBusStats);
         CapacityRuntime capacityRuntime = buildCapacityRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
+        VenueSessionsRuntime venueSessionsRuntime = buildVenueSessionsRuntime(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
+        RolloutRuntime rolloutRuntime = buildRolloutRuntime(schemaRuntime, omsProjection, backOfficeProjection, marketDataRuntime);
+        BooksRuntime booksRuntime = buildBooksRuntime(marketDataRuntime);
         List<IncidentSignal> incidents = buildIncidents(gatewayRuntime, omsProjection, backOfficeProjection, marketDataRuntime, schemaRuntime, capacityRuntime);
 
         return new ProductionEngineeringSnapshot(
@@ -64,6 +68,9 @@ public final class ProductionEngineeringService {
             marketDataRuntime,
             schemaRuntime,
             capacityRuntime,
+            venueSessionsRuntime,
+            rolloutRuntime,
+            booksRuntime,
             incidents,
             buildOperatorSequence(incidents)
         );
@@ -265,6 +272,102 @@ public final class ProductionEngineeringService {
         );
     }
 
+    private VenueSessionsRuntime buildVenueSessionsRuntime(
+        GatewayRuntime gatewayRuntime,
+        ProjectionRuntime omsProjection,
+        ProjectionRuntime backOfficeProjection,
+        MarketDataRuntime marketDataRuntime
+    ) {
+        String dropCopyState = backOfficeProjection.deadLetters() > 0 || backOfficeProjection.pendingOrphans() > 0
+            ? "LAGGING"
+            : backOfficeProjection.lastEventAgeMs() > EVENT_STALE_WARNING_MS
+            ? "WATCH"
+            : "RUNNING";
+        String throttleState = gatewayRuntime.queueLength() >= GATEWAY_QUEUE_CRITICAL || gatewayRuntime.latencyP99Ns() >= GATEWAY_P99_CRITICAL_NS
+            ? "HARD_LIMIT"
+            : gatewayRuntime.queueLength() >= GATEWAY_QUEUE_WARNING || gatewayRuntime.latencyP99Ns() >= GATEWAY_P99_WARNING_NS
+            ? "SOFT_LIMIT"
+            : "OPEN";
+        String entitlementState = ("CRITICAL".equals(dropCopyState) || "STALE".equals(marketDataRuntime.state()))
+            ? "REDUCE_ONLY"
+            : "FULL_ACCESS";
+        List<VenueSession> sessions = List.of(
+            new VenueSession(
+                "Execution session",
+                gatewayRuntime.state(),
+                gatewayRuntime.healthStatus(),
+                Math.max(0L, gatewayRuntime.queueLength()),
+                "queue=" + gatewayRuntime.queueLength() + " / p99=" + formatMicros(gatewayRuntime.latencyP99Ns()),
+                List.of("gateway health", "venue heartbeat explanation", "cancel response lag")
+            ),
+            new VenueSession(
+                "Drop copy equivalent",
+                dropCopyState,
+                dropCopyState,
+                Math.max(0L, backOfficeProjection.lastEventAgeMs()),
+                "pending=" + backOfficeProjection.pendingOrphans() + " / DLQ=" + backOfficeProjection.deadLetters(),
+                List.of("fills と ledger の同期", "dead letter", "pending orphan")
+            )
+        );
+        return new VenueSessionsRuntime(sessions, throttleState, entitlementState);
+    }
+
+    private RolloutRuntime buildRolloutRuntime(
+        SchemaRuntime schemaRuntime,
+        ProjectionRuntime omsProjection,
+        ProjectionRuntime backOfficeProjection,
+        MarketDataRuntime marketDataRuntime
+    ) {
+        boolean replayReady = omsProjection.pendingOrphans() == 0
+            && omsProjection.deadLetters() == 0
+            && backOfficeProjection.pendingOrphans() == 0
+            && backOfficeProjection.deadLetters() == 0;
+        boolean consumerCompatible = !"MISMATCH_RISK".equals(schemaRuntime.state());
+        String state = replayReady && consumerCompatible ? "READY" : consumerCompatible ? "WATCH" : "BLOCKED";
+        List<String> checks = new ArrayList<>();
+        checks.add("contract=" + schemaRuntime.contractVersion());
+        checks.add("consumer compatible=" + consumerCompatible);
+        checks.add("replay ready=" + replayReady);
+        if ("STALE".equals(marketDataRuntime.state())) {
+            checks.add("feed stale 中は valuation guard を広げる");
+        }
+        return new RolloutRuntime(
+            state,
+            schemaRuntime.contractVersion(),
+            replayReady ? "READY" : "BLOCKED",
+            consumerCompatible ? "COMPATIBLE" : "MISMATCH_RISK",
+            checks
+        );
+    }
+
+    private BooksRuntime buildBooksRuntime(MarketDataRuntime marketDataRuntime) {
+        OrderView latestOrder = latestOrder();
+        if (latestOrder == null) {
+            return new BooksRuntime("NO_TRADE", "NO_TRADE", "READY", "NORMAL", List.of("直近注文が無い"));
+        }
+        BackOfficeClient.SettlementProjection settlementProjection = backOfficeClient.fetchSettlementProjection(latestOrder.id());
+        BackOfficeClient.StatementProjection statementProjection = backOfficeClient.fetchStatementProjection(latestOrder.id());
+        BackOfficeClient.MarginProjection marginProjection = backOfficeClient.fetchMarginProjection(accountId);
+        String valuationGuard = "STALE".equals(marketDataRuntime.state())
+            ? "WIDEN_GUARD"
+            : marginProjection != null && !"WITHIN_LIMIT".equals(marginProjection.breachStatus())
+            ? "RISK_GUARD"
+            : "NORMAL";
+        List<String> notes = new ArrayList<>();
+        notes.add(settlementProjection == null ? "settlement projection なし" : "settlement=" + settlementProjection.settlementStatus());
+        notes.add(statementProjection == null ? "statement projection なし" : "statement=" + statementProjection.statementStatus());
+        if (marginProjection != null) {
+            notes.add("margin=" + marginProjection.breachStatus() + " " + Math.round(marginProjection.utilizationPercent()) + "%");
+        }
+        return new BooksRuntime(
+            settlementProjection == null ? "NO_TRADE" : settlementProjection.settlementStatus(),
+            statementProjection == null ? "NO_TRADE" : statementProjection.statementStatus(),
+            "READY",
+            valuationGuard,
+            notes
+        );
+    }
+
     private List<IncidentSignal> buildIncidents(
         GatewayRuntime gatewayRuntime,
         ProjectionRuntime omsProjection,
@@ -373,6 +476,13 @@ public final class ProductionEngineeringService {
         return String.format(java.util.Locale.US, "%.2fus", nanos / 1_000.0);
     }
 
+    private OrderView latestOrder() {
+        return omsClient.fetchOrders().stream()
+            .sorted(Comparator.comparingLong(OrderView::submittedAt).reversed())
+            .findFirst()
+            .orElse(null);
+    }
+
     public record ProductionEngineeringSnapshot(
         long generatedAt,
         GatewayRuntime gateway,
@@ -381,6 +491,9 @@ public final class ProductionEngineeringService {
         MarketDataRuntime marketData,
         SchemaRuntime schema,
         CapacityRuntime capacity,
+        VenueSessionsRuntime venueSessions,
+        RolloutRuntime rollout,
+        BooksRuntime books,
         List<IncidentSignal> incidents,
         List<String> operatorSequence
     ) {
@@ -449,6 +562,41 @@ public final class ProductionEngineeringService {
         long gatewayQueueLength,
         long gatewayLatencyP99Ns,
         long projectionBacklog,
+        List<String> notes
+    ) {
+    }
+
+    public record VenueSessionsRuntime(
+        List<VenueSession> sessions,
+        String throttleState,
+        String entitlementState
+    ) {
+    }
+
+    public record VenueSession(
+        String name,
+        String state,
+        String dropCopyState,
+        long heartbeatAgeMs,
+        String currentValue,
+        List<String> notes
+    ) {
+    }
+
+    public record RolloutRuntime(
+        String state,
+        String contractVersion,
+        String replayReadiness,
+        String consumerCompatibility,
+        List<String> checks
+    ) {
+    }
+
+    public record BooksRuntime(
+        String settlementState,
+        String statementState,
+        String booksAndRecordsState,
+        String valuationGuard,
         List<String> notes
     ) {
     }

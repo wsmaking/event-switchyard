@@ -1,6 +1,7 @@
 package appjava.mobile;
 
 import appjava.account.AccountOverview;
+import appjava.asset.AssetClassCatalogService;
 import appjava.clients.BackOfficeClient;
 import appjava.clients.BackOfficeClient.BackOfficePosition;
 import appjava.clients.BackOfficeClient.LedgerEntry;
@@ -23,6 +24,7 @@ public final class MobileRoadmapService {
     private final BackOfficeClient backOfficeClient;
     private final OmsClient omsClient;
     private final ProductionEngineeringService productionEngineeringService;
+    private final AssetClassCatalogService assetClassCatalogService;
 
     public MobileRoadmapService(
         String accountId,
@@ -36,6 +38,7 @@ public final class MobileRoadmapService {
         this.backOfficeClient = backOfficeClient;
         this.omsClient = omsClient;
         this.productionEngineeringService = productionEngineeringService;
+        this.assetClassCatalogService = new AssetClassCatalogService();
     }
 
     public InstitutionalFlowResponse buildInstitutionalFlow() {
@@ -470,75 +473,25 @@ public final class MobileRoadmapService {
     }
 
     public AssetClassGuideResponse buildAssetClassGuide() {
+        AssetClassCatalogService.AssetClassCatalog catalog = assetClassCatalogService.snapshot();
         return new AssetClassGuideResponse(
-            System.currentTimeMillis(),
-            List.of(
-                new AssetClassLens(
-                    "Equities",
-                    "accepted -> working -> partial/fill/cancel/expire",
-                    "last / bid-ask / spread / board depth",
-                    "T+2 現物受渡",
-                    "single-name concentration、beta、liquidity",
-                    List.of("queue priority", "auction / halt", "corporate action"),
-                    List.of("order identity", "audit trail", "OMS/BackOffice 分離"),
-                    List.of("board depth", "settlement", "corporate action mapping")
-                ),
-                new AssetClassLens(
-                    "Options",
-                    "quote 取得 -> order -> fill -> position greek update",
-                    "volatility surface、time to expiry、skew",
-                    "premium と exercise / assignment の扱い",
-                    "delta / gamma / vega / theta",
-                    List.of("series selection", "expiry roll", "exercise cutoff"),
-                    List.of("order lifecycle", "audit / explainability"),
-                    List.of("valuation engine", "greeks refresh", "exercise event")
-                ),
-                new AssetClassLens(
-                    "FX",
-                    "RFQ / streaming quote -> fill -> nostro / cash ladder",
-                    "spot / forward points / carry",
-                    "currency pair ごとの cash movement",
-                    "spot exposure、carry、basis",
-                    List.of("session liquidity", "cutoff time", "settlement currency"),
-                    List.of("execution intent", "audit trail"),
-                    List.of("dual-currency ledger", "holiday calendar", "cutoff management")
-                ),
-                new AssetClassLens(
-                    "Rates",
-                    "order / RFQ -> fill -> accrual / curve update",
-                    "yield curve、duration、convexity",
-                    "coupon / accrual / settlement convention",
-                    "DV01、curve shock、basis",
-                    List.of("day count", "holiday convention", "curve roll"),
-                    List.of("position truth", "operator action trace"),
-                    List.of("valuation conventions", "curve build", "cashflow schedule")
-                ),
-                new AssetClassLens(
-                    "Credit",
-                    "axes / RFQ -> trade -> lifecycle events",
-                    "spread、hazard、recovery",
-                    "coupon / default event / settlement convention",
-                    "spread widening、jump-to-default",
-                    List.of("liquidity pockets", "reference obligation", "event handling"),
-                    List.of("trade capture", "audit", "allocation"),
-                    List.of("event engine", "default workflow", "valuation source hierarchy")
-                ),
-                new AssetClassLens(
-                    "Futures",
-                    "accepted -> fill -> variation margin",
-                    "front / next contract curve、basis",
-                    "daily settlement と margin call",
-                    "basis、roll、liquidity concentration",
-                    List.of("roll schedule", "session break", "variation margin"),
-                    List.of("order state", "audit trail"),
-                    List.of("contract calendar", "margin workflow", "roll logic")
-                )
-            ),
-            List.of(
-                "受注、状態遷移、監査の骨格は共通化できる",
-                "valuation、risk driver、settlement convention は asset class ごとに専用化する",
-                "共通化しすぎると金融の意味が消え、専用化しすぎると再利用性が消える"
-            ),
+            catalog.generatedAt(),
+            catalog.assetClasses().stream()
+                .map(assetClass -> new AssetClassLens(
+                    assetClass.assetClass(),
+                    assetClass.tradeInitiation(),
+                    assetClass.lifecycle(),
+                    assetClass.valuationDriver(),
+                    assetClass.settlementModel(),
+                    assetClass.riskDriver(),
+                    assetClass.operatorWatchpoints(),
+                    assetClass.whatStaysCommon(),
+                    assetClass.whatMustSpecialize(),
+                    assetClass.booksAndRecordsImplications(),
+                    assetClass.failureModes()
+                ))
+                .toList(),
+            catalog.boundaryPrinciples(),
             List.of(
                 new MobileLearningService.ImplementationAnchor(
                     "市場構造と execution quality",
@@ -556,6 +509,12 @@ public final class MobileRoadmapService {
                     "設計判断カード",
                     "/Users/fujii/Desktop/dev/event-switchyard/frontend/src/components/mobile/MobileCardsView.tsx",
                     "共通化と専用化の判断を反復する画面",
+                    null
+                ),
+                new MobileLearningService.ImplementationAnchor(
+                    "asset class catalog",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/asset/AssetClassCatalogService.java",
+                    "asset class ごとの lifecycle / valuation / books and records を backend で定義する正本",
                     null
                 )
             )
@@ -631,6 +590,25 @@ public final class MobileRoadmapService {
                     "maxAge=" + snapshot.marketData().maxTickAgeMs() + "ms / stale=" + snapshot.marketData().staleSymbolCount(),
                     List.of("tick freshness", "auction / halt watch", "spread widening", "benchmark 混同防止"),
                     snapshot.marketData().notes()
+                ),
+                new SessionMonitor(
+                    "Throttle / Entitlement",
+                    snapshot.venueSessions().throttleState(),
+                    "受注を止めるのか、減速させるのか、reduce-only にするのかを operator が即答できる必要がある。",
+                    "throttle=" + snapshot.venueSessions().throttleState() + " / entitlement=" + snapshot.venueSessions().entitlementState(),
+                    List.of("queue pressure", "latency budget", "margin breach", "feed stale"),
+                    List.of(
+                        "soft limit では説明可能性を維持しつつ速度を落とす",
+                        "reduce-only は新規リスクを増やさない意思決定"
+                    )
+                ),
+                new SessionMonitor(
+                    "Books / Settlement / Statement",
+                    snapshot.books().booksAndRecordsState(),
+                    "front 画面が正常でも books and records が閉じていなければ業務は終わらない。",
+                    "settlement=" + snapshot.books().settlementState() + " / statement=" + snapshot.books().statementState(),
+                    List.of("settlement projection", "statement projection", "valuation guard"),
+                    snapshot.books().notes()
                 )
             ),
             snapshot.incidents().stream().map(incident -> new IncidentDrill(
@@ -668,6 +646,13 @@ public final class MobileRoadmapService {
                         "BackOffice bus pending=" + snapshot.backOfficeProjection().busPending(),
                         "replay 前に additive-only を崩していないか確認する"
                     )
+                ),
+                new SchemaControl(
+                    "Rollout gate",
+                    "replay readiness と consumer compatibility が両方 READY の時だけ rollout を進める。",
+                    "schema 変更後に recovery drill が壊れる。",
+                    snapshot.rollout().state(),
+                    snapshot.rollout().checks()
                 ),
                 new SchemaControl(
                     "Operator wording",
@@ -724,7 +709,29 @@ public final class MobileRoadmapService {
                     )
                 )
             ),
+            snapshot.venueSessions().sessions().stream()
+                .map(session -> new VenueSession(
+                    session.name(),
+                    session.state(),
+                    session.dropCopyState(),
+                    session.heartbeatAgeMs(),
+                    session.currentValue(),
+                    session.notes()
+                ))
+                .toList(),
+            new RolloutState(
+                snapshot.rollout().state(),
+                snapshot.rollout().contractVersion(),
+                snapshot.rollout().replayReadiness(),
+                snapshot.rollout().consumerCompatibility(),
+                snapshot.rollout().checks()
+            ),
             snapshot.operatorSequence(),
+            List.of(
+                "1. session / drop copy / entitlement を分けて見る",
+                "2. replay readiness が READY か確認する",
+                "3. settlement / statement / valuation guard まで閉じているか確認する"
+            ),
             List.of(
                 new MobileLearningService.ImplementationAnchor(
                     "production engineering snapshot",
@@ -742,6 +749,12 @@ public final class MobileRoadmapService {
                     "market feed runtime",
                     "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/market/MarketDataService.java",
                     "tick freshness、venue state、spread を live runtime として返す",
+                    null
+                ),
+                new MobileLearningService.ImplementationAnchor(
+                    "asset class catalog",
+                    "/Users/fujii/Desktop/dev/event-switchyard/app-java/src/main/java/appjava/asset/AssetClassCatalogService.java",
+                    "multi-asset の違いを backend で定義するサービス",
                     null
                 )
             )
@@ -1418,13 +1431,16 @@ public final class MobileRoadmapService {
 
     public record AssetClassLens(
         String assetClass,
+        String tradeInitiation,
         String lifecycle,
         String valuationDriver,
         String settlementModel,
         String riskDriver,
         List<String> operatorWatchpoints,
         List<String> whatStaysCommon,
-        List<String> whatMustSpecialize
+        List<String> whatMustSpecialize,
+        List<String> booksAndRecordsImplications,
+        List<String> failureModes
     ) {
     }
 
@@ -1435,7 +1451,10 @@ public final class MobileRoadmapService {
         List<IncidentDrill> incidentDrills,
         List<SchemaControl> schemaControls,
         List<CapacityControl> capacityControls,
+        List<VenueSession> venueSessions,
+        RolloutState rolloutState,
         List<String> operatorSequence,
+        List<String> guidedSteps,
         List<MobileLearningService.ImplementationAnchor> implementationAnchors
     ) {
     }
@@ -1494,6 +1513,25 @@ public final class MobileRoadmapService {
         String currentValue,
         String status,
         List<String> operatorActions
+    ) {
+    }
+
+    public record VenueSession(
+        String name,
+        String state,
+        String dropCopyState,
+        long heartbeatAgeMs,
+        String currentValue,
+        List<String> notes
+    ) {
+    }
+
+    public record RolloutState(
+        String state,
+        String contractVersion,
+        String replayReadiness,
+        String consumerCompatibility,
+        List<String> checks
     ) {
     }
 }

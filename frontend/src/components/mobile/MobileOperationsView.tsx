@@ -74,6 +74,25 @@ export function MobileOperationsView() {
         ))}
       </Section>
 
+      <Section title="Venue / Drop Copy / Control Plane">
+        {data.venueSessions.map((session) => (
+          <div key={session.name} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-base font-semibold text-white">{session.name}</div>
+              <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] text-slate-300">{session.state}</div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Metric label="Drop Copy" value={session.dropCopyState} />
+              <Metric label="Heartbeat" value={`${session.heartbeatAgeMs}ms`} />
+            </div>
+            <div className="mt-3 rounded-2xl border border-white/8 bg-slate-950/55 px-3 py-3 text-sm leading-6 text-slate-300">
+              {session.currentValue}
+            </div>
+            <SubList title="Notes" items={session.notes} />
+          </div>
+        ))}
+      </Section>
+
       <Section title="Incident Drills">
         {data.incidentDrills.map((drill) => (
           <div key={drill.name} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
@@ -107,6 +126,18 @@ export function MobileOperationsView() {
         ))}
       </Section>
 
+      <Section title="Rollout Gate">
+        <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Metric label="State" value={data.rolloutState.state} />
+            <Metric label="Contract" value={data.rolloutState.contractVersion} />
+            <Metric label="Replay" value={data.rolloutState.replayReadiness} />
+            <Metric label="Consumer" value={data.rolloutState.consumerCompatibility} />
+          </div>
+          <SubList title="Checks" items={data.rolloutState.checks} />
+        </div>
+      </Section>
+
       <Section title="Capacity Controls">
         {data.capacityControls.map((item) => (
           <div key={item.title} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
@@ -127,6 +158,10 @@ export function MobileOperationsView() {
 
       <Section title="Operator Sequence">
         <List items={data.operatorSequence} />
+      </Section>
+
+      <Section title="Guided Steps">
+        <List items={data.guidedSteps} />
       </Section>
 
       <Section title="実装アンカー">
